@@ -1,0 +1,107 @@
+# ── Go ──────────────────────────────────────────────────────────────
+# Compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Coverage + test output
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Build artifacts
+bin/
+dist/
+tmp/
+temp/
+*.tmp
+
+# Vendored deps (we never vendor)
+vendor/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Top-level binaries from `go build -o arti-server ./cmd/...`
+/arti-server
+/arti
+
+# ── Env / config ───────────────────────────────────────────────────
+.env
+.env.local
+.env.backup
+.env.tmp
+.env.*.local
+
+# Local overrides for config files committed elsewhere
+*.local.yaml
+*.local.yml
+
+# Encrypted config payloads (the .yaml form is committed via al-tool;
+# we ignore the decrypted shadow files developers may create locally)
+config/**/*.decrypted.yaml
+config/**/*.decrypted.yml
+
+# ── Frontend (Next.js under web/) ──────────────────────────────────
+node_modules/
+web/node_modules/
+web/.next/
+web/out/
+web/.turbo/
+web/coverage/
+web/*.tsbuildinfo
+web/.pnp
+web/.pnp.*
+web/.vercel
+
+# Lockfile policy: keep web/package-lock.json (npm) committed; ignore
+# alternate package managers if devs accidentally use them.
+web/yarn.lock
+web/pnpm-lock.yaml
+web/bun.lock
+web/bun.lockb
+
+# Frontend env (project standard: server-side env lives in arti-server)
+web/.env
+web/.env.local
+web/.env.*.local
+
+# ── Docker / docker-compose data ───────────────────────────────────
+deployments/docker-compose/data/
+deployments/docker-compose/.env
+
+# ── Editor / IDE ───────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Claude Code ────────────────────────────────────────────────────
+# Agent worktrees (created by the agent under here). Each is a full
+# checkout of the repo — never check them in (git would treat them as
+# embedded repos). They are disposable; `git worktree prune` cleans up
+# stale ones.
+.claude/worktrees/
+
+# ── Misc ───────────────────────────────────────────────────────────
+*.log
+site/
+*.pem
+*.key
+
+# Local sample data / playgrounds developers may create
+playground/
+scratch/
+samples/
+
+
+# Playwright MCP scratch artifacts (browser snapshots / consoles)
+.playwright-mcp/
+build*-snapshot.md

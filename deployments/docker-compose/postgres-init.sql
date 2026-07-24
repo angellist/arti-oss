@@ -1,0 +1,1 @@
+CREATE DATABASE arti_test;
