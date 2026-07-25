@@ -1,0 +1,93 @@
+name: arti
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: arti-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: arti_dev
+    ports:
+      - "5436:5432"
+    volumes:
+      - arti_pg_data:/var/lib/postgresql/data
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio:
+    image: minio/minio:latest
+    container_name: arti-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9210:9000"
+      - "9211:9001"
+    volumes:
+      - arti_minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb -p local/arti-dev || true &&
+      mc mb -p local/arti-test || true &&
+      mc anonymous set download local/arti-dev || true
+      "
+
+  # Dex — a lightweight OIDC issuer for developing and e2e-testing the
+  # built-in `oidc` login mode (auth.mode=oidc). Static test user:
+  # admin@example.com / password. See dex-config.yaml.
+  dex:
+    image: dexidp/dex:v2.41.1
+    container_name: arti-dex
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./dex-config.yaml:/etc/dex/config.yaml:ro
+
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: arti-opensearch
+    environment:
+      - discovery.type=single-node
+      # LOCAL DEV ONLY: no auth on this node so `make dev-up` needs no setup.
+      # Real deployments use a managed/secured OpenSearch endpoint with
+      # basic auth or IAM — see web/docs/operations/opensearch.md.
+      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_JAVA_OPTS=-Xms256m -Xmx256m
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - arti_os_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  arti_pg_data:
+  arti_minio_data:
+  arti_os_data:
