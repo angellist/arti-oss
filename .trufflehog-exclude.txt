@@ -1,0 +1,16 @@
+# local development environment fixture credentials
+.*\.env\.example$
+# local PostgreSQL and MinIO compose fixture credentials
+.*deployments/docker-compose/docker-compose\.app\.yml$
+.*deployments/docker-compose/docker-compose\.yml$
+# local Dex client and password fixture
+.*deployments/docker-compose/dex-config\.yaml$
+# Slack notification test token fixture
+.*internal/slacknotify/client_test\.go$
+# configuration parser API/Slack fixture values
+.*internal/config/config_test\.go$
+# redacted API-key documentation examples
+.*web/docs/guides/api\.md$
+# API-key test fixture (historical/current filename variants)
+.*web/lib/api-keys\.test\.ts$
+.*web/lib/upload-keys\.test\.ts$
