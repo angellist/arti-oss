@@ -1,0 +1,6 @@
+flowchart LR
+    C[Client / CLI] -->|"POST /api/artifacts<br/>multipart or content_base64"| A[arti server]
+    A -->|"applyAttachmentInvariants<br/>slugless + creator-only"| P[(Postgres<br/>pointer row)]
+    A -->|"blobKey: attachments/&lt;shard&gt;/&lt;uuid&gt;"| S[(S3 blob)]
+    V[Creator views /a/&lt;uuid&gt;] -->|inline if previewable| A
+    A -->|fetch bytes| S

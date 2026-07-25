@@ -1,0 +1,14 @@
+flowchart LR
+    user[You: CLI or web upload]
+    server[arti-server]
+    pg[(Postgres: metadata + small text)]
+    s3[(S3 / MinIO: large bytes, zips, files)]
+    link[Canonical link /s slug or /a uuid]
+    viewer[Viewer or fetcher opens the link]
+
+    user -->|upload content| server
+    server -->|row + version| pg
+    server -->|blob ref| s3
+    server -->|returns| link
+    link --> viewer
+    viewer -->|read| server
