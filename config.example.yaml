@@ -1,0 +1,62 @@
+# Example arti configuration file.
+#
+# Point ARTI_CONFIG_FILE at a copy of this file. Resolution order:
+# built-in defaults → this file → environment variables (env wins).
+#
+# Secrets never live here — they are environment-only, and an unknown key
+# (including a secret's env name) fails startup. Set these in the process
+# environment instead:
+#
+#   ARTI_DATABASE_URL         Postgres DSN (required)
+#   AWS_ACCESS_KEY_ID /       object-store static keys (omit on AWS to use
+#     AWS_SECRET_ACCESS_KEY   the ambient IAM chain)
+#   JWT_SIGNING_KEY           session/token signing key, ≥32 bytes (required
+#                             whenever auth is enabled)
+#   AUTH_OIDC_CLIENT_SECRET   OAuth client secret for the oidc login mode
+#
+# Full key reference: web/docs/reference/configuration.md. Verify any change
+# with `arti-server doctor`.
+
+server:
+  addr: ":8090"
+  base_url: https://arti.example.com # the canonical, user-facing URL
+  cookie_secure: true                # true whenever base_url is https
+
+auth:
+  mode: oidc # oidc | proxy | disabled
+  # The issuer URL exactly as the IdP publishes it (including any path).
+  # Register arti as a client with redirect URI <base_url>/auth/callback.
+  issuer_url: https://id.example.com
+  client_id: arti
+  audience: arti
+  # Who may sign in: email domains (empty admits NOBODY), plus optional
+  # group membership from the ID token.
+  allowed_domains:
+    - example.com
+  required_groups: []
+  # How long a login-captured IdP group snapshot stays valid for `idp:<name>`
+  # access grants. Every interactive login refreshes it; grants fail closed
+  # once it ages out, so idp: grants need a login at least this often. 0
+  # disables idp: resolution.
+  idp_groups_max_age: 336h
+  # Where /auth/logout lands after clearing the session; empty → back to arti.
+  logout_url: ""
+
+admin:
+  # The ADMIN role floor, re-asserted on boot. Empty → no administrators.
+  emails:
+    - admin@example.com
+
+storage:
+  endpoint: "" # empty = AWS S3; host[:port] for MinIO, R2, or another S3-compatible store
+  bucket: arti
+  region: us-east-1
+  use_ssl: true # plaintext is an explicit opt-out for local MinIO only
+
+# Optional full-text search; empty endpoint = Postgres fallback.
+search:
+  endpoint: ""
+
+apps:
+  # Who may iframe served APP artifacts (CSP frame-ancestors source list).
+  frame_ancestors: "'self'"
