@@ -1,0 +1,109 @@
+openapi: 3.0.3
+info:
+  title: arti
+  version: 0.1.0
+  description: |
+    Artifact service — REST + MCP. Single Postgres table, S3-backed blobs,
+    OIDC/session auth. Guides and reference render in-app at /help.
+servers:
+  - url: https://arti.example.com
+  - url: http://localhost:8090
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  schemas:
+    ArtifactInfo:
+      type: object
+      properties:
+        artifact_id:   { type: string, format: uuid }
+        artifact_type: { type: string, enum: [TEXT, PACKAGE] }
+        named_slug:    { type: string, nullable: true }
+        version:       { type: integer, nullable: true }
+        title:         { type: string }
+        description:   { type: string, nullable: true }
+        content_type:  { type: string }
+        size_bytes:    { type: integer, format: int64, nullable: true }
+        sha256:        { type: string, nullable: true }
+        creator:       { type: string }
+        scope:         { type: string, nullable: true }
+        labels:        { type: array, items: { type: string } }
+        metadata:      { type: object, additionalProperties: true }
+        created_at:    { type: string, format: date-time }
+        modified_at:   { type: string, format: date-time }
+        deleted_at:    { type: string, format: date-time, nullable: true }
+        url:           { type: string }
+    Error:
+      type: object
+      required: [detail, code]
+      properties:
+        detail: { type: string }
+        code:   { type: string }
+security:
+  - bearerAuth: []
+paths:
+  /api/artifacts:
+    get:
+      summary: List artifacts (filterable)
+      parameters:
+        - { in: query, name: limit,            schema: { type: integer, default: 50 } }
+        - { in: query, name: offset,           schema: { type: integer, default: 0 } }
+        - { in: query, name: type,             schema: { type: string } }
+        - { in: query, name: creator,          schema: { type: string } }
+        - { in: query, name: scope,            schema: { type: string } }
+        - { in: query, name: label,            schema: { type: array, items: { type: string } }, explode: true }
+        - { in: query, name: include_archived, schema: { type: boolean } }
+      responses: { "200": { description: ok } }
+    post:
+      summary: Create / version an artifact
+      responses: { "201": { description: created } }
+  /api/artifacts/search:
+    get:
+      summary: Substring search
+      parameters:
+        - { in: query, name: q, required: true, schema: { type: string } }
+      responses: { "200": { description: ok } }
+  /api/artifacts/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    get: { summary: Fetch content, responses: { "200": { description: ok } } }
+    delete: { summary: Archive, responses: { "204": { description: archived } } }
+  /api/artifacts/{id}/meta:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    get: { summary: Metadata, responses: { "200": { description: ok } } }
+  /api/artifacts/{id}/files:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    get: { summary: PACKAGE manifest, responses: { "200": { description: ok } } }
+  /api/artifacts/{id}/files/{path}:
+    parameters:
+      - { in: path, name: id,   required: true, schema: { type: string, format: uuid } }
+      - { in: path, name: path, required: true, schema: { type: string } }
+    get: { summary: Single file in PACKAGE, responses: { "200": { description: ok } } }
+  /api/artifacts/by-slug/{slug}:
+    parameters:
+      - { in: path, name: slug, required: true, schema: { type: string } }
+    get: { summary: Metadata by slug, responses: { "200": { description: ok } } }
+    delete: { summary: Archive all versions, responses: { "200": { description: archived } } }
+  /api/artifacts/by-slug/{slug}/raw:
+    parameters:
+      - { in: path,  name: slug,    required: true, schema: { type: string } }
+      - { in: query, name: version, schema: { type: integer } }
+    get: { summary: Content by slug, responses: { "200": { description: ok } } }
+  /api/artifacts/by-slug/{slug}/versions:
+    parameters:
+      - { in: path, name: slug, required: true, schema: { type: string } }
+    get: { summary: All versions, responses: { "200": { description: ok } } }
+  /api/artifacts/by-slug/{slug}/files:
+    parameters:
+      - { in: path, name: slug, required: true, schema: { type: string } }
+    get: { summary: PACKAGE manifest by slug, responses: { "200": { description: ok } } }
+  /api/artifacts/by-slug/{slug}/files/{path}:
+    parameters:
+      - { in: path, name: slug, required: true, schema: { type: string } }
+      - { in: path, name: path, required: true, schema: { type: string } }
+    get: { summary: Single file in PACKAGE by slug, responses: { "200": { description: ok } } }
+  /mcp:
+    post:
+      summary: MCP (Streamable HTTP) endpoint — JSON-RPC 2.0
+      responses: { "200": { description: ok } }

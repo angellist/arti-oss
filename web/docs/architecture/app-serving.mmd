@@ -1,0 +1,15 @@
+flowchart TD
+    page["Sandboxed APP page<br/>(opaque origin, no cookie)<br/>window.arti.callTool(server, tool, args)"]
+    proxy["apps proxy — POST /api/apps/mcp<br/>(public group, Bearer + CORS)<br/>1 verify app token (scope app:&lt;id&gt;)<br/>2 re-check domain allowlist<br/>3 load APP, re-check read access<br/>4 enforce arti-app.json allowlist<br/>5 resolve named server"]
+    llm["llm completer<br/>(Auth: service, in-process)"]
+    obo["OBO broker (internal/obo)<br/>per-user upstream Bearer"]
+    mcp["mcpclient → tools/call"]
+    upstream["Upstream MCP<br/>(gateway proxy / arti-self)"]
+
+    page -->|"Bearer app token, credentials:omit"| proxy
+    proxy -->|"Auth: service"| llm
+    proxy -->|"Auth: oauth → BearerFor"| obo
+    obo -->|"401 + authorize_url if no token"| page
+    proxy --> mcp
+    mcp --> upstream
+    upstream -->|"result JSON"| page

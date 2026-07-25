@@ -1,0 +1,62 @@
+version: 2
+project_name: arti
+
+changelog:
+  groups:
+    - title: Breaking Changes
+      regexp: '^(feat|fix|refactor|perf|docs|style|test|build|ci|chore)(\(.+\))?!: .+$'
+      order: 0
+    - title: Features
+      regexp: '^feat(\(.+\))?: .+$'
+      order: 1
+    - title: Bug Fixes
+      regexp: '^fix(\(.+\))?: .+$'
+      order: 2
+    - title: Documentation
+      regexp: '^docs(\(.+\))?: .+$'
+      order: 3
+    - title: Other Changes
+      order: 999
+  filters:
+    exclude:
+      - '^chore:'
+      - '^ci:'
+      - '^build:'
+      - '^typo'
+      - '^merge'
+
+builds:
+  - id: arti-server
+    main: ./cmd/arti-server
+    binary: arti-server
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+  - id: arti
+    main: ./cmd/arti
+    binary: arti
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+
+archives:
+  - id: cli
+    ids: [arti]
+    name_template: "arti_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+  - id: server
+    ids: [arti-server]
+    name_template: "arti-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: angellist
+    name: arti-oss
+  draft: false
+  prerelease: auto
