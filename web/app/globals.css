@@ -1,0 +1,122 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  /* System UI mono — uses the OS-native monospace (SF Mono on macOS,
+     Cascadia Mono on Windows, etc.) so artifact code surfaces box-
+     align with the user's editor. No Google Fonts fetch. */
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-serif: var(--font-petrona);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/*
+ * Disable contextual alternates inside code/pre so " --" doesn't get
+ * ligatured into one glyph. (Was added when Geist Mono was the body
+ * mono; system UI mono fonts mostly don't do this, but keeping the
+ * rule defensively in case a future swap brings back a font that does.)
+ */
+code,
+pre,
+kbd,
+samp {
+  font-variant-ligatures: none;
+  font-feature-settings: "calt" 0, "liga" 0, "dlig" 0;
+}
+
+/*
+ * Sizing policy:
+ *   - Prose body text is bumped up so long-form markdown reads
+ *     comfortably (default Tailwind prose is 16px / 1.75).
+ *   - Block mono (fenced code, ASCII diagrams) is *smaller* than prose
+ *     and runs at a tighter line-height so multi-line drawings read as
+ *     a single connected figure, not as gappy rows.
+ *   - Inline `code` chips inherit prose sizing (they're embedded in
+ *     reader text) and are NOT covered by these block rules — local
+ *     styles like the 10px access-editor help chips win.
+ */
+.prose {
+  /* Main reading text. Tailwind's prose default is 16px; dialed down to
+     14px (the "arti-260710" style picked via the md-style-tuner artifact)
+     so dense reference docs read a touch less shouty and the paragraph
+     spacing breathes. Block-mono (pre) stays at 11.25px and inline `code`
+     at 0.79em (their own rules below / in the component), so monospace is
+     unaffected and the prose↔code size gap is preserved.
+
+     These are UNLAYERED rules, so they win over any `@layer utilities`
+     text-size class on the element — which is why the viewer's font-size
+     control multiplies HERE, via the inherited `--arti-text-scale` var
+     (see TEXT_SCALE in ViewerToolbar). ArtifactViewer sets that var on the
+     doc container; everywhere else (help, full-page, comments) it's unset,
+     so the fallback of 1 keeps these sizes exactly as before. */
+  font-size: calc(14px * var(--arti-text-scale, 1));
+}
+.prose pre,
+.prose pre code {
+  font-size: calc(11.25px * var(--arti-text-scale, 1));
+  line-height: 1.25;
+}
+/* Non-prose <pre> (Raw Source, JSON pretty-print, attachments) keeps the
+   pre-arti-260710 mono sizing — those surfaces weren't part of the tuned
+   markdown style and shouldn't tighten with it. */
+pre {
+  font-size: calc(12.5px * var(--arti-text-scale, 1));
+  line-height: 1.45;
+}
+
+/*
+ * Inside .prose markdown, the typography plugin's prose-code rules
+ * inadvertently style <code> elements that live inside <pre> too,
+ * producing a double-background and a small left padding that looks
+ * like the first row is indented. Strip the inner padding/background
+ * so a fenced code block looks like a single flat panel.
+ */
+.prose pre > code,
+.prose pre code {
+  background-color: transparent !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  font-weight: 400 !important;
+}
+
+/*
+ * arti-260710 style, table + blockquote pieces that Tailwind's prose-*
+ * variants can't express:
+ *   - slimmer table cells than the typography plugin's 0.667em padding,
+ *     while keeping the plugin's flush first/last column (the padding
+ *     shorthand would otherwise also override those edge rules);
+ *   - no auto “ ” quote marks around blockquotes (the plugin injects
+ *     them via p::before/::after content, unreachable from prose-*).
+ * Unlayered on purpose, same as the sizing rules above.
+ */
+.prose thead th {
+  padding: 0 9px 3.5px;
+}
+.prose tbody td {
+  padding: 3.5px 9px;
+}
+.prose thead th:first-child,
+.prose tbody td:first-child {
+  padding-inline-start: 0;
+}
+.prose thead th:last-child,
+.prose tbody td:last-child {
+  padding-inline-end: 0;
+}
+.prose blockquote p:first-of-type::before,
+.prose blockquote p:last-of-type::after {
+  content: none;
+}

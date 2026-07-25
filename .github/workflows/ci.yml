@@ -1,0 +1,97 @@
+# Public CI: the same gate battery the README documents, from a clean
+# machine with no private access. Every step here must pass before a
+# public batch is published.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install code-gen tools
+        run: |
+          go install github.com/pressly/goose/v3/cmd/goose@v3.27.1
+          go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+          go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.8.0
+
+      - run: make setup
+
+      - name: Start Postgres + MinIO (+ OpenSearch, Dex)
+        run: make dev-up
+
+      - run: make migrate migrate-test
+
+      - run: make lint
+
+      - name: Go tests (unit + integration)
+        run: make test
+
+      - name: Web tests + build
+        working-directory: web
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Docker build (api target)
+        run: docker build --target api .
+
+      - name: End-to-end smoke
+        run: |
+          make build
+          set -a && source .env.example && set +a
+          export ARTI_AUTH_DISABLED=false
+          export ARTI_TEST_MODE=true
+          export AUTH_ALLOWED_DOMAINS=example.com
+          export JWT_SIGNING_KEY="$(openssl rand -hex 32)"
+          ./bin/arti-server serve &
+          (cd web && PORT=3031 npm run dev > /tmp/web.log 2>&1 &)
+          ready=0
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8095/healthz > /dev/null 2>&1 &&
+               curl -fsS http://localhost:3031/login > /dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != 1 ]; then
+            echo "server or web never became healthy" >&2
+            tail -50 /tmp/web.log || true
+            exit 1
+          fi
+          ./scripts/e2e-smoke.sh
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect --source /repo --no-banner --redact
+
+      - name: trufflehog
+        run: |
+          docker run --rm -v "$PWD:/repo" trufflesecurity/trufflehog:latest \
+            git file:///repo --results=verified,unverified,unknown \
+            --exclude-paths=/repo/.trufflehog-exclude.txt --fail
