@@ -1,0 +1,55 @@
+# Local-evaluation profile: the full arti application in one command, built
+# from this repository — Postgres, MinIO, migrations, arti-server, and the
+# web UI, with authentication disabled. Browse http://localhost:8090 when up.
+#
+#   docker compose -f deployments/docker-compose/docker-compose.yml \
+#                  -f deployments/docker-compose/docker-compose.app.yml \
+#                  up -d --build
+#
+# This is an EVALUATION profile: auth is off and everything is attributed to
+# a local identity. For a real deployment pick an auth mode (see
+# web/docs/reference/configuration.md) and run `arti-server doctor` against
+# your configuration.
+services:
+  migrate:
+    build:
+      context: ../..
+      target: api
+    command: ["migrate"]
+    environment:
+      ARTI_DATABASE_URL: postgres://postgres:postgres@postgres:5432/arti_dev?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  server:
+    build:
+      context: ../..
+      target: api
+    ports:
+      - "8090:8090"
+    environment:
+      ARTI_DATABASE_URL: postgres://postgres:postgres@postgres:5432/arti_dev?sslmode=disable
+      S3_ENDPOINT: minio:9000
+      S3_BUCKET: arti-dev
+      S3_USE_SSL: "false"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      ARTI_BASE_URL: http://localhost:8090
+      ARTI_WEB_URL: http://web:3030
+      ARTI_AUTH_DISABLED: "true"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: ../../web
+      target: web
+      args:
+        NEXT_PUBLIC_ARTI_AUTH_DISABLED: "true"
+    environment:
+      ARTI_API_URL: http://server:8090

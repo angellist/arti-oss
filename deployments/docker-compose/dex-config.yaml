@@ -1,0 +1,24 @@
+# Dex configuration for local development and e2e of the built-in `oidc`
+# login mode (auth.mode=oidc). Static user: admin@example.com / password.
+issuer: http://localhost:5556/dex
+storage:
+  type: memory
+web:
+  http: 0.0.0.0:5556
+oauth2:
+  skipApprovalScreen: true
+staticClients:
+  - id: arti
+    secret: arti-dev-secret
+    name: arti (local)
+    redirectURIs:
+      - http://localhost:8128/auth/callback
+      - http://localhost:8095/auth/callback
+      - http://localhost:3031/auth/callback
+enablePasswordDB: true
+staticPasswords:
+  - email: admin@example.com
+    # bcrypt of "password"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: admin
+    userID: 08a8684b-db88-4b73-90a9-3cd1661f5466

@@ -1,0 +1,25 @@
+flowchart TB
+  req[Incoming request]
+  req --> svc{X-Arti-Service-Secret matches?}
+  svc -- yes --> ok[Admit as service identity]
+  svc -- no --> hdr{X-Auth-Request-Email present? ProtectedIngress}
+
+  hdr -- yes --> gates1{Domain allowlist and required groups}
+  gates1 -- pass --> ok
+  gates1 -- fail --> forbid[403 forbidden]
+
+  hdr -- no --> tok{Bearer / cookie token present?}
+  tok -- no --> unauth[401 unauthorized]
+  tok -- yes --> oidc{OIDC verify -- Dex JWKS}
+  oidc -- valid --> gates2{Domain and groups}
+  gates2 -- pass --> ok
+  gates2 -- fail --> forbid
+  oidc -- not OIDC --> hs{HS256 verify -- session or CLI token}
+  hs -- invalid --> unauth
+  hs -- app-scoped or embed-scoped --> reject[Reject on session routes]
+  hs -- valid user / upload --> ok
+
+  ok --> guard{Upload-scoped token?}
+  guard -- yes --> allow[EnforceUploadScope -- create/append/read only, family check, body cap]
+  guard -- no --> handler[Handler]
+  allow --> handler
