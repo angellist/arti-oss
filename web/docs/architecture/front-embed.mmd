@@ -1,0 +1,13 @@
+flowchart TD
+    front["app.frontapp.com<br/>(cross-site; no arti_session cookie)"]
+    shell["GET /embed/{surface}<br/>(no ?slug=) → Front shell<br/>reads conversation id,<br/>builds slug from shell_slug"]
+    doc["GET /embed/{surface}?slug=&auth_secret=<br/>1 constant-time secret compare<br/>2 slug_allow match<br/>3 resolve + read-check as surface email<br/>→ ServeForEmbed (app-grade sandbox)"]
+    files["GET /embed/{surface}/_files/{token}/*<br/>VerifyEmbedToken → email + artifact id"]
+    art["artifacts.ServeForEmbed / ServeEmbedFile"]
+
+    front -->|"frames (frame-ancestors origin)"| shell
+    shell -->|"frames same-origin (frame-ancestors 'self')"| doc
+    doc -->|"PACKAGE/APP sibling assets via &lt;base href&gt;"| files
+    doc --> art
+    files --> art
+    art -->|"miss → placeholder, never JSON 404"| doc

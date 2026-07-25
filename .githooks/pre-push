@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# Pre-push gate for direct pushes to main.
+#
+# A push to main can trigger a deploy with no human review in between.
+# This hook runs the same lint CI runs, plus unit tests, before letting
+# a push to main through, so a broken build never reaches deploy.
+#
+# It only gates pushes whose remote ref is refs/heads/main; everything
+# else (feature branches, tags) pushes without delay.
+#
+# Install: `make hooks` (sets core.hooksPath to .githooks).
+# Escape hatch for a genuine emergency: `git push --no-verify`.
+
+set -euo pipefail
+
+protected="refs/heads/main"
+gated=0
+
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one per ref.
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+	if [ "$remote_ref" = "$protected" ]; then
+		gated=1
+	fi
+done
+
+if [ "$gated" -eq 0 ]; then
+	exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "pre-push: pushing to main — running lint + unit tests…"
+
+if ! make lint; then
+	echo "pre-push: BLOCKED — 'make lint' failed. Fix it (gofmt -w / go vet) before pushing to main." >&2
+	exit 1
+fi
+
+if ! make test-unit; then
+	echo "pre-push: BLOCKED — 'make test-unit' failed. Don't push a red build to main." >&2
+	exit 1
+fi
+
+echo "pre-push: checks passed — pushing to main."
