@@ -14,7 +14,7 @@
     "fflate": "^0.8.3",
     "isomorphic-dompurify": "^3.14.0",
     "marked": "^18.0.3",
-    "next": "16.2.6",
+    "next": "16.2.11",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
