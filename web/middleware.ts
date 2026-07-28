@@ -31,5 +31,10 @@ export const config = {
   // dev we hit Go directly anyway).
   // comments-embed.js must stay public — a sandboxed served-HTML page loads
   // it as a subresource and can't send the session cookie.
-  matcher: ["/((?!_next/|favicon|api/|auth/|login|comments-embed).*)"],
+  // logo.png likewise: it is the login page's own logo, so it is always
+  // fetched by someone with no session, and next/image re-fetches it
+  // server-side (cookie-less) to optimize it. Redirecting it made the
+  // optimizer receive a 307 instead of an image and return 400, leaving the
+  // logo broken on the one page guaranteed to be viewed unauthenticated.
+  matcher: ["/((?!_next/|favicon|logo\\.png|api/|auth/|login|comments-embed).*)"],
 };
