@@ -15,7 +15,7 @@ func TestSetContentSecurity_H3(t *testing.T) {
 		ct      string
 		wantCSP string
 	}{
-		{"text/html; charset=utf-8", "sandbox allow-scripts allow-top-navigation-by-user-activation"},
+		{"text/html; charset=utf-8", "sandbox allow-scripts allow-top-navigation-by-user-activation allow-downloads"},
 		{"image/svg+xml", "sandbox"},
 		{"application/xml", "sandbox"},
 		{"text/xml", "sandbox"},
@@ -92,8 +92,8 @@ func TestSetContentSecurityEmbed_H3Scriptable(t *testing.T) {
 // scriptable SVG/XML) must fall through to the normal script-safe CSP, never
 // gaining scripts or popups. Non-full-page HTML is unchanged.
 func TestSetContentSecurityMaybeFullPage(t *testing.T) {
-	const fullPageHTML = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
-	const normalHTML = "sandbox allow-scripts allow-top-navigation-by-user-activation"
+	const fullPageHTML = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads"
+	const normalHTML = "sandbox allow-scripts allow-top-navigation-by-user-activation allow-downloads"
 	cases := []struct {
 		ct       string
 		fullPage bool

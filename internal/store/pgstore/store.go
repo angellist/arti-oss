@@ -14,6 +14,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/google/uuid"
@@ -77,6 +80,11 @@ type Config struct {
 	BucketPrefixText       string // default "artifacts"
 	BucketPrefixPackage    string // default "packages"
 	BucketPrefixAttachment string // default "attachments"
+	// IdPGroupsMaxAge bounds how stale a captured IdP-group snapshot may be
+	// before its `idp:` tokens stop resolving (fail closed). Zero or negative
+	// disables `idp:` resolution entirely — the safe default when the deployment
+	// isn't capturing IdP groups.
+	IdPGroupsMaxAge time.Duration
 }
 
 func (c *Config) defaults() {
@@ -101,13 +109,20 @@ type Store struct {
 	// groups caches the (small) user_groups table in memory so per-request
 	// access checks resolve a caller's group membership without a DB hit.
 	// Zero value is ready to use (see groups.go). Invalidated on every group
-	// mutation; also expires on a short TTL to bound cross-instance staleness.
+	// mutation and cross-replica notification; it is served only while the
+	// invalidation bus is healthy and also expires on a short TTL.
 	groups groupCache
 
 	// rbac caches the (small) roles + role_assignments tables so per-request
 	// permission checks (HasPermission) avoid DB hits. Same cache discipline as
-	// groups. Zero value is ready to use (see roles.go).
+	// groups. Zero value is ready to use (see roles.go); without a healthy
+	// invalidation bus, reads fail closed to the database.
 	rbac rbacCache
+
+	busMu sync.RWMutex
+	bus   *invalidationBus
+
+	busHealthy atomic.Bool
 }
 
 func New(pool *pgxpool.Pool, b blob.Store, cfg Config) *Store {
@@ -130,6 +145,11 @@ type PutInput struct {
 	Labels        []string
 	Metadata      json.RawMessage // optional, schema-less
 	AllowedAccess []string        // glob-on-email patterns; nil → default '{*}'
+	// AllowedWrite is the per-version write list. nil → SQL NULL (write
+	// follows read — the back-compat default). Non-nil (incl. empty) is
+	// authoritative; empty == creator-only. Unioned into AllowedAccess on
+	// insert so it stays a subset (read paths untouched).
+	AllowedWrite []string
 
 	// CheckAccess, if set and NamedSlug is non-nil, is called against a
 	// fresh read of the slug's current latest version — taken right here,
@@ -151,6 +171,7 @@ func applyAttachmentInvariants(in PutInput) PutInput {
 	if in.ArtifactType == TypeAttachment {
 		in.NamedSlug = nil
 		in.AllowedAccess = []string{} // empty (not nil) == creator-only
+		in.AllowedWrite = []string{}  // creator-only writes too
 	}
 	return in
 }
@@ -241,6 +262,11 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 	if access == nil {
 		access = []string{"*"}
 	}
+	// ⊆ invariant: a write grant always implies read, so union the write
+	// tokens into access. nil AllowedWrite (mirror) leaves access untouched.
+	if in.AllowedWrite != nil {
+		access = unionTokens(access, in.AllowedWrite)
+	}
 
 	row, err := s.q.InsertArtifact(ctx, sqlc.InsertArtifactParams{
 		ArtifactID:    pgUUID(id),
@@ -260,6 +286,7 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 		Labels:        in.Labels,
 		Metadata:      meta,
 		AllowedAccess: access,
+		AllowedWrite:  in.AllowedWrite,
 	})
 	if err != nil {
 		return sqlc.Artifact{}, fmt.Errorf("pgstore: insert: %w", err)
@@ -284,6 +311,7 @@ type AppendInput struct {
 	Scopes        []string
 	Labels        []string
 	AllowedAccess *[]string
+	AllowedWrite  *[]string // nil → inherit prior version's write list
 
 	// CheckAccess, if set, is called every time the retry loop below finds
 	// an existing prior version — including on a retry after losing the
@@ -347,6 +375,7 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 				Scopes:        in.Scopes,
 				Labels:        in.Labels,
 				AllowedAccess: dereferenceSlice(in.AllowedAccess),
+				AllowedWrite:  dereferenceSlice(in.AllowedWrite),
 			})
 			if err == nil || !isUniqueViolation(err) {
 				return row, err
@@ -418,6 +447,12 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 		} else {
 			access = prev.AllowedAccess
 		}
+		var write []string
+		if in.AllowedWrite != nil {
+			write = *in.AllowedWrite
+		} else {
+			write = prev.AllowedWrite
+		}
 
 		slug := in.NamedSlug
 		row, err := s.Put(ctx, PutInput{
@@ -431,6 +466,7 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 			Scopes:        scopes,
 			Labels:        labels,
 			AllowedAccess: access,
+			AllowedWrite:  write,
 		})
 		if err == nil {
 			return row, nil
@@ -1063,25 +1099,51 @@ func (s *Store) UpdateScopes(ctx context.Context, id uuid.UUID, scopes []string)
 	})
 }
 
-// UpdateAccess replaces the allowed_access patterns on a single
-// artifact version. nil is normalized to `['*']` (the everyone-default)
-// so the column never holds NULL. Permission enforced at the HTTP
-// layer; this is per-version, not per-slug — caller may need to call
-// it once per version to propagate.
-func (s *Store) UpdateAccess(ctx context.Context, id uuid.UUID, access []string) (int64, error) {
+// UpdateAccess replaces allowed_access AND allowed_write on a single artifact
+// version. access nil → `['*']` (the everyone-default, never NULL). write nil
+// → SQL NULL (write follows read — the back-compat default); non-nil (incl.
+// empty) is authoritative, empty == creator-only. Enforces the ⊆ invariant:
+// when write is non-nil it is unioned into access so read paths stay a
+// superset. Permission enforced at the HTTP layer; per-version, not per-slug.
+func (s *Store) UpdateAccess(ctx context.Context, id uuid.UUID, access []string, write []string) (int64, error) {
 	// Attachments stay creator-only — an access update must never widen them.
 	// Enforced here (the single update chokepoint) so every caller is covered,
 	// mirroring applyAttachmentInvariants on create.
 	if row, err := s.GetByID(ctx, id); err == nil && row.ArtifactType == TypeAttachment {
-		access = []string{}
+		access, write = []string{}, []string{}
 	}
 	if access == nil {
 		access = []string{"*"}
 	}
+	if write != nil {
+		access = unionTokens(access, write)
+	}
 	return s.q.UpdateArtifactAccess(ctx, sqlc.UpdateArtifactAccessParams{
 		ArtifactID:    pgUUID(id),
 		AllowedAccess: access,
+		AllowedWrite:  write,
 	})
+}
+
+// unionTokens returns a ∪ b, preserving a's order then b's new entries, with
+// exact (case-sensitive) dedupe — matching how tokens are compared everywhere
+// else (SQL array overlap + matchPatterns group equality).
+func unionTokens(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range a {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	for _, s := range b {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // CanAccess reports whether `caller` matches an artifact's allowed_access
@@ -1101,8 +1163,16 @@ func CanAccess(row sqlc.Artifact, caller string, callerGroups []string) bool {
 	if strings.EqualFold(row.Creator, caller) {
 		return true
 	}
+	return matchPatterns(row.AllowedAccess, caller, callerGroups)
+}
+
+// matchPatterns reports whether caller (or one of callerGroups) is granted by
+// the given token list. Shared by CanAccess (read) and CanWrite (write) so the
+// glob / email / group / `*` semantics stay identical across both. Does NOT
+// include the creator check — callers handle that.
+func matchPatterns(patterns []string, caller string, callerGroups []string) bool {
 	lower := strings.ToLower(caller)
-	for _, p := range row.AllowedAccess {
+	for _, p := range patterns {
 		if p == "*" {
 			return true
 		}
@@ -1121,13 +1191,32 @@ func CanAccess(row sqlc.Artifact, caller string, callerGroups []string) bool {
 	// builds tokens from them — so exact match is correct, and a stray
 	// non-canonical token like `group:Eng` fails closed everywhere alike.
 	for _, g := range callerGroups {
-		for _, p := range row.AllowedAccess {
+		for _, p := range patterns {
 			if p == g {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// CanWrite reports whether caller may create a new version / append / edit the
+// content of row. The creator always may. When allowed_write is NULL (nil),
+// write access follows read access (same tokens as CanAccess). When non-nil
+// (including the empty slice), allowed_write is the authoritative write list —
+// empty means creator-only. Because allowed_write is a subset of allowed_access
+// (enforced on save), a write grant always implies read.
+func CanWrite(row sqlc.Artifact, caller string, callerGroups []string) bool {
+	if caller == "" {
+		return false
+	}
+	if strings.EqualFold(row.Creator, caller) {
+		return true
+	}
+	if row.AllowedWrite == nil {
+		return matchPatterns(row.AllowedAccess, caller, callerGroups)
+	}
+	return matchPatterns(row.AllowedWrite, caller, callerGroups)
 }
 
 // matchGlob is a minimal glob matcher supporting `*` (any run) and `?`
@@ -1286,6 +1375,26 @@ func (s *Store) blobKey(kind string, id uuid.UUID) string {
 //
 // Callers cannot pin a specific version on upload; uploads always
 // append the next monotonic number. Tombstoned versions don't count.
+// SlugCreator returns the creator of a slug's EARLIEST version — the immutable
+// owner of the slug. Unlike a per-version creator (which versioning reassigns
+// to whoever pushed that version), this is stable across the slug's life, so it
+// is the correct authority for who may change a slug's access. Ignores
+// deleted_at so archiving v1 doesn't transfer ownership. ErrNotFound if the
+// slug has no versions.
+func (s *Store) SlugCreator(ctx context.Context, slug string) (string, error) {
+	var creator string
+	err := s.pool.QueryRow(ctx,
+		`SELECT creator FROM artifacts WHERE named_slug = $1 ORDER BY version ASC LIMIT 1`,
+		slug).Scan(&creator)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return creator, nil
+}
+
 func (s *Store) nextVersion(ctx context.Context, slug *string) (*int32, error) {
 	if slug == nil {
 		return nil, nil

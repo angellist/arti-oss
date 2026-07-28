@@ -43,6 +43,14 @@ type AddCmd struct {
 	// repeatable --access flag can't express (no way to pass an empty
 	// list), so it gets a dedicated flag. Mutually exclusive with --access.
 	Private bool `help:"make this artifact readable only by you (creator-only). Mutually exclusive with --access"`
+	// WriteAccess is the subset of readers allowed to write (push new versions
+	// / append / edit). nil (flag absent) → writers follow readers (today's
+	// behavior). Server unions these into allowed_access. Repeat for multiple.
+	WriteAccess []string `name:"write-access" help:"write-access pattern (repeatable; subset of --access). Absent = writers follow readers"`
+	// WritePrivate sends an explicit empty allowed_write ([]) = creator-only
+	// writes, while reads stay as --access/--private. Mutually exclusive with
+	// --write-access (which can't express the empty list).
+	WritePrivate bool `name:"write-private" help:"only you (the creator) may write; readers stay read-only. Mutually exclusive with --write-access"`
 }
 
 func (a *AddCmd) Run(cli *CLI) error {
@@ -200,6 +208,19 @@ func (a *AddCmd) Run(cli *CLI) error {
 		if access != nil {
 			payload["allowed_access"] = access
 		}
+	}
+
+	// Write access: --write-private sends [] (creator-only writes); otherwise
+	// --write-access sets the write subset; absent = omit so writers follow
+	// readers (the server's back-compat default).
+	switch {
+	case a.WritePrivate:
+		if len(a.WriteAccess) > 0 {
+			return fmt.Errorf("--write-private and --write-access are mutually exclusive")
+		}
+		payload["allowed_write"] = []string{} // creator-only writes
+	case len(a.WriteAccess) > 0:
+		payload["allowed_write"] = a.WriteAccess
 	}
 
 	var resp map[string]any

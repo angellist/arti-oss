@@ -115,9 +115,10 @@ func DeviceCodeHandler(cfg DeviceConfig) http.HandlerFunc {
 	}
 }
 
-// DeviceConfirmHandler — GET /auth/device. Public confirm page; shows the code
-// + requested duration and an Approve button that GETs the SSO-protected
-// /auth/login?user_code=… (the explicit anti-phishing click).
+// DeviceConfirmHandler — GET /auth/device. Public code page; shows the code
+// + requested duration and a button that starts the SSO-protected
+// /auth/login?user_code=… flow. The authenticated user must then explicitly
+// confirm the binding on the resulting page.
 func DeviceConfirmHandler(cfg DeviceConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uc := r.URL.Query().Get("user_code")

@@ -34,6 +34,11 @@ auth:
   allowed_domains:
     - example.com
   required_groups: []
+  # How long a login-captured IdP group snapshot stays valid for `idp:<name>`
+  # access grants. Every interactive login refreshes it; grants fail closed
+  # once it ages out, so idp: grants need a login at least this often. 0
+  # disables idp: resolution.
+  idp_groups_max_age: 336h
   # Where /auth/logout lands after clearing the session; empty → back to arti.
   logout_url: ""
 

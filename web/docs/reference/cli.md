@@ -48,8 +48,8 @@ An optional `~/.config/arti/config.json` supplies a default access list:
 ### `arti login`
 
 OAuth login via the PKCE pair flow. Opens a browser to `<base>/auth/google/login` with a
-one-time `cli_code`, then polls `POST /auth/cli/exchange` until you authenticate, and
-saves the returned token. Waits up to 5 minutes.
+one-time `cli_code`; after authenticating, explicitly confirm the displayed code, then
+the CLI polls `POST /auth/cli/exchange` and saves the returned token. Waits up to 5 minutes.
 
 | Flag | Type | Meaning |
 |---|---|---|
@@ -90,7 +90,9 @@ PACKAGE). An explicit `--type` wins.
 | `--label` | string[] | Label, repeatable. |
 | `--ensure-new` | bool | With `--slug`: fail (409) if the slug already exists — no auto-versioning. |
 | `--access` | string[] | Read-access pattern, repeatable; glob-on-email; `*` = everyone. Defaults to client config, then server `*`. |
-| `--private` | bool | Creator-only (sends empty `allowed_access`). Mutually exclusive with `--access`. |
+| `--private` | bool | Creator-only read (sends empty `allowed_access`). Mutually exclusive with `--access`. |
+| `--write-access` | string[] | Write-access pattern, repeatable; the subset of readers allowed to push new versions / append / edit. Absent = writers follow readers. Server unions these into `--access`. |
+| `--write-private` | bool | Only you (the creator) may write; readers stay read-only (sends empty `allowed_write`). Mutually exclusive with `--write-access`. |
 
 Prints the artifact id (and `slug (v#)` when named) to stderr and the URL to stdout.
 
@@ -98,8 +100,10 @@ Prints the artifact id (and `slug (v#)` when named) to stderr and the URL to std
 arti add README.md --slug docs --title "Docs"
 arti add ./build --slug app-build --type package      # zips the directory
 cat notes.md | arti add - --slug notes                 # from stdin
-arti add report.pdf --private                          # creator-only
-arti add --slug blog --access '*@example.com' --access bob@example.com
+arti add report.pdf --private                          # creator-only read
+# readable by the whole domain, but only the eng group may edit:
+arti add --slug spec --access '*@example.com' --write-access 'idp:engineering'
+arti add --slug memo --access '*' --write-private       # world-readable, creator-only writes
 ```
 
 ### `arti append`

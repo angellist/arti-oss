@@ -73,6 +73,7 @@ Create (or version) an artifact.
 | `entry_point` | string | no | PACKAGE/APP launch file |
 | `ensure_new` | boolean | no | 409 if the slug exists |
 | `allowed_access` | string[] | no | glob-on-email; `["*"]` any reader, `[]` creator-only |
+| `allowed_write` | string[] | no | subset of readers allowed to write; omit = writers follow readers, `[]` = creator-only writes |
 
 **Returns:** `ArtifactInfo` (see [REST API](rest-api.md#artifactinfo)).
 
@@ -93,6 +94,7 @@ caches the response 24h per `(key, creator)` and replays it.
 | `description` | string | no | |
 | `content_type` | string | no | required on auto-create |
 | `scopes` / `labels` / `allowed_access` | string[] | no | nil → inherit from prior |
+| `allowed_write` | string[] | no | subset of readers allowed to write; nil → inherit / writers follow readers, `[]` → creator-only writes |
 
 **Returns:** `{ "artifact": ArtifactInfo, "idempotent_replay": boolean }`.
 
@@ -115,6 +117,7 @@ only; editing a `kind:skill` artifact also requires `MANAGE_SKILLS`.
 | `scopes` | string[] | no | replaces the set; `[]` clears |
 | `labels` | string[] | no | replaces the set; `[]` clears |
 | `allowed_access` | string[] | no | glob-on-email; `[]` → creator-only |
+| `allowed_write` | string[] | no | subset of readers allowed to write; omit → writers follow readers, `[]` → creator-only writes (unioned into `allowed_access`) |
 
 **Returns:** the refreshed `ArtifactInfo`.
 

@@ -204,6 +204,14 @@ oauth2-proxy) and in built-in `oidc` mode alike.
   to that origin. For `slug_allow: ["*"]` surfaces it is the *only* thing
   bounding reachable artifacts — opt in deliberately. **User mode: the consent
   click is the authority bound** — see [Per-user mode](#per-user-mode-identity-user).
+- **`idp:` grants and the surface identity.** In user mode, tool calls run as
+  the real viewer, so `idp:<name>` (SSO-group) grants compose correctly for
+  free — the viewer's own login-captured groups apply. In service mode the
+  surface reads *as* the configured `email`, which carries **no `idp:` snapshot
+  unless that identity has interactively logged in** — so an artifact gated on
+  `idp:` alone is invisible to a service surface by design. Grant the surface
+  `email` (or a manual group containing it) explicitly rather than trying to
+  "fix" idp resolution for a headless identity.
 - **Static secret** is what Front's plugin model provides. Stored per-surface in
   a k8s Secret, so a leak is isolated and rotation is an env change.
 - **Secrets stay out of logs.** The request logger records the path only (not the

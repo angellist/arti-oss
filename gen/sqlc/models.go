@@ -44,6 +44,7 @@ type Artifact struct {
 	DeletedAt     pgtype.Timestamptz
 	AllowedAccess []string
 	Scopes        []string
+	AllowedWrite  []string
 }
 
 type Comment struct {
@@ -89,6 +90,15 @@ type DeviceToken struct {
 	RotatedAt         pgtype.Timestamptz
 	ExpiresAt         pgtype.Timestamptz
 	Revoked           bool
+}
+
+type EmbedPendingToken struct {
+	Surface   string
+	State     string
+	Token     string
+	Email     string
+	CreatedAt pgtype.Timestamptz
+	ExpiresAt pgtype.Timestamptz
 }
 
 type IdempotencyKey struct {

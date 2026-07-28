@@ -1,4 +1,4 @@
-import { ArtifactInfo, ArtifactListResponse, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Group, Me, Role, RoleAssignment, UserAccess, ApiKey, CreatedApiKey } from "./types";
+import { ArtifactInfo, ArtifactListResponse, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Group, IdpGroup, Me, Role, RoleAssignment, UserAccess, ApiKey, CreatedApiKey } from "./types";
 
 // hasPerm reports whether `me` holds an RBAC permission key. Prefer this over
 // the bare is_admin flag for capability gating so a non-ADMIN role carrying a
@@ -452,15 +452,25 @@ export async function updateArtifactScopes(id: string, scopes: string[]): Promis
   return resp.json();
 }
 
-// updateArtifactAccess PATCHes a new allowed_access set onto ONE artifact
-// version. Per-version — siblings keep their existing access. Creator or
-// admin only.
-export async function updateArtifactAccess(id: string, access: string[]): Promise<ArtifactInfo> {
+// updateArtifactAccess PATCHes a new allowed_access (and optional allowed_write)
+// set onto ONE artifact version. Per-version — siblings keep their existing
+// access. Creator or admin only. When `write` is provided the server unions it
+// into allowed_access (write ⊆ read) and treats [] as creator-only writes;
+// omit `write` to leave the write list unchanged.
+export async function updateArtifactAccess(
+  id: string,
+  access: string[],
+  write?: string[],
+): Promise<ArtifactInfo> {
+  const body: { allowed_access: string[]; allowed_write?: string[] } = { allowed_access: access };
+  if (write !== undefined) {
+    body.allowed_write = write;
+  }
   const resp = await fetch(`/api/artifacts/${id}`, {
     method: "PATCH",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ allowed_access: access }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     throw new ArtiError(resp.status, await resp.text());
@@ -475,6 +485,14 @@ export async function updateArtifactAccess(id: string, access: string[]): Promis
 export async function listGroups(cookie?: string): Promise<Group[]> {
   const { groups } = await http<{ groups: Group[] }>("/api/groups", undefined, cookie);
   return groups;
+}
+
+// listIdpGroups returns the IdP (SSO) groups captured at login, for the
+// access-editor typeahead. Readable by any authenticated caller (names +
+// counts only, never rosters). Served by GET /api/idp-groups.
+export async function listIdpGroups(cookie?: string): Promise<IdpGroup[]> {
+  const { idp_groups } = await http<{ idp_groups: IdpGroup[] }>("/api/idp-groups", undefined, cookie);
+  return idp_groups ?? [];
 }
 
 // createGroup creates a new group. Admin only (server returns 404 otherwise).

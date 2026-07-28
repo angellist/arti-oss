@@ -34,22 +34,25 @@ type RoleAssignment struct {
 // ─── cache ───────────────────────────────────────────────────────────
 //
 // roles + role_assignments are tiny, so per-request permission resolution
-// reads an in-memory snapshot. Same discipline as groupCache: invalidate on
-// write, expire on a short TTL to bound cross-instance staleness.
+// reads an in-memory snapshot while the cross-replica invalidation listener is
+// healthy. Writes invalidate locally and publish a notification; the TTL
+// remains a backstop for notifications missed while another instance restarts.
 
 const rbacCacheTTL = 15 * time.Second
 
 type rbacCache struct {
-	mu       sync.Mutex
-	roles    map[string][]string // role name → permissions
-	byUser   map[string][]string // lowercased email → role names
-	byGroup  map[string][]string // group name → role names
-	loadedAt time.Time
+	mu         sync.Mutex
+	roles      map[string][]string // role name → permissions
+	byUser     map[string][]string // lowercased email → role names
+	byGroup    map[string][]string // group name → role names
+	loadedAt   time.Time
+	generation uint64
 }
 
 func (c *rbacCache) invalidate() {
 	c.mu.Lock()
 	c.loadedAt = time.Time{}
+	c.generation++
 	c.mu.Unlock()
 }
 
@@ -60,27 +63,37 @@ type rbacSnapshot struct {
 }
 
 func (s *Store) rbacSnap(ctx context.Context) (rbacSnapshot, error) {
-	s.rbac.mu.Lock()
-	if !s.rbac.loadedAt.IsZero() && time.Since(s.rbac.loadedAt) < rbacCacheTTL {
-		snap := rbacSnapshot{roles: s.rbac.roles, byUser: s.rbac.byUser, byGroup: s.rbac.byGroup}
+	for {
+		s.rbac.mu.Lock()
+		if s.authzCacheHealthy() && !s.rbac.loadedAt.IsZero() && time.Since(s.rbac.loadedAt) < rbacCacheTTL {
+			snap := rbacSnapshot{roles: s.rbac.roles, byUser: s.rbac.byUser, byGroup: s.rbac.byGroup}
+			s.rbac.mu.Unlock()
+			return snap, nil
+		}
+		generation := s.rbac.generation
 		s.rbac.mu.Unlock()
-		return snap, nil
-	}
-	s.rbac.mu.Unlock()
 
-	// Reload outside the lock (a redundant concurrent reload is harmless).
-	roles, err := s.listRolesMap(ctx)
-	if err != nil {
-		return rbacSnapshot{}, err
+		// Reload outside the lock so a slow DB round-trip doesn't serialize
+		// every concurrent permission check.
+		roles, err := s.listRolesMap(ctx)
+		if err != nil {
+			return rbacSnapshot{}, err
+		}
+		byUser, byGroup, err := s.loadAssignments(ctx)
+		if err != nil {
+			return rbacSnapshot{}, err
+		}
+		s.rbac.mu.Lock()
+		if generation != s.rbac.generation {
+			s.rbac.mu.Unlock()
+			continue
+		}
+		if s.authzCacheHealthy() {
+			s.rbac.roles, s.rbac.byUser, s.rbac.byGroup, s.rbac.loadedAt = roles, byUser, byGroup, time.Now()
+		}
+		s.rbac.mu.Unlock()
+		return rbacSnapshot{roles: roles, byUser: byUser, byGroup: byGroup}, nil
 	}
-	byUser, byGroup, err := s.loadAssignments(ctx)
-	if err != nil {
-		return rbacSnapshot{}, err
-	}
-	s.rbac.mu.Lock()
-	s.rbac.roles, s.rbac.byUser, s.rbac.byGroup, s.rbac.loadedAt = roles, byUser, byGroup, time.Now()
-	s.rbac.mu.Unlock()
-	return rbacSnapshot{roles: roles, byUser: byUser, byGroup: byGroup}, nil
 }
 
 func (s *Store) listRolesMap(ctx context.Context) (map[string][]string, error) {
@@ -314,7 +327,7 @@ func (s *Store) CreateRole(ctx context.Context, name, description string, perms 
 		}
 		return Role{}, err
 	}
-	s.rbac.invalidate()
+	s.invalidateRBAC(ctx)
 	return r, nil
 }
 
@@ -343,7 +356,7 @@ func (s *Store) UpdateRole(ctx context.Context, name, description string, perms 
 	if err != nil {
 		return Role{}, err
 	}
-	s.rbac.invalidate()
+	s.invalidateRBAC(ctx)
 	return r, nil
 }
 
@@ -360,7 +373,7 @@ func (s *Store) DeleteRole(ctx context.Context, name string) error {
 	if ct.RowsAffected() == 0 {
 		return ErrNotFound
 	}
-	s.rbac.invalidate()
+	s.invalidateRBAC(ctx)
 	return nil
 }
 
@@ -439,7 +452,7 @@ func (s *Store) AssignRole(ctx context.Context, principalType, principalID, role
 	if err != nil {
 		return err
 	}
-	s.rbac.invalidate()
+	s.invalidateRBAC(ctx)
 	return nil
 }
 
@@ -451,7 +464,7 @@ func (s *Store) UnassignRole(ctx context.Context, principalType, principalID, ro
 	if err != nil {
 		return err
 	}
-	s.rbac.invalidate()
+	s.invalidateRBAC(ctx)
 	return nil
 }
 

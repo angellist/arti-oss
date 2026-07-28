@@ -68,6 +68,7 @@ func TestGenericDefaults(t *testing.T) {
 		{"Auth.Device.MaxUploadBytes", cfg.Auth.Device.MaxUploadBytes, 26214400},
 		{"Auth.Device.CodeRPM", cfg.Auth.Device.CodeRPM, 10},
 		{"Auth.APIKeys.MaxTTL", cfg.Auth.APIKeys.MaxTTL, Duration(8760 * time.Hour)},
+		{"Auth.IdPGroupsMaxAge", cfg.Auth.IdPGroupsMaxAge, Duration(14 * 24 * time.Hour)},
 		{"Auth.APIKeys.MintRPM", cfg.Auth.APIKeys.MintRPM, 10},
 		{"Auth.OAuthRegisterRPM", cfg.Auth.OAuthRegisterRPM, 10},
 		{"LLM.DefaultModel", cfg.LLM.DefaultModel, "claude-sonnet-4-6"},
@@ -275,6 +276,7 @@ func TestEnvTypeParsing(t *testing.T) {
 	cfg, err := loadWith(t, required(map[string]string{
 		"S3_USE_SSL":              "true",
 		"ARTI_DEVICE_TOKEN_TTL":   "1h30m",
+		"ARTI_IDP_GROUPS_MAX_AGE": "48h",
 		"ARTI_LLM_TPH_PER_VIEWER": "42",
 		"ARTI_DEVICE_CODE_RPM":    "0",
 		"ARTI_LLM_ALLOWED_MODELS": "m1,m2",
@@ -288,6 +290,9 @@ func TestEnvTypeParsing(t *testing.T) {
 	}
 	if cfg.Auth.Device.TokenTTL.Std() != 90*time.Minute {
 		t.Errorf("Device.TokenTTL = %v", cfg.Auth.Device.TokenTTL)
+	}
+	if cfg.Auth.IdPGroupsMaxAge.Std() != 48*time.Hour {
+		t.Errorf("IdPGroupsMaxAge = %v, want 48h", cfg.Auth.IdPGroupsMaxAge)
 	}
 	if cfg.LLM.TPHPerViewer != 42 {
 		t.Errorf("LLM.TPHPerViewer = %d", cfg.LLM.TPHPerViewer)

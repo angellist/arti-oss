@@ -16,8 +16,35 @@
 // verbatim in its own distinctly-shaded block.
 
 import type { ReactElement } from "react";
-import { marked } from "marked";
+import { Marked, type TokenizerThis, type Tokens } from "marked";
 import DOMPurify from "isomorphic-dompurify";
+
+// GFM strikethrough, strictly double-tilde ("~~struck~~").
+//
+// marked's stock `del` tokenizer (like goldmark's — see the Go twin in
+// internal/artifacts/markdown_strikethrough.go) opens on a run of EITHER one or
+// two tildes. That means ordinary prose using "~" for "approximately" — e.g.
+// "re-skinning ~12 components (~+1 wk)" or "~1000× cheaper (~$5)" — has its two
+// lone tildes paired and everything between them wrapped in <del>. We override
+// `del` to open only on "~~", leaving a single "~" as literal text.
+//
+// The override returns `undefined` (NOT `false`) when there's no double-tilde
+// match: marked's `use()` wrapper falls back to the permissive built-in del only
+// on a strict `=== false`, so `undefined` correctly skips strikethrough and lets
+// the "~" fall through to normal text. Double-tilde still renders identically.
+const DOUBLE_TILDE_DEL = /^~~(?=[^\s~])((?:\\[\s\S]|[^\\])*?(?:\\[\s\S]|[^\s~\\]))~~(?=[^~]|$)/;
+
+const md = new Marked({ gfm: true, breaks: false, async: false });
+md.use({
+  tokenizer: {
+    del(this: TokenizerThis, src: string): Tokens.Del | undefined {
+      const m = DOUBLE_TILDE_DEL.exec(src);
+      if (!m) return undefined;
+      const text = m[1];
+      return { type: "del", raw: m[0], text, tokens: this.lexer.inlineTokens(text) };
+    },
+  },
+});
 
 export type SplitMarkdown = { frontmatter: string | null; body: string };
 
@@ -91,7 +118,7 @@ function addHeadingIds(html: string): string {
 // the body. Headings get GitHub-style ids so anchor links work.
 export function renderMarkdown(src: string): { frontmatter: string | null; html: string } {
   const { frontmatter, body } = splitFrontmatter(src);
-  const parsed = marked.parse(body, { gfm: true, breaks: false, async: false }) as string;
+  const parsed = md.parse(body, { async: false }) as string;
   const html = DOMPurify.sanitize(addHeadingIds(parsed));
   return { frontmatter, html };
 }

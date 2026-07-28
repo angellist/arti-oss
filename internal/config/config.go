@@ -86,7 +86,12 @@ type Auth struct {
 	GroupsClaim    string   `yaml:"groups_claim"`
 	RequiredGroups []string `yaml:"required_groups"`
 	AllowedDomains []string `yaml:"allowed_domains"`
-	ServiceSecret  string   `yaml:"-"` // ARTI_SERVICE_SECRET
+	// IdPGroupsMaxAge bounds how stale a login-captured IdP-group snapshot may
+	// be before its `idp:<name>` access grants stop resolving (fail closed).
+	// `idp:` grants therefore require an interactive login at least this often.
+	// Zero disables `idp:` resolution entirely.
+	IdPGroupsMaxAge Duration `yaml:"idp_groups_max_age"`
+	ServiceSecret   string   `yaml:"-"` // ARTI_SERVICE_SECRET
 	// ServiceEmail is the synthetic identity attributed to service-secret
 	// callers.
 	ServiceEmail string `yaml:"service_email"`

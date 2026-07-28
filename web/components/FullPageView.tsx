@@ -15,9 +15,10 @@ import { encodeFilePath } from "@/lib/arti";
 //     artifact's API path so embedded assets actually load
 //
 // Sandboxing: `allow-scripts allow-popups allow-popups-to-escape-sandbox
-// allow-top-navigation-by-user-activation` keeps the iframe in a unique origin
-// (no access to the catalog session cookie) while letting user-driven anchor
-// clicks, `target="_blank"` / `window.open` links, and in-page JS work. Popups
+// allow-top-navigation-by-user-activation allow-downloads` keeps the iframe in a
+// unique origin (no access to the catalog session cookie) while letting
+// user-driven anchor clicks, `target="_blank"` / `window.open` links, in-page JS,
+// and user-initiated downloads (e.g. a report exporting its own results) work. Popups
 // take effect only because the served entry document carries the matching
 // full-page CSP (requested via `?ctx=fullpage`); the iframe-attribute sandbox
 // and the response CSP `sandbox` intersect, so both must grant it. We do NOT add

@@ -12,24 +12,39 @@ import (
 // ArtifactInfo is the wire shape for a single artifact's metadata.
 // JSON keys are snake_case to match the design + CLI expectations.
 type ArtifactInfo struct {
-	ArtifactID    string         `json:"artifact_id"`
-	ArtifactType  string         `json:"artifact_type"`
-	NamedSlug     *string        `json:"named_slug"`
-	Version       *int32         `json:"version"`
-	Title         string         `json:"title"`
-	Description   *string        `json:"description"`
-	ContentType   string         `json:"content_type"`
-	SizeBytes     *int64         `json:"size_bytes"`
-	SHA256        *string        `json:"sha256"`
-	Creator       string         `json:"creator"`
-	Scopes        []string       `json:"scopes"`
-	Labels        []string       `json:"labels"`
-	AllowedAccess []string       `json:"allowed_access"`
-	Metadata      map[string]any `json:"metadata"`
-	CreatedAt     time.Time      `json:"created_at"`
-	ModifiedAt    time.Time      `json:"modified_at"`
-	DeletedAt     *time.Time     `json:"deleted_at"`
-	URL           string         `json:"url"`
+	ArtifactID    string   `json:"artifact_id"`
+	ArtifactType  string   `json:"artifact_type"`
+	NamedSlug     *string  `json:"named_slug"`
+	Version       *int32   `json:"version"`
+	Title         string   `json:"title"`
+	Description   *string  `json:"description"`
+	ContentType   string   `json:"content_type"`
+	SizeBytes     *int64   `json:"size_bytes"`
+	SHA256        *string  `json:"sha256"`
+	Creator       string   `json:"creator"`
+	Scopes        []string `json:"scopes"`
+	Labels        []string `json:"labels"`
+	AllowedAccess []string `json:"allowed_access"`
+	// AllowedWrite is the write-access list. nil → write follows read (the
+	// back-compat default, serialized as JSON null); non-nil (incl. empty) is
+	// authoritative, empty ([]) == creator-only. The nil-vs-empty distinction
+	// is meaningful, so this field must NOT use omitempty — omitempty drops
+	// both nil AND the empty slice, collapsing "mirror" and "creator-only" into
+	// an absent field and letting the client mistake creator-only for mirror
+	// (re-opening writes to readers). Always emit it.
+	AllowedWrite []string `json:"allowed_write"`
+	// CanWrite reports whether the requesting caller may write (version /
+	// append / edit) THIS artifact — the effective result of checkWriteAccess,
+	// so it accounts for creator, admin, allowed_write, groups, and `idp:`
+	// membership without the client re-deriving any of it. Pointer + omitempty:
+	// nil (omitted) on caller-agnostic paths (list/search) where it isn't
+	// computed; set only on the single-artifact viewer paths (Get/GetBySlug).
+	CanWrite   *bool          `json:"can_write,omitempty"`
+	Metadata   map[string]any `json:"metadata"`
+	CreatedAt  time.Time      `json:"created_at"`
+	ModifiedAt time.Time      `json:"modified_at"`
+	DeletedAt  *time.Time     `json:"deleted_at"`
+	URL        string         `json:"url"`
 
 	// Score is the BM25 relevance score from OpenSearch. Zero when search
 	// is handled by Postgres or the result is from a non-search endpoint.
@@ -90,6 +105,7 @@ func ToInfo(row sqlc.Artifact, baseURL string) ArtifactInfo {
 		Scopes:        scopes,
 		Labels:        labels,
 		AllowedAccess: access,
+		AllowedWrite:  row.AllowedWrite, // nil stays nil (mirror) — do NOT normalize
 		Metadata:      meta,
 		CreatedAt:     row.CreatedAt.Time,
 		ModifiedAt:    row.ModifiedAt.Time,
@@ -126,6 +142,10 @@ type CreateRequest struct {
 	// server default `['*']` (everyone authenticated). Empty slice
 	// → creator-only. See pgstore.buildWhere for matching semantics.
 	AllowedAccess *[]string `json:"allowed_access,omitempty"`
+	// AllowedWrite — tokens allowed to write (subset of AllowedAccess; unioned
+	// in on save). nil (field absent) → write follows read; empty slice →
+	// creator-only writes.
+	AllowedWrite *[]string `json:"allowed_write,omitempty"`
 
 	// rawContent carries binary bytes from a multipart upload, bypassing the
 	// base64 round-trip. Set only by httpCreate's multipart branch; never
@@ -160,6 +180,9 @@ type AppendRequest struct {
 	Labels         []string `json:"labels,omitempty"`          // optional override; nil → inherit
 	// AllowedAccess: nil → inherit from prior version; empty slice → creator-only.
 	AllowedAccess *[]string `json:"allowed_access,omitempty"`
+	// AllowedWrite: nil → inherit prior version's write list; empty slice →
+	// creator-only writes.
+	AllowedWrite *[]string `json:"allowed_write,omitempty"`
 }
 
 // ListResponse is the catalog / search shape.

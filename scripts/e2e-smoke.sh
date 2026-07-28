@@ -21,8 +21,22 @@ fail() { printf "  \033[31m✗\033[0m %s\n" "$1"; exit 1; }
 ARTI=./bin/arti
 
 bold "boot checks"
-curl -sf $API/healthz                                         > /dev/null && ok "/healthz" || fail "/healthz"
-curl -sf $API/.well-known/oauth-authorization-server          > /dev/null && ok "/.well-known/oauth-authorization-server" || fail "/.well-known/oauth-authorization-server"
+# Identify the server, don't just ping it. $API defaults to a well-known
+# port that another local service may already hold, and any healthy HTTP
+# server answers /healthz — a foreign 200 used to satisfy this check and the
+# run would go on to test a stranger. Two topology-independent tells: arti's
+# /healthz is an empty 204, and its AS metadata advertises arti's own scope
+# vocabulary. Deliberately NOT compared against $API: `issuer` is
+# ARTI_BASE_URL, the public origin (the FE, e.g. :3031), which differs from
+# the API address by design — so an equality check here fails on a correctly
+# configured server.
+HEALTH=$(curl -s -o /dev/null -w "%{http_code}" $API/healthz || echo "000")
+[ "$HEALTH" = "204" ] && ok "/healthz (204)" \
+  || fail "/healthz: expected 204 from arti at $API, got $HEALTH — is another service on that port? (override with ARTI_API_URL)"
+AS_META=$(curl -sf $API/.well-known/oauth-authorization-server || true)
+echo "$AS_META" | jq -e '.scopes_supported | index("artifacts:read")' > /dev/null 2>&1 \
+  && ok "/.well-known/oauth-authorization-server (issuer $(echo "$AS_META" | jq -r '.issuer // "?"'))" \
+  || fail "/.well-known/oauth-authorization-server: no arti scopes in AS metadata from $API — not the arti server we think it is"
 curl -sf $WEB/login                                           > /dev/null && ok "FE /login" || fail "FE /login"
 
 bold "auth"

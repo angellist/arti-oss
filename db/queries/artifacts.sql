@@ -3,9 +3,9 @@ INSERT INTO artifacts (
     artifact_id, artifact_type, named_slug, version,
     title, description, content_type,
     inline_content, blob_ref, sha256, size_bytes,
-    creator, scope, scopes, labels, metadata, allowed_access
+    creator, scope, scopes, labels, metadata, allowed_access, allowed_write
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
 )
 RETURNING *;
 
@@ -77,7 +77,7 @@ UPDATE artifacts SET scopes = $2, scope = $3, modified_at = now()
 WHERE artifact_id = $1;
 
 -- name: UpdateArtifactAccess :execrows
-UPDATE artifacts SET allowed_access = $2, modified_at = now()
+UPDATE artifacts SET allowed_access = $2, allowed_write = $3, modified_at = now()
 WHERE artifact_id = $1;
 
 -- GetLatestArtifactBySlugForCaller — `/s/foo` (no version pinned) for a

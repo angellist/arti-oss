@@ -90,7 +90,11 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		return fmt.Errorf("init s3: %w", err)
 	}
 
-	pgstoreInst := pgstore.New(pool, s3, pgstore.Config{})
+	pgstoreInst := pgstore.New(pool, s3, pgstore.Config{
+		IdPGroupsMaxAge: cfg.Auth.IdPGroupsMaxAge.Std(),
+	})
+	stopInvalidationBus := pgstoreInst.StartInvalidationBus(ctx)
+	defer stopInvalidationBus()
 
 	// OpenSearch — full-text + vector search. nil when OPENSEARCH_ENDPOINT is empty.
 	osClient := opensearch.New(opensearch.Config{
@@ -160,6 +164,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 
 	// CLI pair endpoints are public — single-use exchange/refresh.
 	root.Post("/auth/cli/exchange", auth.CLIExchangeHandler(signer, pairs, 7*24*time.Hour, 90*24*time.Hour))
+	root.Post("/auth/login/confirm", auth.ConfirmLoginHandler(signer, pairs, pgstoreInst, cfg.Server.CookieSecure))
 	root.Post("/auth/cli/refresh", auth.CLIRefreshHandler(signer, 7*24*time.Hour, 90*24*time.Hour))
 
 	// Device Authorization Grant (RFC 8628) — headless agents obtain a
@@ -263,6 +268,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 			Signer:         signer,
 			Pairs:          pairs,
 			DeviceStore:    pgstoreInst,
+			Capturer:       pgstoreInst,
 			AccessTTL:      7 * 24 * time.Hour,
 			CookieSecure:   cfg.Server.CookieSecure,
 			StateKey:       []byte(cfg.Auth.SigningKey),
@@ -281,7 +287,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		})
 		logger.Info("interactive login: built-in oidc", "issuer", cfg.Auth.IssuerURL, "client_id", cfg.Auth.ClientID)
 	default: // "" (legacy) or "proxy"
-		ingress := auth.IngressLoginHandler(cfg.Auth.RequiredGroups, signer, pairs, pgstoreInst, 7*24*time.Hour, cfg.Server.CookieSecure)
+		ingress := auth.IngressLoginHandler(cfg.Auth.RequiredGroups, signer, pairs, pgstoreInst, 7*24*time.Hour, cfg.Server.CookieSecure, pgstoreInst)
 		root.Get("/auth/login", ingress)
 		root.Get("/auth/google/login", ingress)
 		// /auth/callback exists only in oidc mode, but the public ingress

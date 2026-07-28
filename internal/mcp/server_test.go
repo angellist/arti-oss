@@ -146,6 +146,55 @@ func TestUpdateArtifactToolEditsBySlug(t *testing.T) {
 	}
 }
 
+// update_artifact carries allowed_write through the MCP layer; the store
+// unions it into allowed_access (⊆ invariant) and persists it.
+func TestUpdateArtifactToolSetsAllowedWrite(t *testing.T) {
+	ctx := context.Background()
+	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
+	svc := artifacts.NewService(st, "http://localhost", nil, nil)
+	h := mcp.NewServer(svc, nil).Handler()
+
+	slug := uniqueSlug("mcp-write")
+	if _, err := st.Put(ctx, pgstore.PutInput{
+		ArtifactType: pgstore.TypeText, NamedSlug: &slug, Title: "w",
+		ContentType: "text/markdown", Content: []byte("body"),
+		Creator: "alice@example.com", AllowedAccess: []string{"*"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	args, _ := json.Marshal(map[string]any{
+		"ident":         slug,
+		"allowed_write": []string{"bob@example.com"},
+	})
+	payload, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": "update_artifact", "arguments": json.RawMessage(args)},
+	})
+	rr := rpcCall(t, h, "alice@example.com", string(payload))
+	if strings.Contains(rr.Body.String(), `"error"`) {
+		t.Fatalf("rpc error: %s", rr.Body.String())
+	}
+
+	row, err := st.GetBySlug(ctx, slug, nil)
+	if err != nil {
+		t.Fatalf("get back: %v", err)
+	}
+	if len(row.AllowedWrite) != 1 || row.AllowedWrite[0] != "bob@example.com" {
+		t.Errorf("allowed_write = %v, want [bob@example.com]", row.AllowedWrite)
+	}
+	// ⊆ invariant: bob must have been unioned into allowed_access.
+	var hasBob bool
+	for _, p := range row.AllowedAccess {
+		if p == "bob@example.com" {
+			hasBob = true
+		}
+	}
+	if !hasBob {
+		t.Errorf("allowed_access %v must include the write grant bob@example.com", row.AllowedAccess)
+	}
+}
+
 // callToolResult invokes a tool via tools/call and returns the parsed JSON-RPC
 // result object (the tool's content envelope plus its size annotations).
 func callToolResult(t *testing.T, h http.Handler, caller, name string, args map[string]any) map[string]any {

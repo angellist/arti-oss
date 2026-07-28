@@ -51,6 +51,7 @@ includes `APP`).
 | `scopes` | string[] | e.g. `["a:bt-auto-route","u:alice"]` |
 | `labels` | string[] | |
 | `allowed_access` | string[] | glob-on-email patterns; `["*"]` = any authed reader; `[]` = creator-only |
+| `allowed_write` | string[] \| omitted | tokens allowed to write (new version / append / edit). Omitted = write follows read; `[]` = creator-only writes. Always a subset of `allowed_access` (see below) |
 | `metadata` | object | arbitrary; PACKAGE/APP carry a `package` sub-object |
 | `created_at` / `modified_at` | RFC3339 | |
 | `deleted_at` | RFC3339 \| null | set when archived |
@@ -109,6 +110,7 @@ JSON body (`CreateRequest`, `internal/artifacts/dto.go:96`):
 | `entry_point` | string | PACKAGE/APP launch file |
 | `ensure_new` | boolean | with `named_slug`: 409 if the slug already exists (no auto-version) |
 | `allowed_access` | string[] | omit → inherit-from-prior or default `["*"]`; `[]` → creator-only |
+| `allowed_write` | string[] | omit → write follows read (or inherit); `[]` → creator-only writes. Unioned into `allowed_access` server-side |
 
 Response: `201` + `ArtifactInfo`. `409` if `ensure_new` and the slug exists; `413` if the
 body exceeds the size cap.
@@ -141,9 +143,19 @@ only artifacts they can read (their email + group memberships); admins with
 
 ### PATCH `/api/artifacts/{id}`
 
-Edit mutable fields: `{ title?, scopes?, labels?, allowed_access? }`. Creator or a holder
-of `MANAGE_ARTIFACTS`; writing a `kind:skill` artifact additionally requires
+Edit mutable fields: `{ title?, scopes?, labels?, allowed_access?, allowed_write? }`. Creator
+or a holder of `MANAGE_ARTIFACTS`; writing a `kind:skill` artifact additionally requires
 `MANAGE_SKILLS`. Response `200` + updated `ArtifactInfo`.
+
+**Read vs write access.** `allowed_access` gates who can *read* a version;
+`allowed_write` gates who can *write* it (push a new version, append, or edit
+metadata/content). `allowed_write` is always a **subset of `allowed_access`** —
+the server unions any write grant into `allowed_access` on save, so a writer can
+always read. Omitting `allowed_write` (or leaving it `null`) means write follows
+read — the historical behavior, and the state of every artifact created before
+this field existed. An empty `allowed_write` (`[]`) means creator-only writes
+while reads stay as `allowed_access`. The invariant is enforced server-side, so
+raw REST/MCP/CLI writers cannot create a write-but-not-read grant.
 
 ### DELETE `/api/artifacts/{id}` and `/api/artifacts/by-slug/{slug}`
 
@@ -358,7 +370,7 @@ the OAuth flow below. Full tool list: [MCP tools](mcp-tools.md).
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/auth/login` | Browser login front door, per `ARTI_AUTH_MODE`. `oidc`: starts the authorization-code + PKCE flow at the configured issuer; `proxy`: mints from the trusted proxy headers. Mints `arti_session` (browser) or pairs `cli_code`→email (CLI) |
+| GET | `/auth/login` | Browser login front door, per `ARTI_AUTH_MODE`. `oidc`: starts the authorization-code + PKCE flow at the configured issuer; `proxy`: mints from the trusted proxy headers. Mints `arti_session` (browser) or renders an explicit confirmation page for `cli_code`/`user_code`; the pairing itself happens via `POST /auth/login/confirm` |
 | GET | `/auth/callback` | `oidc` mode only: the registered IdP redirect URI — completes the code exchange and sets `arti_session` (404 in other modes) |
 | GET | `/auth/google/login` | Legacy alias for `/auth/login` (redirects in `oidc` mode) |
 | GET | `/auth/logout` | Clear `arti_session`, bounce to `ARTI_LOGOUT_URL` |

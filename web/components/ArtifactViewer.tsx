@@ -1,9 +1,8 @@
 "use client";
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import type { ArtifactInfo, Group, Me, PackageManifest } from "@/lib/types";
+import type { ArtifactInfo, Me, PackageManifest } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
 import { relativeTime } from "@/lib/time";
 import { useRailMode } from "@/lib/rail-context";
@@ -11,8 +10,9 @@ import { isTextualContentType, isJSONContentType, prettyPrintJSON } from "@/lib/
 import { isEditableArtifact } from "@/lib/edit";
 import { isComparableArtifact } from "@/lib/diff";
 import { Frontmatter, renderMarkdown } from "@/lib/markdown";
-import { archiveArtifact, encodeFilePath, getAggregates, hasPerm, latestVersionForSlug, listGroups, sameEmail, unarchiveArtifact, updateArtifactAccess, updateArtifactLabels, updateArtifactScopes, updateArtifactTitle } from "@/lib/arti";
+import { archiveArtifact, encodeFilePath, getAggregates, hasPerm, latestVersionForSlug, sameEmail, unarchiveArtifact, updateArtifactLabels, updateArtifactScopes, updateArtifactTitle } from "@/lib/arti";
 import ViewerToolbar, { RawToggle, TEXT_SCALE, WIDTH_CLASS, useViewerPrefs, type Width } from "./ViewerToolbar";
+import AccessModal from "./AccessModal";
 import CommentsLayer from "./CommentsLayer";
 import CreatorName from "./CreatorName";
 import ArtifactEditor from "./ArtifactEditor";
@@ -577,53 +577,24 @@ function accessTier(patterns: string[]): {
 }
 
 // AccessButton renders the "Edit Access" trigger in the controls row.
-// Clicking it opens a portal-rendered popover anchored below the button
-// (clamped against the viewport edge so it never gets clipped). Readers
-// see the same button labeled "Access" with a view-only popover.
+// Clicking it opens the centered AccessModal. Readers see the same button
+// labeled "Access" with a view-only modal.
 function AccessButton({
   artifactID,
   access,
+  write,
   hasOtherVersions,
   canEdit,
   onSaved,
 }: {
   artifactID: string;
   access: string[];
+  write?: string[] | null;
   hasOtherVersions: boolean;
   canEdit: boolean;
   onSaved: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-
-  // Reposition on open and on resize/scroll so the popover stays
-  // anchored to the button.
-  const reposition = () => {
-    const r = btnRef.current?.getBoundingClientRect();
-    if (!r) return;
-    const POPOVER_W = 320;
-    const MARGIN = 8;
-    const viewportW = typeof window !== "undefined" ? window.innerWidth : 1024;
-    // Prefer right-aligned to the button (because the button is itself
-    // pushed to the right of the controls row); shift left if it would
-    // overflow the viewport.
-    let left = r.right - POPOVER_W;
-    left = Math.max(MARGIN, Math.min(left, viewportW - POPOVER_W - MARGIN));
-    setPos({ top: r.bottom + 6, left });
-  };
-
-  useEffect(() => {
-    if (!open) return;
-    reposition();
-    const handler = () => reposition();
-    window.addEventListener("resize", handler);
-    window.addEventListener("scroll", handler, true);
-    return () => {
-      window.removeEventListener("resize", handler);
-      window.removeEventListener("scroll", handler, true);
-    };
-  }, [open]);
 
   const tier = accessTier(access);
   const dot =
@@ -636,10 +607,8 @@ function AccessButton({
   return (
     <>
       <button
-        ref={btnRef}
         type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
+        onClick={() => setOpen(true)}
         aria-haspopup="dialog"
         title={tier.tooltip}
         className="inline-flex items-center gap-1.5 rounded-md border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 transition hover:bg-neutral-50"
@@ -647,292 +616,18 @@ function AccessButton({
         <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden="true" />
         {canEdit ? "Edit Access" : "Access"}
       </button>
-      {open && pos
-        ? createPortal(
-            <AccessPopover
-              artifactID={artifactID}
-              access={access}
-              hasOtherVersions={hasOtherVersions}
-              canEdit={canEdit}
-              top={pos.top}
-              left={pos.left}
-              anchorEl={btnRef.current}
-              onClose={() => setOpen(false)}
-              onSaved={onSaved}
-            />,
-            document.body,
-          )
-        : null}
-    </>
-  );
-}
-
-// AccessPopover is the floating panel anchored under the Edit Access
-// button. Portal-rendered to escape any sticky-header / overflow context.
-// Closes on outside click and Escape.
-function AccessPopover({
-  artifactID,
-  access,
-  hasOtherVersions,
-  canEdit,
-  top,
-  left,
-  anchorEl,
-  onClose,
-  onSaved,
-}: {
-  artifactID: string;
-  access: string[];
-  hasOtherVersions: boolean;
-  canEdit: boolean;
-  top: number;
-  left: number;
-  anchorEl: HTMLElement | null;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [draft, setDraft] = useState("");
-  const [focused, setFocused] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string>("");
-  const [groups, setGroups] = useState<Group[]>([]);
-  const panelRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (canEdit) inputRef.current?.focus();
-  }, [canEdit]);
-
-  // Load groups so the editor can suggest `group:<name>` tokens and the list
-  // can label group entries by their display name. Fetched for readers too
-  // (cheap) so a group grant doesn't show as a bare token to viewers.
-  useEffect(() => {
-    listGroups().then(setGroups).catch(() => setGroups([]));
-  }, []);
-
-  const groupByToken = useMemo(() => {
-    const m = new Map<string, Group>();
-    for (const g of groups) m.set(g.token.toLowerCase(), g);
-    return m;
-  }, [groups]);
-
-  // Group tokens matching what the user has typed, excluding ones already
-  // granted. Shown as a typeahead above the input — only once they actually
-  // type (empty input shows nothing, so the editor isn't cluttered with every
-  // group by default). Matches on token or display name.
-  const groupMatches = useMemo(() => {
-    const q = draft.trim().toLowerCase();
-    if (!canEdit || q === "") return [];
-    const have = new Set(access.map((a) => a.toLowerCase()));
-    return groups
-      .filter((g) => !have.has(g.token.toLowerCase()))
-      .filter((g) => g.token.toLowerCase().includes(q) || g.display_name.toLowerCase().includes(q))
-      .slice(0, 6);
-  }, [groups, draft, access, canEdit]);
-
-  // Outside-click + Escape to close. mousedown on document; ignore if
-  // it landed inside the popover OR on the original anchor (so the
-  // toggling button click doesn't immediately close + re-open).
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node;
-      if (panelRef.current?.contains(t)) return;
-      if (anchorEl && anchorEl.contains(t)) return;
-      onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose, anchorEl]);
-
-  const save = async (next: string[]) => {
-    if (hasOtherVersions) {
-      const ok = window.confirm(
-        "Access changes apply to this version ONLY. Other versions of this slug keep their existing access. Continue?",
-      );
-      if (!ok) return;
-    }
-    setBusy(true);
-    setErr("");
-    try {
-      await updateArtifactAccess(artifactID, next);
-      onSaved();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = (p: string) => save(access.filter((x) => x !== p));
-  // add() commits either an explicit value (a clicked group suggestion) or the
-  // free-text draft (email / domain glob / `*`).
-  const add = (explicit?: string) => {
-    const t = (explicit ?? draft).trim();
-    if (!t || access.includes(t)) {
-      setDraft("");
-      return;
-    }
-    void save([...access, t]).then(() => setDraft(""));
-  };
-
-  return (
-    <div
-      ref={panelRef}
-      role="dialog"
-      aria-label="edit access"
-      style={{ top, left, width: 320 }}
-      className="fixed z-50 rounded-md border border-neutral-200 bg-white shadow-lg"
-    >
-      <div className="border-b border-neutral-100 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
-        Access {hasOtherVersions ? <span className="font-normal normal-case text-neutral-400">(this version only)</span> : null}
-      </div>
-      <ul className="max-h-64 overflow-auto py-1">
-        {access.length === 0 ? (
-          <li className="px-3 py-2 text-[12px] text-neutral-500">
-            <span className="font-medium text-rose-700">private</span> — only the creator and admins can read.
-          </li>
-        ) : (
-          access.map((p) => (
-            <li
-              key={p}
-              className="group flex items-center justify-between gap-2 px-3 py-1.5 text-[12px] hover:bg-neutral-50"
-            >
-              <AccessEntry pattern={p} group={groupByToken.get(p.toLowerCase())} />
-              {canEdit ? (
-                <button
-                  type="button"
-                  onClick={() => remove(p)}
-                  disabled={busy}
-                  aria-label={`remove ${p}`}
-                  title="remove"
-                  className="shrink-0 rounded p-1 text-neutral-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
-                >
-                  ×
-                </button>
-              ) : null}
-            </li>
-          ))
-        )}
-      </ul>
-      {canEdit ? (
-        <div className="border-t border-neutral-100 px-3 py-2">
-          <div className="flex items-center gap-2">
-            <input
-              ref={inputRef}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onFocus={() => setFocused(true)}
-              onBlur={() => setTimeout(() => setFocused(false), 120)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  add();
-                }
-              }}
-              placeholder="email, *@domain, or a group"
-              disabled={busy}
-              className="min-w-0 flex-1 rounded-md border border-neutral-200 bg-white px-2 py-1 font-mono text-[12px] focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-200"
-            />
-            <button
-              type="button"
-              onClick={() => add()}
-              disabled={busy || !draft.trim()}
-              className="rounded-md border border-neutral-200 bg-white px-2.5 py-1 text-[11px] text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
-            >
-              Add
-            </button>
-          </div>
-          {/* Group typeahead — sits directly below the input. Shown only once
-              the user types (groupMatches is empty for a blank draft). */}
-          {focused && groupMatches.length > 0 ? (
-            <ul className="mt-2 max-h-40 overflow-auto rounded-md border border-neutral-200 bg-white py-1">
-              {groupMatches.map((g) => (
-                <li key={g.name}>
-                  <button
-                    type="button"
-                    // onMouseDown (not onClick) so it fires before the input's blur.
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      add(g.token);
-                    }}
-                    className="flex w-full items-center gap-2 px-2.5 py-1 text-left hover:bg-neutral-50"
-                  >
-                    <GroupGlyph />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[12px] text-neutral-800">
-                        {g.display_name || g.name}
-                      </span>
-                      <span className="block truncate font-mono text-[10px] text-neutral-400">
-                        {g.token} · {g.member_count} member{g.member_count === 1 ? "" : "s"}
-                      </span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <p className="mt-1.5 text-[10px] leading-snug text-neutral-500">
-            <code className="bg-neutral-100 px-1">*</code> = anyone,
-            {" "}<code className="bg-neutral-100 px-1">*@example.com</code> = domain,
-            {" "}an email, or start typing to find a <span className="font-medium">group</span>.
-          </p>
-          {err ? <p className="mt-1 text-[11px] text-rose-600">error: {err}</p> : null}
-        </div>
+      {open ? (
+        <AccessModal
+          artifactID={artifactID}
+          access={access}
+          write={write}
+          hasOtherVersions={hasOtherVersions}
+          canEdit={canEdit}
+          onClose={() => setOpen(false)}
+          onSaved={onSaved}
+        />
       ) : null}
-    </div>
-  );
-}
-
-// AccessEntry renders one allowed_access pattern. A `group:<name>` token shows
-// a people glyph + the group's display name (falling back to the bare name,
-// and flagging an unknown/deleted group); every other pattern renders as the
-// raw mono string, exactly as before.
-function AccessEntry({ pattern, group }: { pattern: string; group?: Group }) {
-  if (pattern.toLowerCase().startsWith("group:")) {
-    const name = pattern.slice("group:".length);
-    return (
-      <span className="flex min-w-0 items-center gap-1.5">
-        <GroupGlyph />
-        <span className="truncate text-neutral-800">{group?.display_name || name}</span>
-        {group ? (
-          <span className="shrink-0 text-[10px] text-neutral-400">
-            {group.member_count} member{group.member_count === 1 ? "" : "s"}
-          </span>
-        ) : (
-          <span className="shrink-0 text-[10px] text-amber-600">unknown group</span>
-        )}
-      </span>
-    );
-  }
-  return <span className="truncate font-mono text-neutral-800">{pattern}</span>;
-}
-
-function GroupGlyph() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="shrink-0 text-neutral-400"
-      aria-hidden="true"
-    >
-      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
+    </>
   );
 }
 
@@ -1194,8 +889,8 @@ function RenderedBody({ body, ct, src, allowPopups }: { body: string; ct: string
     // OAuth consent needs window.open, so the parent iframe must allow popups
     // (still NO allow-same-origin — the opaque-origin guarantee is unchanged).
     const sandbox = allowPopups
-      ? "allow-scripts allow-popups allow-popups-to-escape-sandbox"
-      : "allow-scripts";
+      ? "allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
+      : "allow-scripts allow-downloads";
     return src ? (
       <iframe {...common} src={src} sandbox={sandbox} />
     ) : (
@@ -1346,9 +1041,16 @@ export default function ArtifactViewer({
     (info.artifact_type === "PACKAGE" ||
       (info.artifact_type === "TEXT" && isTextualContentType(info.content_type)));
 
-  // Edit — TEXT artifacts with a slug only; not canEdit-gated (versioning a
-  // slug is write == read on the server). See isEditableArtifact for the why.
-  const editable = isEditableArtifact(info);
+  // Edit publishes a new version, which the server gates on WRITE access
+  // (checkWriteAccess), no longer read == write. Prefer the server's
+  // authoritative per-caller `can_write` (set on viewer responses; accounts for
+  // creator/admin/allowed_write/groups/idp). Fall back to a conservative
+  // heuristic only if it's absent (non-viewer contexts): mirror mode
+  // (allowed_write == null) keeps the old read==write behavior; a set
+  // allowed_write restricts to creators/admins.
+  const editable =
+    isEditableArtifact(info) &&
+    (info.can_write ?? (canEdit || info.allowed_write == null));
   // Compare — same eligibility as Edit; the compare view fetches the version
   // list itself and reports "only one version" on open (no pre-check here).
   const comparable = isComparableArtifact(info);
@@ -1550,6 +1252,7 @@ export default function ArtifactViewer({
                 <AccessButton
                   artifactID={info.artifact_id}
                   access={info.allowed_access}
+                  write={info.allowed_write}
                   hasOtherVersions={!!info.named_slug}
                   canEdit={canEdit}
                   onSaved={() => router.refresh()}

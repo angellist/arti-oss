@@ -253,12 +253,17 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 	if req.AllowedAccess != nil {
 		access = *req.AllowedAccess
 	}
+	var write []string
+	if req.AllowedWrite != nil {
+		write = *req.AllowedWrite
+	}
 	if req.NamedSlug != nil && *req.NamedSlug != "" {
 		if prev, err := s.store.GetBySlug(ctx, *req.NamedSlug, nil); err == nil {
-			// Versioning an existing slug requires the same access a reader
-			// would need (read == write) — otherwise anyone authenticated
-			// could push a new version onto artifacts they can't even see.
-			if err := s.checkAccess(ctx, prev, creator); err != nil {
+			// Versioning an existing slug requires WRITE access to it (creator,
+			// admin, or a member of allowed_write / — in mirror mode —
+			// allowed_access); otherwise a caller could push a new version onto
+			// an artifact they can't write (or even see).
+			if err := s.checkWriteAccess(ctx, prev, creator); err != nil {
 				return ArtifactInfo{}, err
 			}
 			prevLabels = prev.Labels
@@ -282,6 +287,12 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 			if req.AllowedAccess == nil {
 				access = prev.AllowedAccess
 			}
+			if req.AllowedWrite == nil {
+				write = prev.AllowedWrite
+			}
+			// The ACL-change authority check runs in the CheckAccess hook below
+			// (against a FRESH prev, so a concurrent version can't be straddled),
+			// validating the resolved access/write we're about to persist.
 		}
 		// Errors (e.g. no prior version) leave nil-as-nil and proceed;
 		// Store.Put normalizes labels to empty and access to ['*'].
@@ -307,12 +318,18 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 		Labels:        labels,
 		Metadata:      meta,
 		AllowedAccess: access,
+		AllowedWrite:  write,
 		// Closes the race the check above can't: if the slug looked absent
 		// on our own pre-check but a concurrent writer created it (as a
 		// restricted artifact) before this call landed, Put re-checks
 		// access itself against a fresh read taken right before it writes.
 		CheckAccess: func(ctx context.Context, prev sqlc.Artifact) error {
-			return s.checkAccess(ctx, prev, creator)
+			if err := s.checkWriteAccess(ctx, prev, creator); err != nil {
+				return err
+			}
+			// ACL-change authority against the FRESH prev (owner/admin only),
+			// validating the access/write about to be persisted — race-safe.
+			return s.requireAclChangeAuthority(ctx, creator, *req.NamedSlug, prev, access, write)
 		},
 	})
 	if err != nil {
@@ -405,11 +422,13 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 	// labels (if any).
 	var prevLabels []string
 	if prev, perr := s.store.GetBySlug(ctx, slug, nil); perr == nil {
-		// Appending to an existing slug requires the same access a reader
-		// would need (read == write) — see the matching check in Create.
-		if err := s.checkAccess(ctx, prev, creator); err != nil {
+		// Appending to an existing slug requires WRITE access to it — see the
+		// matching check in Create.
+		if err := s.checkWriteAccess(ctx, prev, creator); err != nil {
 			return ArtifactInfo{}, false, err
 		}
+		// ACL-change authority is enforced race-safely in the Append
+		// CheckAccess hook below (re-run against fresh prev each retry).
 		prevLabels = prev.Labels
 	}
 	if err := s.requireSkillWrite(ctx, creator, req.Labels, prevLabels); err != nil {
@@ -432,13 +451,25 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 		Scopes:        req.Scopes,
 		Labels:        req.Labels,
 		AllowedAccess: req.AllowedAccess,
+		AllowedWrite:  req.AllowedWrite,
 		// Closes the race the check above can't: if the slug looked absent
 		// on our own pre-check but a concurrent writer created it (as a
 		// restricted artifact) before this call landed, the retry loop
 		// inside Store.Append re-checks access itself the moment it
 		// discovers that row.
 		CheckAccess: func(ctx context.Context, prev sqlc.Artifact) error {
-			return s.checkAccess(ctx, prev, creator)
+			if err := s.checkWriteAccess(ctx, prev, creator); err != nil {
+				return err
+			}
+			fa := prev.AllowedAccess
+			if req.AllowedAccess != nil {
+				fa = *req.AllowedAccess
+			}
+			fw := prev.AllowedWrite
+			if req.AllowedWrite != nil {
+				fw = *req.AllowedWrite
+			}
+			return s.requireAclChangeAuthority(ctx, creator, slug, prev, fa, fw)
 		},
 	})
 	if perr != nil {
@@ -566,6 +597,106 @@ func (s *Service) checkAccess(ctx context.Context, row sqlc.Artifact, caller str
 	return pgstore.ErrNotFound
 }
 
+// aclChanged reports whether the resolved (finalAccess, finalWrite) differ from
+// the prior version's EFFECTIVE ACL. finalAccess/finalWrite are what the store
+// will persist (request value, or the prior version's when omitted). Because
+// the store unions the write list into allowed_access (the ⊆ invariant), the
+// comparison mirrors that union, so re-sending the same logical ACL (or the
+// CLI's default_access) reads as a no-op, not a change.
+func aclChanged(prev sqlc.Artifact, finalAccess, finalWrite []string) bool {
+	eff := finalAccess
+	if finalWrite != nil {
+		eff = append(append([]string{}, finalAccess...), finalWrite...)
+	}
+	if !sameTokenSet(eff, prev.AllowedAccess) {
+		return true
+	}
+	// Write list: nil (mirror) vs non-nil (explicit) is itself a change.
+	return (finalWrite == nil) != (prev.AllowedWrite == nil) || !sameTokenSet(finalWrite, prev.AllowedWrite)
+}
+
+// requireAclChangeAuthority returns a forbidden error if the resolved ACL
+// changes a slug's access and the caller is neither an admin nor the slug's
+// OWNER (its earliest-version creator). A no-op is always allowed, so delegated
+// writers can still publish content.
+//
+// Authority is the immutable slug owner, NOT prev.Creator: versioning reassigns
+// each version's creator to whoever pushed it, so a delegated writer could push
+// a content-only version, become the latest version's creator, and then pass a
+// per-version creator check (on Create/Append OR PATCH) to escalate the ACL.
+// SlugCreator pins authority to the original creator, closing that on every
+// mutation path. Callers run this against a FRESH prev (inside the store's
+// race-checking hook, or the loaded row for PATCH) so a concurrent ACL change
+// can't be straddled.
+func (s *Service) requireAclChangeAuthority(ctx context.Context, caller, slug string, prev sqlc.Artifact, finalAccess, finalWrite []string) error {
+	if !aclChanged(prev, finalAccess, finalWrite) {
+		return nil
+	}
+	admin, err := s.canManageArtifacts(ctx, caller)
+	if err != nil {
+		return err
+	}
+	if admin {
+		return nil
+	}
+	if slug != "" {
+		owner, oerr := s.store.SlugCreator(ctx, slug)
+		if oerr != nil && !errors.Is(oerr, pgstore.ErrNotFound) {
+			return oerr
+		}
+		if owner != "" && strings.EqualFold(owner, caller) {
+			return nil
+		}
+	}
+	return errForbidden("changing access requires being the artifact's owner or an admin; omit allowed_access/allowed_write to keep the current access, or ask the owner to change it")
+}
+
+// sameTokenSet reports whether two token lists are set-equal (order- and
+// duplicate-insensitive) — used to decide whether a version request actually
+// changes an ACL versus re-sending the same values.
+func sameTokenSet(a, b []string) bool {
+	am := make(map[string]struct{}, len(a))
+	for _, x := range a {
+		am[x] = struct{}{}
+	}
+	bm := make(map[string]struct{}, len(b))
+	for _, x := range b {
+		bm[x] = struct{}{}
+	}
+	if len(am) != len(bm) {
+		return false
+	}
+	for k := range am {
+		if _, ok := bm[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// checkWriteAccess gates content WRITES (new version / append / edit). Same
+// shape as checkAccess — admins pass, archived rows stay creator-only, a real
+// lookup error surfaces rather than silently 404ing — but it uses CanWrite:
+// when allowed_write is set it is authoritative, otherwise write follows read.
+func (s *Service) checkWriteAccess(ctx context.Context, row sqlc.Artifact, caller string) error {
+	if ok, err := s.canManageArtifacts(ctx, caller); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	if row.DeletedAt.Valid && !strings.EqualFold(row.Creator, caller) {
+		return pgstore.ErrNotFound
+	}
+	groups, err := s.store.CallerGroups(ctx, caller)
+	if err != nil {
+		return err
+	}
+	if pgstore.CanWrite(row, caller, groups) {
+		return nil
+	}
+	return pgstore.ErrNotFound
+}
+
 // Get returns the metadata DTO for one artifact. Returns ErrNotFound
 // if `caller` lacks access — surfaced as 404 by the HTTP layer.
 func (s *Service) Get(ctx context.Context, id uuid.UUID, caller string) (ArtifactInfo, error) {
@@ -576,7 +707,26 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID, caller string) (Artifac
 	if err := s.checkAccess(ctx, row, caller); err != nil {
 		return ArtifactInfo{}, err
 	}
-	return ToInfo(row, s.baseURL), nil
+	return s.infoWithWrite(ctx, row, caller), nil
+}
+
+// infoWithWrite builds the DTO and stamps CanWrite from the SAME gate the write
+// endpoints use (checkWriteAccess == nil), so the viewer's Edit affordance
+// matches exactly what the server will allow — no client-side re-derivation of
+// creator/admin/group/idp logic. Only for single-artifact caller-aware paths.
+func (s *Service) infoWithWrite(ctx context.Context, row sqlc.Artifact, caller string) ArtifactInfo {
+	info := ToInfo(row, s.baseURL)
+	cw := s.checkWriteAccess(ctx, row, caller) == nil
+	// Versioning a kind:skill artifact additionally requires the skill
+	// write-guard (MANAGE_SKILLS / MANAGE_ARTIFACTS); reflect that here so the
+	// viewer doesn't offer Edit to a plain writer whose Create would 403.
+	if cw {
+		if err := s.requireSkillWrite(ctx, caller, row.Labels); err != nil {
+			cw = false
+		}
+	}
+	info.CanWrite = &cw
+	return info
 }
 
 // GetBySlug returns the metadata DTO for the slug. For non-admin callers
@@ -593,7 +743,7 @@ func (s *Service) GetBySlug(ctx context.Context, slug string, version *int32, ca
 		if err != nil {
 			return ArtifactInfo{}, err
 		}
-		return ToInfo(row, s.baseURL), nil
+		return s.infoWithWrite(ctx, row, caller), nil
 	}
 	row, err := s.store.GetBySlug(ctx, slug, version)
 	if err != nil {
@@ -602,7 +752,7 @@ func (s *Service) GetBySlug(ctx context.Context, slug string, version *int32, ca
 	if err := s.checkAccess(ctx, row, caller); err != nil {
 		return ArtifactInfo{}, err
 	}
-	return ToInfo(row, s.baseURL), nil
+	return s.infoWithWrite(ctx, row, caller), nil
 }
 
 // Versions returns every non-deleted version under a slug that `caller`
@@ -1684,6 +1834,7 @@ type UpdateMetadataRequest struct {
 	Scopes        *[]string `json:"scopes"`
 	Labels        *[]string `json:"labels"`
 	AllowedAccess *[]string `json:"allowed_access"`
+	AllowedWrite  *[]string `json:"allowed_write"`
 }
 
 // cleanStringSlice trims each element, drops empties, and dedupes
@@ -1757,8 +1908,32 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 			return ArtifactInfo{}, err
 		}
 	}
-	if req.AllowedAccess != nil {
-		if _, err := s.store.UpdateAccess(ctx, id, cleanStringSlice(*req.AllowedAccess)); err != nil {
+	if req.AllowedAccess != nil || req.AllowedWrite != nil {
+		// Compute the final (access, write) pair from the request overlaid on
+		// the current row, then write both together. UpdateAccess enforces the
+		// ⊆ invariant (unions write into access). Omitting one field leaves it
+		// as-is; passing allowed_write:[] means creator-only writes.
+		access := existing.AllowedAccess
+		if req.AllowedAccess != nil {
+			access = cleanStringSlice(*req.AllowedAccess)
+		}
+		write := existing.AllowedWrite
+		if req.AllowedWrite != nil {
+			write = cleanStringSlice(*req.AllowedWrite)
+		}
+		// Changing a slug's ACL requires the slug OWNER (or admin), not merely
+		// the creator of the version being patched: a delegated writer can push
+		// a content-only version to become its creator and pass the top-level
+		// creator guard, so ACL authority must be pinned to the immutable owner
+		// (same rule as Create/Append). Slugless artifacts have no versioning
+		// and thus no owner/creator divergence — the top guard already covers
+		// them.
+		if existing.NamedSlug != nil {
+			if err := s.requireAclChangeAuthority(ctx, caller, *existing.NamedSlug, existing, access, write); err != nil {
+				return ArtifactInfo{}, err
+			}
+		}
+		if _, err := s.store.UpdateAccess(ctx, id, access, write); err != nil {
 			return ArtifactInfo{}, err
 		}
 	}
@@ -2612,7 +2787,7 @@ func (s *Service) setContentSecurityAppFA(w http.ResponseWriter, ct, fa string) 
 			fa = "'self'"
 		}
 		w.Header().Set("Content-Security-Policy",
-			"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; frame-ancestors "+fa)
+			"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads; frame-ancestors "+fa)
 		w.Header().Del("X-Frame-Options")
 	}
 }
@@ -2658,7 +2833,7 @@ func setContentSecurity(w http.ResponseWriter, ct string) {
 	switch {
 	case strings.HasPrefix(strings.ToLower(ct), "text/html"):
 		w.Header().Set("Content-Security-Policy",
-			"sandbox allow-scripts allow-top-navigation-by-user-activation")
+			"sandbox allow-scripts allow-top-navigation-by-user-activation allow-downloads")
 	case !isScriptSafeMedia(ct):
 		// Non-HTML content the browser may execute as an active document
 		// (image/svg+xml, application/xml, ...) is served under a script-less
@@ -2693,7 +2868,7 @@ func setContentSecurityMaybeFullPage(w http.ResponseWriter, ct string, fullPage 
 	if fullPage && strings.HasPrefix(strings.ToLower(ct), "text/html") {
 		w.Header().Set("Content-Type", ct)
 		w.Header().Set("Content-Security-Policy",
-			"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation")
+			"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads")
 		return
 	}
 	setContentSecurity(w, ct)

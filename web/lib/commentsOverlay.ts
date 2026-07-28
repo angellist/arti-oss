@@ -55,7 +55,7 @@ const AV = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
 const CSS = `
 .ac-hl{background:rgba(250,204,21,.28);border-radius:2px;cursor:pointer;transition:background .12s}
 .ac-hl.ac-resolved{background:rgba(120,120,110,.16)}
-.ac-hl.ac-active{background:rgba(250,204,21,.55)}
+.ac-hl.ac-active{background:rgba(250,204,21,.92);box-shadow:0 0 0 1px rgba(202,138,4,.85)}
 .ac-hl.ac-draft{background:rgba(96,165,250,.3)}
 .ac-layer{position:fixed;inset:0;pointer-events:none;z-index:60;font-family:Inter,system-ui,sans-serif}
 .ac-layer.ac-hidden{display:none}
@@ -96,11 +96,12 @@ const CSS = `
 .ac-chip{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;line-height:1.4;max-height:22px;font-weight:600;color:#6b6b66;background:#f6f5f2;border:1px solid #efeeea;border-radius:6px;padding:2px 7px;margin-bottom:8px;max-width:100%;overflow:hidden}
 .ac-chip .ac-q{color:#9b9b95;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px}
 .ac-cmt{display:flex;gap:9px;margin:7px 0}
-.ac-av{flex:0 0 24px;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:700;color:#fff;background:#2563eb}
+.ac-av{position:relative;overflow:hidden;flex:0 0 24px;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:700;color:#fff;background:#2563eb}
+.ac-av img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .ac-who{font-size:12px;font-weight:600;color:#1c1c1a}
 .ac-when{font-size:10.5px;color:#9b9b95;margin-left:6px}
 .ac-text{font-size:12.5px;color:#33332e;margin-top:1px;white-space:pre-wrap;word-wrap:break-word}
-.ac-snip{font-size:12.5px;color:#44443e;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ac-snip{font-size:12.5px;color:#44443e;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;padding-right:16px}
 .ac-more{font-size:11px;color:#2563eb;font-weight:600;margin-top:4px}
 .ac-reply{display:flex;margin-top:8px}
 .ac-reply textarea{flex:1;min-width:0;font:inherit;font-size:12.5px;line-height:1.45;border:1px solid #e6e5e1;border-radius:8px;padding:7px 10px;background:#f6f5f2;resize:none;box-sizing:border-box;min-height:34px;max-height:160px;overflow-y:auto}
@@ -137,11 +138,16 @@ const CSS = `
 .ac-min{position:fixed;pointer-events:auto;cursor:pointer;display:inline-flex;align-items:center;gap:3px;height:26px;padding:0 9px;border-radius:13px;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);box-shadow:0 4px 16px -8px rgba(40,40,30,.3);font-size:12px;line-height:1;color:#6b6b66;font-weight:600;white-space:nowrap}
 .ac-min:hover{border-color:#c9c8c3;color:#33332e;box-shadow:0 7px 20px -8px rgba(40,40,30,.42)}
 .ac-min .ac-min-n{font-size:11px;color:#9b9b95;font-weight:700}
-.ac-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:-4px -5px 8px;padding:4px 5px;border-radius:8px;cursor:pointer}
-.ac-hdr:hover{background:#efeee9}
-.ac-hdr .ac-chip{margin-bottom:0;min-width:0}
-.ac-hdr-min{flex:0 0 auto;color:#b8b7b1;font-size:17px;line-height:1;padding:0 3px}
-.ac-hdr:hover .ac-hdr-min{color:#33332e}
+.ac-min-btn{position:absolute;top:6px;right:8px;z-index:2;border:none;background:transparent;color:#b8b7b1;font-size:18px;line-height:1;cursor:pointer;padding:0 3px}
+.ac-min-btn:hover{color:#33332e}
+/* The first comment's hover actions share the top-right corner with the
+   minimize "–". Shift THEM left — padding on the row can't, since the actions
+   are absolutely positioned off the padding-box edge, which padding doesn't
+   move — so both the actions and the "–" stay clickable. Only the first row
+   reaches that corner. */
+.ac-card.ac-active>.ac-cmt:first-of-type .ac-link{right:26px}
+.ac-card.ac-active>.ac-cmt:first-of-type .ac-del{right:44px}
+.ac-card.ac-active>.ac-cmt:first-of-type .ac-edit{right:62px}
 /* Left-bias the document + toolbar content so the fixed comment column clears
    the text (see applyDocShift). The header BAR stays full-bleed; only its inner
    content shifts. --ac-shift is computed per doc/viewport. */
@@ -468,11 +474,34 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     if (email === me?.email && me.picture) return me.picture;
     return authorPicture || "";
   }
+  // Deterministic tint per participant (hashed from their email, so the same
+  // person keeps the same color everywhere), used behind the initials when
+  // there's no photo — and as the fallback when a photo fails to load.
+  const AV_PALETTE = ["#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#d97706", "#ca8a04", "#16a34a", "#059669", "#0891b2", "#0284c7", "#4f46e5", "#9333ea", "#c026d3", "#e11d48", "#65a30d"];
+  function avatarColor(key: string): string {
+    let h = 0;
+    for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+    return AV_PALETTE[h % AV_PALETTE.length];
+  }
   function avatar(email: string, authorName?: string, authorPicture?: string) {
-    const pic = pictureUrl(email, authorPicture);
-    if (pic) return `<div class="ac-av"><img src="${AV(pic)}" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover"></div>`;
     const name = displayName(email, authorName);
-    return `<div class="ac-av">${AV(initials(name))}</div>`;
+    const color = avatarColor(email || name);
+    const pic = pictureUrl(email, authorPicture);
+    // Colored initials sit UNDERNEATH; the photo (if any) layers on top. Google
+    // Workspace avatars (lh3.googleusercontent.com) return 403 when a referrer
+    // is sent — which is why they recently stopped rendering — so force
+    // referrerpolicy=no-referrer. If the image still fails, onerror strips it
+    // and the initials show through. (onerror is also wired in JS after render,
+    // via wireAvatars, for CSP-strict pages where inline handlers don't fire.)
+    const img = pic
+      ? `<img src="${AV(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy" onerror="this.remove()">`
+      : "";
+    return `<div class="ac-av" style="background:${color}"><span>${AV(initials(name))}</span>${img}</div>`;
+  }
+  // Belt-and-suspenders for the inline onerror above: strip a broken avatar
+  // photo so the colored initials underneath show instead of a broken glyph.
+  function wireAvatars(root: ParentNode) {
+    root.querySelectorAll<HTMLImageElement>(".ac-av img").forEach((im) => { im.onerror = () => im.remove(); });
   }
   function cmtHTML(c: CommentDTO, tid: string) {
     const name = displayName(c.author, c.author_name);
@@ -490,29 +519,28 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   }
   function anchoredCard(t: ThreadDTO): string {
     const expanded = active === t.id;
-    const chip =
-      t.anchor.type === "text"
-        ? `<span class="ac-chip">💬 <span class="ac-q">“${AV(String(t.anchor.quote || ""))}”</span></span>`
-        : `<span class="ac-chip">📍 pin</span>`;
-    // The whole excerpt/header row is the minimize hit-target (far bigger than
-    // a tiny icon). Only for text threads that can minimize — resolved threads
-    // (panel-only) and pins (already collapsible) keep a plain chip.
-    const header =
+    // Text threads no longer carry the excerpt/quote header — the highlight in
+    // the prose (brighter when this thread is active) already shows what's being
+    // discussed, so the card stays compact in both the small (collapsed) and
+    // large (open) states. All that remains is a small "–" minimize control in
+    // the top-right corner. Pins keep a tiny label since they have no highlight.
+    const minBtn =
       t.anchor.type === "text" && t.status !== "resolved"
-        ? `<div class="ac-hdr" data-min="${t.id}" role="button" title="Minimize to margin" aria-label="Minimize comment">${chip}<span class="ac-hdr-min" aria-hidden="true">–</span></div>`
-        : chip;
+        ? `<button class="ac-min-btn" data-min="${t.id}" title="Minimize to margin" aria-label="Minimize comment">–</button>`
+        : "";
+    const header = t.anchor.type === "pin" ? `<span class="ac-chip">📍 pin</span>` : "";
     if (!expanded) {
       const c = t.comments[0];
       const body = c ? `<div class="ac-cmt">${avatar(c.author, c.author_name, c.author_picture)}<div><div class="ac-snip">${AV(c.body)}</div></div></div>` : `<div class="ac-empty">No comments</div>`;
       const more = t.comments.length > 1 ? `<div class="ac-more">+${t.comments.length - 1} more</div>` : "";
-      return `<div class="ac-card${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${header}${body}${more}</div>`;
+      return `<div class="ac-card${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${minBtn}${header}${body}${more}</div>`;
     }
     const cmts = t.comments.map((c) => cmtHTML(c, t.id)).join("");
     const acts =
       t.status === "resolved"
         ? `<div class="ac-acts"><button class="ac-mini" data-reopen="${t.id}">↩ Reopen</button></div>`
         : `<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-reply="${t.id}"></textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-send="${t.id}">Reply</button><button class="ac-mini ac-done" data-resolve="${t.id}">✓ Resolve</button></div>`;
-    return `<div class="ac-card ac-active${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${header}${cmts}${acts}</div>`;
+    return `<div class="ac-card ac-active${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${minBtn}${header}${cmts}${acts}</div>`;
   }
   // Minimized text thread: a compact pill in the column; click restores the card.
   function minMarker(t: ThreadDTO): string {
@@ -542,6 +570,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     layer.classList.toggle("ac-hidden", !commentsOn);
     if (!commentsOn) {
       layer.innerHTML = "";
+      setScrollPad(0); // no cards shown → drop the extra scroll area
       wireMarks(); // keep existing highlights clickable; clicking one turns comments on
       return;
     }
@@ -567,6 +596,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     }
     wire();
     wireMarks();
+    wireAvatars(layer);
     place();
   }
 
@@ -775,6 +805,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
         clearCard(); drawPins(); render();
       });
       lb.appendChild(card);
+      wireAvatars(card);
       cardAnchor = anchorEl;
       positionCard(anchorEl);
     }
@@ -875,6 +906,33 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     root.classList.toggle("ac-doc-shift", doc > 0);
   }
 
+  // ── scroll-area padding ─────────────────────────────────────────────
+  // Margin cards live in document space and are NOT clamped to the viewport, so
+  // a card anchored near the end of the doc (or a tall/expanded one) can hang
+  // below the last line of text — and, because the document itself isn't that
+  // tall, there's no way to scroll down to read its bottom. We grow the scroll
+  // area by appending a zero-width spacer to the doc body, sized so the lowest
+  // card's bottom becomes reachable. It sits INSIDE the container (=== the
+  // scroller's content in every view), so it extends whichever element actually
+  // scrolls. Height is measured against the container's NATURAL bottom (minus
+  // the spacer we already added), so it's stable and never feeds back on itself.
+  let scrollPad = 0;
+  let padEl: HTMLElement | null = null;
+  function setScrollPad(px: number) {
+    if (!container) return;
+    px = Math.max(0, Math.round(px));
+    if (px === scrollPad && (px === 0 || padEl?.parentNode === container)) return;
+    scrollPad = px;
+    if (px === 0) { padEl?.remove(); return; }
+    if (!padEl) {
+      padEl = el("div", "ac-scroll-pad");
+      padEl.setAttribute("aria-hidden", "true");
+      padEl.style.cssText = "width:1px;pointer-events:none";
+    }
+    if (padEl.parentNode !== container) container.appendChild(padEl);
+    padEl.style.height = px + "px";
+  }
+
   function place() {
     applyDocShift();
     const right = 78, vw = window.innerWidth, vh = window.innerHeight, gap = 10;
@@ -943,6 +1001,8 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     };
     const sY = window.scrollY;
     let prevDocBottom = -Infinity;
+    let maxColBottom = -Infinity; // lowest card/bubble bottom (viewport px) → drives scroll padding
+    const containerRight = container ? container.getBoundingClientRect().right : vw - right;
     const colEls = [
       ...cards.filter((c) => !isPinCard(c)),
       ...Array.from(layer.querySelectorAll<HTMLElement>(".ac-min")),
@@ -974,14 +1034,33 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
         const docY = Math.max(top + sY - 2, prevDocBottom + gap);
         prevDocBottom = docY + h;
         const vTop = docY - sY; // viewport top once projected
-        c.style.right = right + "px";
-        c.style.left = "auto";
+        if (c.dataset.mintid) {
+          // Collapsed bubbles hug the text: park them just past the doc's
+          // (possibly left-shifted) right edge — the left side of the comment
+          // gutter — instead of way out at the card column.
+          c.style.left = Math.round(Math.min(containerRight + 8, vw - (c.offsetWidth || 44) - 8)) + "px";
+          c.style.right = "auto";
+        } else {
+          c.style.right = right + "px";
+          c.style.left = "auto";
+        }
         c.style.top = vTop + "px";
+        maxColBottom = Math.max(maxColBottom, vTop + h);
         // Pass UNDER the sticky header rather than over it: clip away the part
         // that has scrolled above the header's bottom edge (top0).
         const clip = Math.max(0, top0 - vTop);
         c.style.clipPath = clip > 0 ? `inset(${clip}px 0 0 0)` : "none";
       });
+
+    // Extend the scroll area so the lowest margin card/bubble is fully
+    // reachable. Only while cards are shown in the column (not when hidden or
+    // when the all-comments panel — which scrolls on its own — is open).
+    if (container && commentsOn && !panelOpen && maxColBottom > -Infinity) {
+      const natBottom = container.getBoundingClientRect().bottom - scrollPad;
+      setScrollPad(maxColBottom - natBottom + 24);
+    } else {
+      setScrollPad(0);
+    }
   }
 
   // ── interactions ────────────────────────────────────────────────────
@@ -1503,6 +1582,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     window.removeEventListener("scroll", onScrollResize, true);
     mediaCleanups.forEach((fn) => fn());
     if (closeLightbox) closeLightbox(); // remove an open lightbox AND its Escape listener
+    padEl?.remove(); // drop the scroll-area spacer we appended to the doc body
     document.documentElement.classList.remove("ac-doc-shift"); // undo the left-bias
     document.documentElement.style.removeProperty("--ac-shift");
     document.documentElement.style.removeProperty("--ac-shift-tb");

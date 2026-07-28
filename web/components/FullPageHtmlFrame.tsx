@@ -69,7 +69,7 @@ export default function FullPageHtmlFrame({
   return (
     <iframe
       ref={iframeRef}
-      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
+      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads"
       {...(src ? { src } : { srcDoc })}
       title={title}
       className="fixed inset-0 z-50 block h-full w-full border-0 bg-white"

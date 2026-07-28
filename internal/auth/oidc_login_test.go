@@ -180,6 +180,7 @@ func loginStack(t *testing.T, f *fakeIdP, requiredGroups []string) (*http.ServeM
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/login", l.LoginHandler())
 	mux.HandleFunc("/auth/callback", l.CallbackHandler())
+	mux.Handle("/auth/login/confirm", auth.ConfirmLoginHandler(signer, pairs, nil, false))
 	return mux, signer, pairs
 }
 
@@ -212,6 +213,20 @@ func sessionCookie(res *http.Response) *http.Cookie {
 		}
 	}
 	return nil
+}
+
+func confirmationState(body string) string {
+	const prefix = `name="state" value="`
+	start := strings.Index(body, prefix)
+	if start < 0 {
+		return ""
+	}
+	start += len(prefix)
+	end := strings.IndexByte(body[start:], '"')
+	if end < 0 {
+		return ""
+	}
+	return body[start : start+end]
 }
 
 func TestOIDCLogin_BrowserFlow(t *testing.T) {
@@ -352,10 +367,27 @@ func TestOIDCLogin_CLIPairing(t *testing.T) {
 
 	w := drive(t, mux, f, "/auth/login?cli_code=abc123")
 	if w.Code != http.StatusOK {
-		t.Fatalf("code = %d, want 200 close-tab page; body=%s", w.Code, w.Body.String())
+		t.Fatalf("code = %d, want 200 confirmation page; body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "close this tab") {
-		t.Errorf("body = %q, want close-tab page", w.Body.String())
+	if !strings.Contains(w.Body.String(), "Authorize CLI sign-in") {
+		t.Errorf("body = %q, want confirmation page", w.Body.String())
+	}
+	if email, ok := pairs.Take("abc123"); ok || email != "" {
+		t.Fatalf("GET must not bind CLI code, got %q, %v", email, ok)
+	}
+	state := confirmationState(w.Body.String())
+	if state == "" {
+		t.Fatal("confirmation state missing")
+	}
+	r := httptest.NewRequest("POST", "/auth/login/confirm", strings.NewReader("state="+state))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range w.Result().Cookies() {
+		r.AddCookie(c)
+	}
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, r)
+	if w2.Code != http.StatusOK || !strings.Contains(w2.Body.String(), "close this tab") {
+		t.Fatalf("confirm: code = %d, body=%s", w2.Code, w2.Body.String())
 	}
 	if email, ok := pairs.Take("abc123"); !ok || email != "alice@example.com" {
 		t.Errorf("pairs.Take = %q, %v; want alice@example.com, true", email, ok)

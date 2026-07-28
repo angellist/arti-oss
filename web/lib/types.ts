@@ -14,6 +14,15 @@ export interface ArtifactInfo {
   scopes: string[];
   labels: string[];
   allowed_access: string[];
+  // allowed_write: tokens allowed to write. null = write follows read
+  // (back-compat default); [] = creator-only writes; [tokens] = those + creator.
+  // The null-vs-[] distinction is load-bearing — the server emits it without
+  // omitempty precisely so an empty list isn't confused with mirror mode.
+  allowed_write: string[] | null;
+  // can_write: whether the requesting caller may version/append/edit this
+  // artifact — the server's effective checkWriteAccess result. Present only on
+  // single-artifact viewer responses (Get/GetBySlug); absent on list/search.
+  can_write?: boolean;
   metadata: Record<string, unknown>;
   created_at: string;
   modified_at: string;
@@ -86,6 +95,16 @@ export interface Group {
   created_by: string;
   created_at: string;
   modified_at: string;
+}
+
+// IdpGroup is a grantable IdP (SSO) group captured at login. `token` is the
+// `idp:<name>` string to drop into allowed_access/allowed_write. No roster is
+// exposed — only the name and how many users currently carry it. Served by
+// GET /api/idp-groups.
+export interface IdpGroup {
+  name: string;
+  token: string;
+  member_count: number;
 }
 
 // Me is the authenticated caller's identity, served by GET /api/me.

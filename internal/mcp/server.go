@@ -128,7 +128,7 @@ func toolSpecs() []toolSpec {
 	return []toolSpec{
 		{
 			Name:        "add_artifact",
-			Description: "Create (or version) an artifact. Default type=TEXT. Pass ensure_new=true with a named_slug to fail (409) if that slug already exists. Pass allowed_access to gate who can read this version — array of glob-on-email patterns; '*' (default) allows any authenticated reader, '*@example.com' restricts to that domain, ['alice@x','bob@x'] restricts to specific people. Empty array = creator-only. Pass scopes as an array (e.g. [\"a:bt-auto-route\",\"u:lavina.kalwani\"]); the singular \"scope\" is deprecated.",
+			Description: "Create (or version) an artifact. Default type=TEXT. Pass ensure_new=true with a named_slug to fail (409) if that slug already exists. Pass allowed_access to gate who can read this version — array of glob-on-email patterns; '*' (default) allows any authenticated reader, '*@example.com' restricts to that domain, ['alice@x','bob@x'] restricts to specific people. Empty array = creator-only. Pass allowed_write to split read from write: it's the subset of readers allowed to push new versions / append / edit (unioned into allowed_access automatically). Omit allowed_write = writers are the same as readers (today's behavior); empty array = creator-only writes. Pass scopes as an array (e.g. [\"a:bt-auto-route\",\"u:lavina.kalwani\"]); the singular \"scope\" is deprecated.",
 			InputSchema: map[string]any{
 				"type":     "object",
 				"required": []string{"title", "content_type"},
@@ -146,6 +146,7 @@ func toolSpecs() []toolSpec {
 					"entry_point":    str(),
 					"ensure_new":     map[string]any{"type": "boolean"},
 					"allowed_access": strArr(),
+					"allowed_write":  strArr(),
 				},
 			},
 		},
@@ -166,12 +167,13 @@ func toolSpecs() []toolSpec {
 					"scopes":          strArr(),
 					"labels":          strArr(),
 					"allowed_access":  strArr(),
+					"allowed_write":   strArr(),
 				},
 			},
 		},
 		{
 			Name:        "update_artifact",
-			Description: "Update an existing artifact's METADATA in place — title, scopes, labels, and/or allowed_access — WITHOUT creating a new version. Content and artifact_type are immutable: to change the body, call add_artifact with the same named_slug to publish a new version. `ident` is a UUID (edits that exact version) or a slug (edits the latest version you can read; sibling versions keep their prior metadata, so edit them individually if needed). Only fields you pass are changed; omit a field to leave it untouched, or pass an empty array to clear it (e.g. allowed_access:[] = creator-only). Creator-or-MANAGE_ARTIFACTS only; editing a kind:skill artifact also requires MANAGE_SKILLS.",
+			Description: "Update an existing artifact's METADATA in place — title, scopes, labels, and/or allowed_access — WITHOUT creating a new version. Content and artifact_type are immutable: to change the body, call add_artifact with the same named_slug to publish a new version. `ident` is a UUID (edits that exact version) or a slug (edits the latest version you can read; sibling versions keep their prior metadata, so edit them individually if needed). Only fields you pass are changed; omit a field to leave it untouched, or pass an empty array to clear it (e.g. allowed_access:[] = creator-only). allowed_write is the subset of readers who may write (omit = writers follow readers; [] = creator-only writes); it is unioned into allowed_access. Creator-or-MANAGE_ARTIFACTS only; editing a kind:skill artifact also requires MANAGE_SKILLS.",
 			InputSchema: map[string]any{
 				"type":     "object",
 				"required": []string{"ident"},
@@ -182,6 +184,7 @@ func toolSpecs() []toolSpec {
 					"scopes":         strArr(),
 					"labels":         strArr(),
 					"allowed_access": strArr(),
+					"allowed_write":  strArr(),
 				},
 			},
 		},

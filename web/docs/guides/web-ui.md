@@ -94,9 +94,14 @@ The toolbar on the right gives you:
 - **Raw Source** — toggle between rendered and raw text.
 - **↓ Download** — the file (or `↓ zip` for a whole PACKAGE).
 - **Access** / **Edit Access** — a colored dot shows the access tier (public,
-  domain-restricted, or restricted); the popover lists who can read and, for
-  creators/admins, lets you add an email, a `*@domain`, `*` for anyone, or a
-  group.
+  domain-restricted, or restricted). Clicking opens a modal that lists every
+  principal with access and its exact level. For creators/admins each row has a
+  **Read** / **Read & write** control, and you can add an email, a `*@domain`,
+  `*` for anyone who can sign in, a **group**, or an **SSO group** (`idp:` — the
+  IdP groups your login carries, badged *SSO*). Read-only viewers see the same
+  list without controls. **Read** lets someone open the version; **Read & write**
+  additionally lets them publish new versions, append, and edit — a write grant
+  always implies read. Changes apply to the shown version only.
 - **Archive** / **Unarchive** — soft-delete, for creators and admins.
 
 ### How each type renders

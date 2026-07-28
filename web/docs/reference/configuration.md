@@ -54,6 +54,7 @@ tokens. See the [auth architecture](../architecture/auth.md).
 | `AUTH_DEX_ISSUER_URL` | `""` | Dex OIDC issuer. Empty → OIDC auth disabled (the verifier is nil). |
 | `AUTH_JWT_AUDIENCE` | `auth` | Expected `aud` claim on Dex tokens. |
 | `AUTH_REQUIRED_GROUPS` | `""` | Comma-separated groups a user must belong to. Empty → no group requirement. |
+| `ARTI_IDP_GROUPS_MAX_AGE` | `336h` | How long a login-captured IdP group snapshot stays valid for `idp:<name>` access grants. Each interactive login (oidc or proxy) refreshes the snapshot; grants stop resolving once it ages past this bound (fail closed), so **`idp:` grants require an interactive login at least this often**. `0` disables `idp:` resolution entirely. |
 | `AUTH_ALLOWED_DOMAINS` | `""` | Comma-separated email-domain allowlist; applied on every auth path (OIDC, proxy, test-mode, device, OBO re-check). **Empty admits nobody** — the server fails startup in `oidc`/`proxy` mode until this is set (or any-domain is explicitly opted into). |
 | `ARTI_ADMIN_EMAILS` | `""` | Comma-separated; the lockout-proof `ADMIN` floor (re-asserted on boot). Gates hard-delete and cross-creator archive. Empty → no administrators until configured. |
 | `ARTI_SERVICE_SECRET` | `""` | Optional service-to-service shared secret (sent as `X-Arti-Service-Secret`). Empty → s2s auth off. |

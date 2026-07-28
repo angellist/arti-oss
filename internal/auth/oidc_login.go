@@ -36,7 +36,8 @@ type OIDCLoginConfig struct {
 
 	Signer       *JWTSigner
 	Pairs        PairStore
-	DeviceStore  DeviceStore // may be nil; disables user_code approval
+	DeviceStore  DeviceStore   // may be nil; disables user_code approval
+	Capturer     GroupCapturer // may be nil; disables login-time IdP-group capture
 	AccessTTL    time.Duration
 	CookieSecure bool
 	// StateKey signs the login-transaction cookie (HMAC-SHA256). Typically
@@ -93,7 +94,7 @@ func NewOIDCLogin(ctx context.Context, cfg OIDCLoginConfig) (*OIDCLogin, error) 
 		secure:      cfg.CookieSecure,
 		fin: loginFinisher{
 			signer: cfg.Signer, pairs: cfg.Pairs, deviceStore: cfg.DeviceStore,
-			accessTTL: cfg.AccessTTL, cookieSecure: cfg.CookieSecure,
+			accessTTL: cfg.AccessTTL, cookieSecure: cfg.CookieSecure, capturer: cfg.Capturer,
 		},
 	}, nil
 }
@@ -216,7 +217,7 @@ func (l *OIDCLogin) CallbackHandler() http.HandlerFunc {
 		name, _ := claims["name"].(string)
 		picture, _ := claims["picture"].(string)
 
-		l.fin.finish(w, r, email, name, picture, st.CLICode, st.UserCode, st.ReturnTo)
+		l.fin.finish(w, r, email, name, picture, st.CLICode, st.UserCode, st.ReturnTo, groups)
 	}
 }
 

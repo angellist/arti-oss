@@ -28,9 +28,10 @@ func Defaults() *Config {
 			UseSSL: true,
 		},
 		Auth: Auth{
-			Audience:    "auth",
-			Scopes:      []string{"openid", "email", "profile"},
-			GroupsClaim: "groups",
+			Audience:        "auth",
+			Scopes:          []string{"openid", "email", "profile"},
+			GroupsClaim:     "groups",
+			IdPGroupsMaxAge: Duration(14 * 24 * time.Hour), // 336h
 			// No allowed domains by default: with auth enabled, an empty
 			// allowlist denies everyone (fail closed). Deployments must
 			// configure their own domains.
@@ -214,6 +215,7 @@ func bindings(c *Config) []binding {
 		duration("ARTI_DEVICE_TOKEN_MAX_TTL", &c.Auth.Device.TokenMaxTTL),
 		integer("ARTI_DEVICE_MAX_UPLOAD_BYTES", &c.Auth.Device.MaxUploadBytes),
 		integer("ARTI_DEVICE_CODE_RPM", &c.Auth.Device.CodeRPM),
+		duration("ARTI_IDP_GROUPS_MAX_AGE", &c.Auth.IdPGroupsMaxAge),
 		duration("ARTI_API_KEY_MAX_TTL", &c.Auth.APIKeys.MaxTTL),
 		integer("ARTI_API_KEY_RPM", &c.Auth.APIKeys.MintRPM),
 		str("ARTI_OBO_CALLBACK_BASE", &c.Auth.OBO.CallbackBase),

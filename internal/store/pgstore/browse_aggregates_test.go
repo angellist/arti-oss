@@ -65,8 +65,10 @@ func TestBrowseAggregates_Type_PaginatesByName(t *testing.T) {
 // sort=count must order by count, not name — verified with two unique
 // content_type values of known, distinct counts, isolated from shared-DB
 // pollution by uniqueness (same approach as TestAggregates_ContentTypes).
-// A large page size covers every content_type ever created in the shared
-// test DB — MIME-type cardinality stays bounded, unlike labels.
+// Positions come from paging the whole facet, not from one big request:
+// BrowseAggregates clamps Limit above 500 back down to 50, so asking for
+// one huge page silently returns a short one and our two values drop off
+// it as soon as the shared test DB accumulates enough content_types.
 func TestBrowseAggregates_ContentType_SortByCount(t *testing.T) {
 	ctx := context.Background()
 	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
@@ -87,35 +89,43 @@ func TestBrowseAggregates_ContentType_SortByCount(t *testing.T) {
 	mk(multi, 3)
 	mk(single, 1)
 
-	desc, err := st.BrowseAggregates(ctx, pgstore.BrowseAggregatesInput{
-		Facet: "content_type", Sort: "count", Dir: "desc", Limit: 1000, Offset: 0,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	idx := func(vs []pgstore.BrowseValueCount, v string) int {
-		for i, r := range vs {
-			if r.Value == v {
-				return i
+	// Overall position of each value across every page, so the assertion
+	// holds no matter how many other content_types exist.
+	rank := func(dir string) (int, int) {
+		const page int32 = 500 // the store's documented maximum
+		multiIdx, singleIdx := -1, -1
+		for offset := int32(0); ; offset += page {
+			res, err := st.BrowseAggregates(ctx, pgstore.BrowseAggregatesInput{
+				Facet: "content_type", Sort: "count", Dir: dir, Limit: page, Offset: offset,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, r := range res.Values {
+				switch r.Value {
+				case multi:
+					multiIdx = int(offset) + i
+				case single:
+					singleIdx = int(offset) + i
+				}
+			}
+			done := multiIdx >= 0 && singleIdx >= 0
+			exhausted := len(res.Values) == 0 || int64(offset)+int64(len(res.Values)) >= res.Total
+			if done || exhausted {
+				if !done {
+					t.Fatalf("count %s: expected both %s and %s across all %d values", dir, multi, single, res.Total)
+				}
+				return multiIdx, singleIdx
 			}
 		}
-		return -1
 	}
-	multiIdx, singleIdx := idx(desc.Values, multi), idx(desc.Values, single)
-	if multiIdx < 0 || singleIdx < 0 {
-		t.Fatalf("expected both %s and %s in results", multi, single)
-	}
+
+	multiIdx, singleIdx := rank("desc")
 	if multiIdx >= singleIdx {
 		t.Fatalf("count desc: %s (count 3) should sort before %s (count 1)", multi, single)
 	}
 
-	asc, err := st.BrowseAggregates(ctx, pgstore.BrowseAggregatesInput{
-		Facet: "content_type", Sort: "count", Dir: "asc", Limit: 1000, Offset: 0,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	multiIdx, singleIdx = idx(asc.Values, multi), idx(asc.Values, single)
+	multiIdx, singleIdx = rank("asc")
 	if singleIdx >= multiIdx {
 		t.Fatalf("count asc: %s (count 1) should sort before %s (count 3)", single, multi)
 	}

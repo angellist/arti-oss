@@ -21,6 +21,7 @@ const info: ArtifactInfo = {
   scopes: [],
   labels: [],
   allowed_access: ["*"],
+  allowed_write: null,
   metadata: {},
   created_at: "2026-01-01T00:00:00Z",
   modified_at: "2026-01-01T00:00:00Z",

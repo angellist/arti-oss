@@ -13,7 +13,7 @@ import (
 )
 
 const getArtifact = `-- name: GetArtifact :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes FROM artifacts WHERE artifact_id = $1
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts WHERE artifact_id = $1
 `
 
 func (q *Queries) GetArtifact(ctx context.Context, artifactID pgtype.UUID) (Artifact, error) {
@@ -40,12 +40,13 @@ func (q *Queries) GetArtifact(ctx context.Context, artifactID pgtype.UUID) (Arti
 		&i.DeletedAt,
 		&i.AllowedAccess,
 		&i.Scopes,
+		&i.AllowedWrite,
 	)
 	return i, err
 }
 
 const getArtifactBySHA = `-- name: GetArtifactBySHA :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes FROM artifacts WHERE sha256 = $1 AND deleted_at IS NULL LIMIT 1
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts WHERE sha256 = $1 AND deleted_at IS NULL LIMIT 1
 `
 
 func (q *Queries) GetArtifactBySHA(ctx context.Context, sha256 *string) (Artifact, error) {
@@ -72,12 +73,13 @@ func (q *Queries) GetArtifactBySHA(ctx context.Context, sha256 *string) (Artifac
 		&i.DeletedAt,
 		&i.AllowedAccess,
 		&i.Scopes,
+		&i.AllowedWrite,
 	)
 	return i, err
 }
 
 const getArtifactBySlugVersion = `-- name: GetArtifactBySlugVersion :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes FROM artifacts
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts
 WHERE named_slug = $1 AND version = $2 AND deleted_at IS NULL
 `
 
@@ -110,12 +112,13 @@ func (q *Queries) GetArtifactBySlugVersion(ctx context.Context, arg GetArtifactB
 		&i.DeletedAt,
 		&i.AllowedAccess,
 		&i.Scopes,
+		&i.AllowedWrite,
 	)
 	return i, err
 }
 
 const getArtifactsByIDs = `-- name: GetArtifactsByIDs :many
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes FROM artifacts WHERE artifact_id = ANY($1::uuid[])
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts WHERE artifact_id = ANY($1::uuid[])
 `
 
 // GetArtifactsByIDs — batch fetch by a set of IDs, used by the OpenSearch
@@ -153,6 +156,7 @@ func (q *Queries) GetArtifactsByIDs(ctx context.Context, ids []pgtype.UUID) ([]A
 			&i.DeletedAt,
 			&i.AllowedAccess,
 			&i.Scopes,
+			&i.AllowedWrite,
 		); err != nil {
 			return nil, err
 		}
@@ -165,7 +169,7 @@ func (q *Queries) GetArtifactsByIDs(ctx context.Context, ids []pgtype.UUID) ([]A
 }
 
 const getLatestArtifactBySlug = `-- name: GetLatestArtifactBySlug :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes FROM artifacts
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts
 WHERE named_slug = $1 AND deleted_at IS NULL
 ORDER BY version DESC
 LIMIT 1
@@ -195,12 +199,13 @@ func (q *Queries) GetLatestArtifactBySlug(ctx context.Context, namedSlug *string
 		&i.DeletedAt,
 		&i.AllowedAccess,
 		&i.Scopes,
+		&i.AllowedWrite,
 	)
 	return i, err
 }
 
 const getLatestArtifactBySlugForCaller = `-- name: GetLatestArtifactBySlugForCaller :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes FROM artifacts
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts
 WHERE named_slug = $1
   AND deleted_at IS NULL
   AND (
@@ -254,6 +259,7 @@ func (q *Queries) GetLatestArtifactBySlugForCaller(ctx context.Context, arg GetL
 		&i.DeletedAt,
 		&i.AllowedAccess,
 		&i.Scopes,
+		&i.AllowedWrite,
 	)
 	return i, err
 }
@@ -275,11 +281,11 @@ INSERT INTO artifacts (
     artifact_id, artifact_type, named_slug, version,
     title, description, content_type,
     inline_content, blob_ref, sha256, size_bytes,
-    creator, scope, scopes, labels, metadata, allowed_access
+    creator, scope, scopes, labels, metadata, allowed_access, allowed_write
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
 )
-RETURNING artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes
+RETURNING artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write
 `
 
 type InsertArtifactParams struct {
@@ -300,6 +306,7 @@ type InsertArtifactParams struct {
 	Labels        []string
 	Metadata      json.RawMessage
 	AllowedAccess []string
+	AllowedWrite  []string
 }
 
 func (q *Queries) InsertArtifact(ctx context.Context, arg InsertArtifactParams) (Artifact, error) {
@@ -321,6 +328,7 @@ func (q *Queries) InsertArtifact(ctx context.Context, arg InsertArtifactParams) 
 		arg.Labels,
 		arg.Metadata,
 		arg.AllowedAccess,
+		arg.AllowedWrite,
 	)
 	var i Artifact
 	err := row.Scan(
@@ -344,13 +352,14 @@ func (q *Queries) InsertArtifact(ctx context.Context, arg InsertArtifactParams) 
 		&i.DeletedAt,
 		&i.AllowedAccess,
 		&i.Scopes,
+		&i.AllowedWrite,
 	)
 	return i, err
 }
 
 const listArtifactVersions = `-- name: ListArtifactVersions :many
 
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes FROM artifacts
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts
 WHERE named_slug = $1 AND deleted_at IS NULL
 ORDER BY version DESC
 `
@@ -390,6 +399,7 @@ func (q *Queries) ListArtifactVersions(ctx context.Context, namedSlug *string) (
 			&i.DeletedAt,
 			&i.AllowedAccess,
 			&i.Scopes,
+			&i.AllowedWrite,
 		); err != nil {
 			return nil, err
 		}
@@ -453,17 +463,18 @@ func (q *Queries) UnarchiveArtifact(ctx context.Context, artifactID pgtype.UUID)
 }
 
 const updateArtifactAccess = `-- name: UpdateArtifactAccess :execrows
-UPDATE artifacts SET allowed_access = $2, modified_at = now()
+UPDATE artifacts SET allowed_access = $2, allowed_write = $3, modified_at = now()
 WHERE artifact_id = $1
 `
 
 type UpdateArtifactAccessParams struct {
 	ArtifactID    pgtype.UUID
 	AllowedAccess []string
+	AllowedWrite  []string
 }
 
 func (q *Queries) UpdateArtifactAccess(ctx context.Context, arg UpdateArtifactAccessParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateArtifactAccess, arg.ArtifactID, arg.AllowedAccess)
+	result, err := q.db.Exec(ctx, updateArtifactAccess, arg.ArtifactID, arg.AllowedAccess, arg.AllowedWrite)
 	if err != nil {
 		return 0, err
 	}

@@ -268,7 +268,7 @@ func setContentSecurityEmbed(w http.ResponseWriter, ct, fa string) {
 	switch {
 	case strings.HasPrefix(strings.ToLower(ct), "text/html"):
 		w.Header().Set("Content-Security-Policy",
-			"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; frame-ancestors "+fa)
+			"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads; frame-ancestors "+fa)
 	case !isScriptSafeMedia(ct):
 		// Scriptable non-HTML (svg/xml/…) also gets the script-less sandbox so a
 		// sibling file served into an embedding surface can't run JS on the arti

@@ -33,4 +33,33 @@ describe("renderMarkdown", () => {
     expect(html).toContain("<h1");
     expect(html).not.toContain("title: X");
   });
+
+  // A single "~" means "approximately" in prose and must NOT trigger GFM
+  // strikethrough — marked's stock del tokenizer would pair the two lone tildes
+  // and wrap everything between them in <del>.
+  it("does not treat a single tilde as strikethrough", () => {
+    const { html } = renderMarkdown("re-skinning ~12 components (~+1 wk).\n");
+    expect(html).not.toContain("<del>");
+    expect(html).toContain("~12 components (~+1 wk)");
+  });
+
+  it("leaves lone approximation tildes literal across a line", () => {
+    const { html } = renderMarkdown("Unit economics: ~1000× cheaper (~$5).\n");
+    expect(html).not.toContain("<del>");
+    expect(html).toContain("~1000×");
+    expect(html).toContain("(~$5)");
+  });
+
+  // Double-tilde strikethrough must still render as <del>.
+  it("still renders double-tilde strikethrough", () => {
+    const { html } = renderMarkdown("this is ~~struck~~ out\n");
+    expect(html).toContain("<del>struck</del>");
+  });
+
+  // Mixed line: real strike renders, approximation stays literal.
+  it("renders ~~strike~~ while leaving ~approx~ literal on the same line", () => {
+    const { html } = renderMarkdown("mix ~~real~~ and ~approx~ here\n");
+    expect(html).toContain("<del>real</del>");
+    expect(html).toContain("~approx~");
+  });
 });

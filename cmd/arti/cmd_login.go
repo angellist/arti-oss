@@ -18,8 +18,8 @@ import (
 //  1. CLI generates a one-time `cli_code` (random 24 bytes, base64url).
 //  2. CLI opens the browser to
 //     `<base>/auth/login?cli_code=<code>`.
-//  3. User authenticates via Google. Server callback associates the code
-//     with the verified email and renders a "you can close this tab" page.
+//  3. User authenticates via Google and explicitly confirms the displayed
+//     code. The server then associates it with the verified email.
 //  4. CLI polls `POST <base>/auth/cli/exchange {code}` every 2 s.
 //  5. On hit, server returns access + refresh tokens; CLI stores them.
 type LoginCmd struct {

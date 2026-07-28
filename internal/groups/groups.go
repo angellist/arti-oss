@@ -41,6 +41,32 @@ func (s *Service) Mount(r chi.Router) {
 	r.Post("/api/groups", s.create)
 	r.Patch("/api/groups/{name}", s.update)
 	r.Delete("/api/groups/{name}", s.del)
+	r.Get("/api/idp-groups", s.listIdP)
+}
+
+// IdPGroupDTO is one grantable IdP (SSO) group: its name, the literal
+// `idp:<name>` token to drop into allowed_access/allowed_write, and how many
+// users currently carry it. Roster is never exposed.
+type IdPGroupDTO struct {
+	Name        string `json:"name"`
+	Token       string `json:"token"`
+	MemberCount int    `json:"member_count"`
+}
+
+// listIdP returns the distinct IdP group names captured at login, for the
+// access-editor typeahead. Any authenticated caller may read it (it only
+// reveals group names + counts, never who is in them).
+func (s *Service) listIdP(w http.ResponseWriter, r *http.Request) {
+	gs, err := s.store.ListIdPGroupNames(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]IdPGroupDTO, 0, len(gs))
+	for _, g := range gs {
+		out = append(out, IdPGroupDTO{Name: g.Name, Token: pgstore.IdPToken(g.Name), MemberCount: g.MemberCount})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"idp_groups": out})
 }
 
 // GroupDTO is the JSON shape returned to clients. Token is the literal string
