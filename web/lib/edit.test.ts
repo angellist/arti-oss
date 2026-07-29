@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { isEditableArtifact, saveAsNewVersionInput, saveConfirmMessage } from "./edit";
+import { DIAGRAM_CONTENT_TYPE } from "./diagram";
 
 const base = {
   artifact_type: "TEXT" as const,
@@ -16,6 +17,10 @@ describe("isEditableArtifact", () => {
   it("rejects a slugless artifact — saving would create an UNRELATED artifact, not a version", () => {
     expect(isEditableArtifact({ ...base, named_slug: null })).toBe(false);
     expect(isEditableArtifact({ ...base, named_slug: "" })).toBe(false);
+  });
+
+  it("allows a diagram — its body is text (JSON) and the viewer swaps in the canvas editor", () => {
+    expect(isEditableArtifact({ ...base, content_type: DIAGRAM_CONTENT_TYPE })).toBe(true);
   });
 
   it("rejects non-TEXT types — packages/apps/attachments have no single editable body", () => {

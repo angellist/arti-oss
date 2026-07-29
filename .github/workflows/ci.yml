@@ -25,9 +25,9 @@ jobs:
 
       - name: Install code-gen tools
         run: |
-          go install github.com/pressly/goose/v3/cmd/goose@latest
-          go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
-          go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest
+          go install github.com/pressly/goose/v3/cmd/goose@v3.27.1
+          go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+          go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.8.0
 
       - run: make setup
 

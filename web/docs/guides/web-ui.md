@@ -54,7 +54,9 @@ actually exist across all artifacts before you start filtering.
 
 ## Uploading
 
-Click **+ Upload** in the rail to open the **Upload artifact** modal.
+Click **Upload** in the rail to open the **Upload artifact** modal. (To make
+something instead of uploading it, **New diagram** sits right below — see
+[Drawing diagrams](diagrams.md).)
 
 1. **Drop or choose a file.** The drop zone reads *"Drag & drop a file here / or
    click to choose — drop several to bundle them into a package."* Dropping

@@ -58,6 +58,9 @@ export function guessContentType(file: File): string {
 export function isTextualContentType(ct: string): boolean {
   const base = ct.split(";")[0].trim().toLowerCase();
   if (base.startsWith("text/")) return true;
+  // Structured-suffix JSON (RFC 6839), e.g. the diagram type
+  // application/vnd.arti.diagram+json, is text like plain JSON is.
+  if (base.endsWith("+json")) return true;
   return ["application/json", "application/yaml", "application/javascript"].includes(base);
 }
 

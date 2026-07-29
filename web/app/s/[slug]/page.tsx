@@ -71,7 +71,7 @@ export default async function BySlug({
       entryPoint = m.entry_point ?? null;
     }
     const kind = fullPageKind(contentType);
-    const needsBody = kind === "markdown" || kind === "text";
+    const needsBody = kind === "markdown" || kind === "text" || kind === "diagram";
     const body = needsBody
       ? filePath
         ? (await fetchPackageFile(info.artifact_id, filePath, cookie)).body

@@ -1,3 +1,5 @@
+import { isDiagramContentType } from "./diagram";
+
 // Reads the optional ?v= query param. `full` renders the artifact body
 // in a full-viewport iframe with no chrome. The legacy `?view=fullpage`
 // form is still accepted so any URLs already shared keep working.
@@ -22,6 +24,10 @@ export function isTextualContentType(ct: string): boolean {
   const base = ct.split(";")[0].trim().toLowerCase();
   return (
     base.startsWith("text/") ||
+    // Structured-suffix JSON types (RFC 6839) — application/vnd.foo+json — are
+    // text like plain JSON is. This is what lets a diagram
+    // (application/vnd.arti.diagram+json) be a TEXT artifact.
+    base.endsWith("+json") ||
     base === "application/json" ||
     base === "application/yaml" ||
     base === "application/javascript"
@@ -54,12 +60,15 @@ export function prettyPrintJSON(body: string): string {
 // dropping them in a <pre> is exactly the bug this split fixes (an image
 // attachment rendered as a wall of PNG noise). Mirrors NonTextBody's split in
 // the in-viewer body so the two render decisions can't drift.
-export type FullPageKind = "html" | "markdown" | "image" | "pdf" | "text" | "binary";
+export type FullPageKind = "html" | "markdown" | "image" | "pdf" | "diagram" | "text" | "binary";
 
 export function fullPageKind(ct: string): FullPageKind {
   const base = ct.split(";")[0].trim().toLowerCase();
   if (base.startsWith("text/html")) return "html";
   if (base.startsWith("text/markdown")) return "markdown";
+  // Diagrams are JSON on the wire but a picture on screen — full-page must
+  // render the canvas, not the source.
+  if (isDiagramContentType(base)) return "diagram";
   if (base.startsWith("image/")) return "image";
   if (base === "application/pdf") return "pdf";
   // Remaining textual types (plain text, json, yaml, js) render as text;

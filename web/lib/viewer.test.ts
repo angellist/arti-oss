@@ -7,6 +7,7 @@ import {
   prettyPrintJSON,
   resolvePackageEntry,
 } from "./viewer";
+import { DIAGRAM_CONTENT_TYPE } from "./diagram";
 
 describe("fullPageKind", () => {
   it("classifies images as image (so the full-page view renders <img>, not bytes)", () => {
@@ -29,6 +30,19 @@ describe("fullPageKind", () => {
   it("classifies opaque bytes as binary (a download card, not a <pre> of bytes)", () => {
     expect(fullPageKind("application/zip")).toBe("binary");
     expect(fullPageKind("application/octet-stream")).toBe("binary");
+  });
+  it("classifies a diagram as diagram — full page shows the canvas, not its JSON", () => {
+    expect(fullPageKind(DIAGRAM_CONTENT_TYPE)).toBe("diagram");
+    expect(fullPageKind(`${DIAGRAM_CONTENT_TYPE}; charset=utf-8`)).toBe("diagram");
+    // Other +json types have no special renderer and stay plain text.
+    expect(fullPageKind("application/ld+json")).toBe("text");
+  });
+  it("treats +json structured-suffix types as textual, so they can be TEXT artifacts", () => {
+    expect(isTextualContentType(DIAGRAM_CONTENT_TYPE)).toBe(true);
+    expect(isTextualContentType("application/ld+json")).toBe(true);
+    // The suffix rule must not leak into other structured suffixes: SVG is
+    // +xml and stays an image.
+    expect(isTextualContentType("image/svg+xml")).toBe(false);
   });
   it("never classifies image/pdf/binary as textual — the body must not be fetched as a string", () => {
     for (const ct of ["image/png", "application/pdf", "application/zip"]) {

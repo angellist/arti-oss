@@ -17,6 +17,9 @@ import CommentsLayer from "./CommentsLayer";
 import CreatorName from "./CreatorName";
 import ArtifactEditor from "./ArtifactEditor";
 import ArtifactCompare from "./ArtifactCompare";
+import DiagramView from "./DiagramView";
+import DiagramArtifactEditor from "./DiagramArtifactEditor";
+import { isDiagramContentType } from "@/lib/diagram";
 
 // BackButton — small left-chevron that pops one step in browser history
 // if there is one, falling back to the catalog root. Lives at the very
@@ -79,6 +82,7 @@ function extFromContentType(ct: string): string {
     case "application/javascript": return "js";
     case "application/zip": return "zip";
   }
+  if (t.endsWith("+json")) return "json";
   return "";
 }
 
@@ -646,6 +650,7 @@ function ThreeDotsMenu({
   onArchive,
   archiveTitle,
   onEdit,
+  editTitle,
   onCompare,
 }: {
   downloadHref?: string;
@@ -659,6 +664,9 @@ function ThreeDotsMenu({
   onArchive: () => void;
   archiveTitle: string;
   onEdit?: () => void;
+  // editTitle overrides the Edit item tooltip — a diagram opens a canvas,
+  // not the raw source, and the tooltip should not claim otherwise.
+  editTitle?: string;
   onCompare?: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -710,7 +718,7 @@ function ThreeDotsMenu({
               type="button"
               onClick={() => { onEdit(); setOpen(false); }}
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-neutral-700 hover:bg-neutral-50"
-              title="edit the raw source — saving creates a new version"
+              title={editTitle ?? "edit the raw source — saving creates a new version"}
             >
               <svg
                 width="12"
@@ -1087,6 +1095,9 @@ export default function ArtifactViewer({
   // APP artifacts ARE packages (browsable file tree) — they just also get the
   // "Visit app" launcher below. So package treatment covers PACKAGE + APP.
   const isPackage = (info.artifact_type === "PACKAGE" || info.artifact_type === "APP") && manifest;
+  // Diagrams are TEXT artifacts whose body happens to be a canvas document:
+  // same versioning/edit/compare plumbing, different renderer.
+  const isDiagram = info.artifact_type === "TEXT" && isDiagramContentType(info.content_type);
   const selectedInPkg = mode.kind === "package" ? mode.selected : null;
 
   // Permalink: stable, version-pinned, slug-free URL anyone can quote.
@@ -1115,7 +1126,8 @@ export default function ArtifactViewer({
   // FullPageView renders every kind correctly (HTML/markdown/code from the
   // viewer, image/pdf/binary from the per-file bytes URL), so we no longer fork
   // to a raw /api/ URL per content type.
-  const isFullPageable = (ct: string) => isHTML(ct) || isMarkdown(ct) || isPlainCode(ct);
+  const isFullPageable = (ct: string) =>
+    isHTML(ct) || isMarkdown(ct) || isPlainCode(ct) || isDiagramContentType(ct);
   let effectiveFullHref: string | undefined;
   if (isPackage && selectedInPkg) {
     effectiveFullHref = `?v=full&file=${encodeURIComponent(selectedInPkg)}`;
@@ -1273,6 +1285,11 @@ export default function ArtifactViewer({
                       : (isArchived ? "unarchive" : "archive")
                   }
                   onEdit={editable ? () => { setComparing(false); setEditing(true); } : undefined}
+                  editTitle={
+                    isDiagram
+                      ? "open the diagram canvas — saving creates a new version"
+                      : undefined
+                  }
                   onCompare={comparable ? () => { setEditing(false); setCompareWidth("wide"); setComparing(true); } : undefined}
                 />
               </div>
@@ -1327,11 +1344,29 @@ export default function ArtifactViewer({
             // artifact can never survive a render against another's props —
             // the effect-based setEditing(false) reset above runs a render
             // too late to guarantee that on its own.
-            <ArtifactEditor
-              key={info.artifact_id}
-              info={info}
+            isDiagram ? (
+              <DiagramArtifactEditor
+                key={info.artifact_id}
+                info={info}
+                body={body ?? ""}
+                onClose={() => setEditing(false)}
+              />
+            ) : (
+              <ArtifactEditor
+                key={info.artifact_id}
+                info={info}
+                body={body ?? ""}
+                onClose={() => setEditing(false)}
+              />
+            )
+          ) : isDiagram && !original ? (
+            // A diagram's stored body is JSON, but its rendered form is the
+            // picture. "Raw Source" still shows the JSON, same as any other
+            // text artifact.
+            <DiagramView
               body={body ?? ""}
-              onClose={() => setEditing(false)}
+              title={info.title}
+              fileName={info.named_slug || info.title || "diagram"}
             />
           ) : original ? (
             <RawBody body={body ?? ""} />
@@ -1442,6 +1477,12 @@ function PackageBody({
         <div className="text-neutral-400">loading…</div>
       ) : original ? (
         <RawBody body={fileBody} />
+      ) : isDiagramContentType(entryCT || fileCT) ? (
+        <DiagramView
+          body={fileBody}
+          title={selected.split("/").pop() || selected}
+          fileName={selected.split("/").pop() || "diagram"}
+        />
       ) : (
         <RenderedBody body={fileBody} ct={fileCT} src={fileSrc} allowPopups={info.artifact_type === "APP"} />
       )}

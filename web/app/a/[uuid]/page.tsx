@@ -61,7 +61,7 @@ export default async function ByID({
       entryPoint = m.entry_point ?? null;
     }
     const kind = fullPageKind(contentType);
-    const needsBody = kind === "markdown" || kind === "text";
+    const needsBody = kind === "markdown" || kind === "text" || kind === "diagram";
     const body = needsBody
       ? filePath
         ? (await fetchPackageFile(uuid, filePath, cookie)).body

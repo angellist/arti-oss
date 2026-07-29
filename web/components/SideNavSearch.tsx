@@ -7,6 +7,7 @@ import { getAggregates, getMe } from "@/lib/arti";
 import { SEARCH_OPEN_KEY } from "@/lib/catalog";
 import type { AggregatesResponse, Me } from "@/lib/types";
 import UploadButton from "./UploadButton";
+import NewDiagramButton from "./NewDiagramButton";
 import { SearchIcon } from "./SearchIcon";
 
 const TOP_LABELS = 30;
@@ -35,6 +36,30 @@ const TYPES = [
   { value: "MARKDOWN", label: "markdown" },
   { value: "HTML", label: "html" },
 ] as const;
+
+// A listing glyph for the BROWSE ALL rail link — same stroke weight and size
+// as SearchIcon / UploadButton's arrow so the three rail links read as one set.
+function BrowseIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <line x1="8" y1="6" x2="21" y2="6" />
+      <line x1="8" y1="12" x2="21" y2="12" />
+      <line x1="8" y1="18" x2="21" y2="18" />
+      <line x1="3" y1="6" x2="3.01" y2="6" />
+      <line x1="3" y1="12" x2="3.01" y2="12" />
+      <line x1="3" y1="18" x2="3.01" y2="18" />
+    </svg>
+  );
+}
 
 // Tri is the state of a tri-state filter chip: not applied, filtered-to, or
 // excluded. Scope and label chips cycle off → pos → neg → off on click.
@@ -299,26 +324,33 @@ export default function SideNavSearch() {
 
   return (
     <div className="space-y-5 text-sm">
-      <UploadButton />
+      {/* Search / Browse All / Upload / New diagram are one group of rail
+          links — same type scale, leading icon, and a row rhythm tighter than
+          the section gap but still breathing. */}
+      <nav className="space-y-2.5">
+        {/* SEARCH reveals the full-width search bar at the top of the listing
+            (CatalogTable) rather than living in the rail. */}
+        <button
+          type="button"
+          onClick={openSearch}
+          className="flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400 transition hover:text-neutral-600"
+        >
+          <SearchIcon className="h-3 w-3 shrink-0" />
+          Search
+        </button>
 
-      {/* SEARCH reveals the full-width search bar at the top of the listing
-          (CatalogTable) rather than living in the rail. Styled to match the
-          "Browse All" section link below it. */}
-      <button
-        type="button"
-        onClick={openSearch}
-        className="flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400 hover:text-neutral-600"
-      >
-        <SearchIcon className="h-3 w-3" />
-        Search
-      </button>
+        <Link
+          href="/browse"
+          className="flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400 transition hover:text-neutral-600"
+        >
+          <BrowseIcon className="h-3 w-3 shrink-0" />
+          Browse All
+        </Link>
 
-      <Link
-        href="/browse"
-        className="block text-[10px] font-semibold uppercase tracking-widest text-neutral-400 hover:text-neutral-600"
-      >
-        Browse All
-      </Link>
+        <UploadButton />
+
+        <NewDiagramButton />
+      </nav>
 
       <section>
         <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400">

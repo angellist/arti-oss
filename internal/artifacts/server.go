@@ -3008,6 +3008,12 @@ func extForContentType(ct string) string {
 	case "video/webm":
 		return ".webm"
 	}
+	// Structured-suffix types carry their base format in the suffix, so a
+	// vendor type like application/vnd.arti.diagram+json downloads as .json
+	// rather than extensionless.
+	if strings.HasSuffix(ct, "+json") {
+		return ".json"
+	}
 	// Last-resort lookup; mime.ExtensionsByType returns slices ordered
 	// by MIME registry which isn't always the friendliest (e.g. ".jfif"
 	// for jpeg) so we prefer the curated map above.
@@ -3030,6 +3036,11 @@ func isInlineRenderable(ct string) bool {
 		strings.HasPrefix(ct, "image/") ||
 		strings.HasPrefix(ct, "audio/") ||
 		strings.HasPrefix(ct, "video/") {
+		return true
+	}
+	// +json types are JSON text — browsers show them in-page like any other
+	// JSON, so forcing a download would be gratuitous.
+	if strings.HasSuffix(ct, "+json") {
 		return true
 	}
 	switch ct {
@@ -3120,6 +3131,13 @@ func isTextualContentType(ct string) bool {
 		base = strings.TrimSpace(base[:i])
 	}
 	if strings.HasPrefix(base, "text/") {
+		return true
+	}
+	// Structured-suffix JSON types (RFC 6839) — application/vnd.foo+json — are
+	// JSON text and render fine in the viewer. This is what lets the web UI's
+	// diagram format (application/vnd.arti.diagram+json) be a TEXT artifact
+	// instead of needing a new artifact_type.
+	if strings.HasSuffix(base, "+json") {
 		return true
 	}
 	switch base {

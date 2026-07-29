@@ -1,5 +1,7 @@
 import CommentsLayer from "./CommentsLayer";
 import FullPageHtmlFrame from "./FullPageHtmlFrame";
+import DiagramFigure from "./DiagramSvg";
+import { parseDiagram, type DiagramDoc } from "@/lib/diagram";
 import type { Me } from "@/lib/types";
 import { Frontmatter, renderMarkdown, PROSE_CLASSNAME } from "@/lib/markdown";
 import { fullPageKind, isJSONContentType, prettyPrintJSON } from "@/lib/viewer";
@@ -130,6 +132,16 @@ export default function FullPageView({
       </div>
     );
   }
+  // Diagram: the canvas fills the viewport. Rendered from the parsed body
+  // (not the raw bytes URL) so it scales as vector art at any window size.
+  if (kind === "diagram") {
+    return (
+      <div className="fixed inset-0 z-50 bg-white p-4">
+        {comments}
+        <FullPageDiagram body={body} title={title} />
+      </div>
+    );
+  }
   // Image attachment: render the bytes via <img>, centered and contained in
   // the viewport (mirrors NonTextBody in the in-viewer body).
   if (kind === "image" && rawSrc) {
@@ -178,6 +190,25 @@ export default function FullPageView({
     >
       {comments}
       <pre data-arti-doc className="whitespace-pre-wrap break-words font-mono text-sm">{displayBody}</pre>
+    </div>
+  );
+}
+
+// FullPageDiagram renders a diagram body as vector art filling the viewport.
+// It stays a server component (DiagramFigure holds no client state), and a
+// body that won't parse degrades to its source text rather than a blank page.
+function FullPageDiagram({ body, title }: { body: string; title: string }) {
+  let doc: DiagramDoc;
+  try {
+    doc = parseDiagram(body);
+  } catch {
+    return (
+      <pre data-arti-doc className="h-full w-full overflow-auto whitespace-pre-wrap break-words font-mono text-sm">{body}</pre>
+    );
+  }
+  return (
+    <div data-arti-doc className="h-full w-full">
+      <DiagramFigure doc={doc} title={title} className="h-full w-full" />
     </div>
   );
 }

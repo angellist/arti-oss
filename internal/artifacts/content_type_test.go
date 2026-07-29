@@ -10,6 +10,10 @@ func TestIsTextualContentType(t *testing.T) {
 		"text/markdown", "text/html", "text/plain", "text/csv",
 		"text/x-python", "text/markdown; charset=utf-8", "TEXT/HTML",
 		"application/json", "application/yaml", "application/javascript",
+		// Structured-suffix JSON (RFC 6839) — the web UI's diagram format
+		// rides on this so a diagram can be an ordinary TEXT artifact.
+		"application/vnd.arti.diagram+json", "application/ld+json",
+		"APPLICATION/VND.ARTI.DIAGRAM+JSON; charset=utf-8",
 	}
 	for _, ct := range textual {
 		if !isTextualContentType(ct) {
@@ -41,6 +45,8 @@ func TestExtForContentType(t *testing.T) {
 		{"text/html; charset=utf-8", ".html"}, // params stripped
 		{"TEXT/MARKDOWN", ".md"},              // case-insensitive
 		{"application/json", ".json"},
+		// +json vendor types download as .json rather than extensionless.
+		{"application/vnd.arti.diagram+json", ".json"},
 		{"application/pdf", ".pdf"},
 		{"application/zip", ".zip"},
 		{"image/png", ".png"},
