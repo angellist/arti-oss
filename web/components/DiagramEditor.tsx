@@ -121,6 +121,8 @@ export default function DiagramEditor({
   initialDoc,
   onSave,
   onCancel,
+  getDocRef,
+  onDirtyChange,
   saveLabel = "Save",
   banner,
   saving = false,
@@ -129,8 +131,17 @@ export default function DiagramEditor({
   disableSaveWhenClean = false,
 }: {
   initialDoc: DiagramDoc;
-  onSave: (doc: DiagramDoc) => void | Promise<void>;
+  // Omit when the HOST owns the commit (the "New artifact" page): the action
+  // bar then drops its Save button, leaving exactly one commit on the page.
+  onSave?: (doc: DiagramDoc) => void | Promise<void>;
   onCancel?: () => void;
+  // Lets a host pull the current document at ITS commit time. A pull, not a
+  // push: `doc` changes on every pointermove of a drag, so lifting it on each
+  // change would re-render the host ~60×/sec for the whole gesture.
+  getDocRef?: React.MutableRefObject<(() => DiagramDoc) | null>;
+  // The one piece of canvas state a host does need reactively (to guard against
+  // navigating away from unsaved work). A boolean, so it settles immediately.
+  onDirtyChange?: (dirty: boolean) => void;
   saveLabel?: string;
   banner?: React.ReactNode;
   saving?: boolean;
@@ -736,8 +747,23 @@ export default function DiagramEditor({
     // Fold an in-flight label edit into the document being saved — otherwise
     // the last thing typed is the one thing that doesn't get persisted.
     const finalDoc = finishEditing(true);
-    await onSave(finalDoc);
+    await onSave?.(finalDoc);
   };
+
+  // Publish the doc getter for a host that owns the commit. It runs
+  // finishEditing so an in-flight label edit is folded in — the same guarantee
+  // the local Save button gets.
+  useEffect(() => {
+    if (!getDocRef) return;
+    getDocRef.current = () => finishEditing(true);
+    return () => {
+      getDocRef.current = null;
+    };
+  }, [getDocRef, finishEditing]);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const downloadSvg = () => {
     const blob = new Blob([toSvg(docRef.current)], { type: "image/svg+xml" });
@@ -762,8 +788,14 @@ export default function DiagramEditor({
   return (
     <div className="flex flex-col gap-2">
       {/* Action bar — mirrors the text editor's bar so Edit feels the same
-          whichever body type you're editing. */}
-      <div className="flex flex-wrap items-center gap-2 rounded-md border border-blue-200 bg-blue-50/60 px-3 py-2">
+          whichever body type you're editing. Hosted (no onSave) it isn't a
+          commit context, so it drops the blue "you are editing" treatment. */}
+      <div
+        className={
+          "flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 " +
+          (onSave ? "border-blue-200 bg-blue-50/60" : "border-neutral-200 bg-neutral-50")
+        }
+      >
         <span className="text-[12px] text-neutral-700">{banner}</span>
         <span className="ml-auto flex items-center gap-2">
           {error ? <span className="text-[11px] text-rose-600">error: {error}</span> : null}
@@ -785,14 +817,16 @@ export default function DiagramEditor({
               Cancel
             </button>
           ) : null}
-          <button
-            type="button"
-            onClick={save}
-            disabled={saving || (disableSaveWhenClean && !dirty)}
-            className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:opacity-50"
-          >
-            {saving ? "Saving…" : saveLabel}
-          </button>
+          {onSave ? (
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || (disableSaveWhenClean && !dirty)}
+              className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:opacity-50"
+            >
+              {saving ? "Saving…" : saveLabel}
+            </button>
+          ) : null}
         </span>
       </div>
 

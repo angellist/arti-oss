@@ -7,7 +7,7 @@ import { getAggregates, getMe } from "@/lib/arti";
 import { SEARCH_OPEN_KEY } from "@/lib/catalog";
 import type { AggregatesResponse, Me } from "@/lib/types";
 import UploadButton from "./UploadButton";
-import NewDiagramButton from "./NewDiagramButton";
+import NewMenu from "./NewMenu";
 import { SearchIcon } from "./SearchIcon";
 
 const TOP_LABELS = 30;
@@ -23,10 +23,22 @@ const TOP_CONTENT_TYPES = 10;
 const FILTER_TYPE_KEY = "arti.filter.type";
 const FILTER_Q_KEY = "arti.filter.q";
 
-// MARKDOWN and HTML are pseudo-types: the server translates them into a
-// content_type prefix filter (text/markdown*, text/html*) so the sidebar
-// can offer one-click filtering for the most common text shapes without
-// requiring users to type the content_type syntax.
+// Two families in one row. The uppercase values are real artifact_types; the
+// lowercase ones are pseudo-types the server resolves to a content_type glob
+// (see ApplyTypeFilter), so the rail can offer one-click filtering for the body
+// shapes people look for without anyone typing content_type syntax.
+//
+// Which pseudo-types earn a chip is a question about the corpus, so it was
+// measured rather than guessed (prod /aggregates, 2026-07-30): markdown 7,658 ·
+// html 499 · json 155 · image 68 · diagram 2. `diagram` is here despite the
+// count because it's a brand-new authoring kind that only just became creatable.
+// PDF (2 artifacts) does NOT get a chip — the server still resolves the
+// pseudo-type, so `type:pdf` works as a search token, it just isn't worth a slot
+// in the row. `application/zip` is common (156) but those are PACKAGEs, which
+// already have their own chip.
+//
+// For exact content-type values and their live counts, the "content types"
+// section below is driven straight off the aggregate.
 const TYPES = [
   { value: "", label: "all" },
   { value: "TEXT", label: "TEXT" },
@@ -34,7 +46,10 @@ const TYPES = [
   { value: "APP", label: "APP" },
   { value: "ATTACHMENT", label: "ATTACHMENT" },
   { value: "MARKDOWN", label: "markdown" },
+  { value: "DIAGRAM", label: "diagram" },
   { value: "HTML", label: "html" },
+  { value: "JSON", label: "json" },
+  { value: "IMAGE", label: "image" },
 ] as const;
 
 // A listing glyph for the BROWSE ALL rail link — same stroke weight and size
@@ -349,12 +364,12 @@ export default function SideNavSearch() {
 
         <UploadButton />
 
-        <NewDiagramButton />
+        <NewMenu />
       </nav>
 
       <section>
         <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400">
-          type
+          types
         </h3>
         <div className="flex flex-wrap gap-1.5">
           {/* Attachments are visible to everyone now; only couch's private

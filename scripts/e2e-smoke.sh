@@ -18,7 +18,16 @@ EMAIL=${ARTI_EMAIL:-e2e-$(date +%s)@example.com}
 bold() { printf "\n\033[1m== %s ==\033[0m\n" "$1"; }
 ok()   { printf "  \033[32m✓\033[0m %s\n" "$1"; }
 fail() { printf "  \033[31m✗\033[0m %s\n" "$1"; exit 1; }
-ARTI=./bin/arti
+# Run the CLI against a throwaway config dir. `arti login` persists its
+# token under os.UserConfigDir(), so a bare invocation here overwrites the
+# operator's own credential with this run's e2e identity — and the
+# replacement carries no refresh token, so their CLI just starts 401ing.
+# Every call site is `ARTI_BASE_URL=$API $ARTI …`, so isolating it here
+# needs no changes below. HOME covers darwin (~/Library/Application
+# Support); XDG_CONFIG_HOME covers linux.
+ARTI_CONFIG_HOME=$(mktemp -d)
+trap 'rm -rf "$ARTI_CONFIG_HOME"' EXIT
+ARTI="env HOME=$ARTI_CONFIG_HOME XDG_CONFIG_HOME=$ARTI_CONFIG_HOME/.config ./bin/arti"
 
 bold "boot checks"
 # Identify the server, don't just ping it. $API defaults to a well-known

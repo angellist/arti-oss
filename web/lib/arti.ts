@@ -256,6 +256,18 @@ export interface CreateArtifactInput {
   named_slug?: string;
   scopes?: string[];
   labels?: string[];
+  // Access at creation time. Omit to inherit from the slug's prior version if
+  // there is one, else the server default (everyone authenticated). An empty
+  // array is NOT the same as omitting: it means creator-only.
+  allowed_access?: string[];
+  // Tokens allowed to write (a subset of allowed_access; the server unions it
+  // in). Omit for mirror mode, where write follows read; an empty array means
+  // creator-only writes.
+  allowed_write?: string[];
+  // Assert this is a brand-new document: the server rejects the POST with 409
+  // `slug-exists` if the slug already has a non-deleted version, instead of
+  // silently appending v(N+1) to someone else's slug.
+  ensure_new?: boolean;
 }
 
 // createArtifact POSTs a new artifact (or a new version of an existing

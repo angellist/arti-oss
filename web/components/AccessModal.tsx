@@ -42,6 +42,12 @@ function principalKind(token: string): "everyone" | "domain" | "group" | "idp" |
 // Read | Read & write control, plus an add-row typeahead over emails, manual
 // groups, and captured IdP (SSO) groups. Read-only for non-editors. Replaces
 // the old anchored AccessPopover.
+// It runs in two modes. Against an existing artifact it PATCHes on every edit
+// (the default). On a "New artifact" page there is no artifact to PATCH yet, so
+// the caller passes `draft` + `onCommit` and edits land in the caller's draft
+// state instead — the access is then sent as part of the single create POST.
+// In draft mode the copy says so plainly, because a dialog that looks like it
+// saved but didn't is the one failure mode worth extra words.
 export default function AccessModal({
   artifactID,
   access,
@@ -50,14 +56,22 @@ export default function AccessModal({
   canEdit,
   onClose,
   onSaved,
+  draft: draftMode = false,
+  onCommit,
 }: {
-  artifactID: string;
+  // Required unless draft mode, where nothing is PATCHed.
+  artifactID?: string;
   access: string[];
   write?: string[] | null;
   hasOtherVersions: boolean;
   canEdit: boolean;
   onClose: () => void;
   onSaved: () => void;
+  // Draft mode: no artifact exists yet; lift edits instead of persisting them.
+  draft?: boolean;
+  // `write` is null when the draft is still in mirror mode (write follows read),
+  // which is NOT the same as an explicit list of every reader — see persist().
+  onCommit?: (access: string[], write: string[] | null) => void;
 }) {
   // Local, optimistic copy of the principal rows. Seeded from props and
   // re-synced whenever the server props change (after a save + router.refresh).
@@ -113,12 +127,25 @@ export default function AccessModal({
   // gets read.
   const persist = async (next: Row[]) => {
     setRows(next); // optimistic — later edits compose on this, not stale props
+    const nextAccess = next.map((r) => r.token);
+    const nextWrite = next.filter((r) => r.level === "write").map((r) => r.token);
+    // Draft mode: there is nothing to PATCH. Lift the edit to the caller's
+    // draft state and return — no network, so no failure to roll back from.
+    if (draftMode) {
+      // Report mirror mode as null rather than "every reader, listed". They look
+      // equivalent on the version being created, but an EXPLICIT allowed_write is
+      // sticky: later versions inherit it, and because the server unions write
+      // into read (the ⊆ invariant), a stored write of ['*'] would silently
+      // re-widen read access the first time someone narrows it to a domain.
+      // Mirror mode has no such tail — it just tracks whatever read becomes.
+      const mirror = next.length > 0 && next.every((r) => r.level === "write");
+      onCommit?.(nextAccess, mirror ? null : nextWrite);
+      return;
+    }
     setBusy(true);
     setErr("");
     try {
-      const nextAccess = next.map((r) => r.token);
-      const nextWrite = next.filter((r) => r.level === "write").map((r) => r.token);
-      await updateArtifactAccess(artifactID, nextAccess, nextWrite);
+      await updateArtifactAccess(artifactID!, nextAccess, nextWrite);
       onSaved();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -198,7 +225,13 @@ export default function AccessModal({
         </div>
 
         <div className="px-5 py-3">
-          {hasOtherVersions ? (
+          {draftMode ? (
+            // Nothing here is written yet. Said plainly, because every other
+            // edit surface in arti DOES save on the spot.
+            <p className="mb-2 rounded-md bg-blue-50 px-2.5 py-1.5 text-[11px] leading-snug text-blue-800">
+              <strong>Not saved yet.</strong> This access applies when you create the artifact.
+            </p>
+          ) : hasOtherVersions ? (
             <p className="mb-2 rounded-md bg-amber-50 px-2.5 py-1.5 text-[11px] leading-snug text-amber-800">
               Changes apply to <strong>this version only</strong>. Other versions of this slug keep their
               existing access.
@@ -318,6 +351,21 @@ export default function AccessModal({
             </div>
           ) : null}
         </div>
+
+        {/* Draft mode gets an explicit dismissal. It is only a close button —
+            the rows above already live in the draft — so it says Done, not
+            Save: there is exactly one commit on the page, and it's Create. */}
+        {draftMode ? (
+          <div className="flex items-center justify-end gap-2 border-t border-neutral-100 px-5 py-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md bg-neutral-800 px-3 py-1 text-xs font-medium text-white transition hover:bg-neutral-900"
+            >
+              Done
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

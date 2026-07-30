@@ -88,4 +88,21 @@ describe("AccessModal", () => {
     );
     expect(html).toContain("this version only");
   });
+
+  it("says nothing is saved yet in draft mode", () => {
+    const html = renderToStaticMarkup(
+      <AccessModal
+        draft
+        access={["*"]}
+        hasOtherVersions={false}
+        canEdit={true}
+        onClose={() => {}}
+        onSaved={() => {}}
+        onCommit={() => {}}
+      />,
+    );
+    expect(html).toContain("Not saved yet");
+    // The only dismissal is Done — the page's Create is the commit.
+    expect(html).toContain("Done");
+  });
 });

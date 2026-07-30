@@ -554,8 +554,7 @@ func (s *Server) toolList(ctx context.Context, raw json.RawMessage) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.svc.List(ctx, pgstore.ListInput{
-		ArtifactType:    a.Type,
+	in := pgstore.ListInput{
 		Creator:         a.Creator,
 		Scope:           a.Scope,
 		Labels:          a.Labels,
@@ -566,7 +565,14 @@ func (s *Server) toolList(ctx context.Context, raw json.RawMessage) (any, error)
 		IncludeArchived: a.IncludeArchived,
 		CallerEmail:     caller,
 		CallerGroups:    groups,
-	})
+	}
+	// Resolves pseudo-types (markdown / html / diagram / json / pdf / image) to a
+	// content_type glob, exactly as the web UI does. Assigning a.Type straight to
+	// ArtifactType made `type: "MARKDOWN"` silently return zero rows here.
+	if a.Type != nil {
+		artifacts.ApplyTypeFilter(&in, *a.Type)
+	}
+	res, err := s.svc.List(ctx, in)
 	if err != nil {
 		return nil, err
 	}

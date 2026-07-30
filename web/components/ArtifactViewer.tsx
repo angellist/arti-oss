@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ArtifactInfo, Me, PackageManifest } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
@@ -9,8 +9,9 @@ import { useRailMode } from "@/lib/rail-context";
 import { isTextualContentType, isJSONContentType, prettyPrintJSON } from "@/lib/viewer";
 import { isEditableArtifact } from "@/lib/edit";
 import { isComparableArtifact } from "@/lib/diff";
-import { Frontmatter, renderMarkdown } from "@/lib/markdown";
-import { archiveArtifact, encodeFilePath, getAggregates, hasPerm, latestVersionForSlug, sameEmail, unarchiveArtifact, updateArtifactLabels, updateArtifactScopes, updateArtifactTitle } from "@/lib/arti";
+import MarkdownBody from "./MarkdownBody";
+import { LabelEditor, ScopeEditor } from "./ChipEditors";
+import { archiveArtifact, encodeFilePath, hasPerm, latestVersionForSlug, sameEmail, unarchiveArtifact, updateArtifactTitle } from "@/lib/arti";
 import ViewerToolbar, { RawToggle, TEXT_SCALE, WIDTH_CLASS, useViewerPrefs, type Width } from "./ViewerToolbar";
 import AccessModal from "./AccessModal";
 import CommentsLayer from "./CommentsLayer";
@@ -324,234 +325,6 @@ function SlugChip({ slug, version }: { slug: string; version: number | null }) {
   );
 }
 
-// ChipEditor — the shared add/remove/typeahead chip control used by both
-// labels and scopes. Read-only chips for everyone; creator/admin gets a
-// hover-X per chip and a "+" that opens an input with typeahead suggestions
-// fetched lazily on first open. Parameterised by colour, the filter-token
-// prefix, the suggestion source, and the save fn.
-function ChipEditor({
-  values,
-  canEdit,
-  onSave,
-  fetchSuggestions,
-  tokenPrefix,
-  noun,
-  chipClass,
-  linkClass,
-  addClass,
-}: {
-  values: string[];
-  canEdit: boolean;
-  onSave: (next: string[]) => Promise<void>;
-  fetchSuggestions: () => Promise<string[]>;
-  tokenPrefix: "label" | "scope";
-  noun: string;
-  chipClass: string;
-  linkClass: string;
-  addClass: string;
-}) {
-  const [adding, setAdding] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string>("");
-  const [all, setAll] = useState<string[] | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (!adding) return;
-    inputRef.current?.focus();
-    if (all !== null) return;
-    fetchSuggestions()
-      .then((s) => setAll(s))
-      .catch(() => setAll([]));
-  }, [adding, all, fetchSuggestions]);
-
-  const save = async (next: string[]) => {
-    setBusy(true);
-    setErr("");
-    try {
-      await onSave(next);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = (v: string) => save(values.filter((x) => x !== v));
-  const add = (v: string) => {
-    const t = v.trim();
-    if (!t) return;
-    if (values.includes(t)) {
-      setAdding(false);
-      setDraft("");
-      return;
-    }
-    void save([...values, t]).then(() => {
-      setAdding(false);
-      setDraft("");
-    });
-  };
-
-  const q = draft.trim().toLowerCase();
-  const suggestions = (all ?? [])
-    .filter((v) => !values.includes(v) && (q === "" || v.toLowerCase().includes(q)))
-    .slice(0, 8);
-
-  return (
-    <>
-      {values.map((v) => (
-        <span
-          key={v}
-          className={"group inline-flex items-center rounded-full px-2.5 py-px ring-1 transition " + chipClass}
-        >
-          <a
-            href={`/?q=${encodeURIComponent(tokenPrefix + ":" + v)}`}
-            className={"no-underline " + linkClass}
-            title={`filter by this ${noun}`}
-          >
-            {v}
-          </a>
-          {canEdit ? (
-            <button
-              type="button"
-              onClick={() => remove(v)}
-              disabled={busy}
-              aria-label={`remove ${noun} ${v}`}
-              title="remove"
-              className="ml-1 hidden text-neutral-500 hover:text-rose-600 disabled:opacity-50 group-hover:inline"
-            >
-              ×
-            </button>
-          ) : null}
-        </span>
-      ))}
-      {canEdit ? (
-        adding ? (
-          <span className="relative inline-flex items-center">
-            <input
-              ref={inputRef}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  add(draft);
-                } else if (e.key === "Escape") {
-                  setAdding(false);
-                  setDraft("");
-                }
-              }}
-              onBlur={() => {
-                setTimeout(() => {
-                  setAdding(false);
-                  setDraft("");
-                }, 150);
-              }}
-              placeholder={noun}
-              disabled={busy}
-              className="w-40 rounded-full border border-blue-300 bg-white px-2.5 py-px text-[11px] text-neutral-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-200"
-            />
-            {suggestions.length > 0 ? (
-              <ul
-                role="listbox"
-                className="absolute left-0 top-full z-30 mt-1 max-h-56 w-56 overflow-auto rounded-md border border-neutral-200 bg-white py-1 font-sans text-[12px] shadow-lg"
-              >
-                {suggestions.map((s) => (
-                  <li key={s}>
-                    <button
-                      type="button"
-                      // onMouseDown (not onClick) so it fires before the
-                      // input's onBlur tears down the dropdown.
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        add(s);
-                      }}
-                      className="block w-full truncate px-2 py-1 text-left text-neutral-700 hover:bg-neutral-100"
-                    >
-                      {s}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </span>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setAdding(true)}
-            disabled={busy}
-            aria-label={`add ${noun}`}
-            title={`add ${noun}`}
-            className={"group rounded-full bg-white px-2 py-px ring-1 transition disabled:opacity-50 " + addClass}
-          >
-            +<span className="hidden group-hover:inline">{" " + noun}</span>
-          </button>
-        )
-      ) : null}
-      {err ? <span className="text-[11px] text-rose-600">error: {err}</span> : null}
-    </>
-  );
-}
-
-function LabelEditor({
-  artifactID,
-  labels,
-  canEdit,
-  onSaved,
-}: {
-  artifactID: string;
-  labels: string[];
-  canEdit: boolean;
-  onSaved: () => void;
-}) {
-  return (
-    <ChipEditor
-      values={labels}
-      canEdit={canEdit}
-      onSave={async (next) => {
-        await updateArtifactLabels(artifactID, next);
-        onSaved();
-      }}
-      fetchSuggestions={async () => (await getAggregates()).labels.map((l) => l.label)}
-      tokenPrefix="label"
-      noun="label"
-      chipClass="bg-neutral-100 ring-neutral-200 hover:bg-neutral-200 text-neutral-700"
-      linkClass="text-neutral-700"
-      addClass="text-neutral-500 ring-neutral-200 hover:bg-neutral-100 hover:text-neutral-800"
-    />
-  );
-}
-
-function ScopeEditor({
-  artifactID,
-  scopes,
-  canEdit,
-  onSaved,
-}: {
-  artifactID: string;
-  scopes: string[];
-  canEdit: boolean;
-  onSaved: () => void;
-}) {
-  return (
-    <ChipEditor
-      values={scopes}
-      canEdit={canEdit}
-      onSave={async (next) => {
-        await updateArtifactScopes(artifactID, next);
-        onSaved();
-      }}
-      fetchSuggestions={async () => (await getAggregates()).scopes.map((s) => s.scope)}
-      tokenPrefix="scope"
-      noun="scope"
-      chipClass="bg-purple-50 ring-purple-200 hover:bg-purple-100 text-purple-800"
-      linkClass="text-purple-800"
-      addClass="text-purple-800 ring-purple-200 hover:bg-purple-50"
-    />
-  );
-}
-
 // AccessSummary returns a (color, label, tooltip) tuple describing the
 // effective read-access for the artifact. Tier classification:
 //   - public      array contains '*'  (anyone authenticated)
@@ -834,47 +607,6 @@ function CollapseToggle({
   );
 }
 
-// memo'd: the viewer's width (Wide/Medium/Narrow) toggle re-renders the parent
-// but doesn't change `body`. Without memo, MarkdownBody re-renders and React
-// re-applies the dangerouslySetInnerHTML, which wipes the comment overlay's
-// imperatively-injected <mark> highlights (they'd flash away and get re-seeded).
-// Skipping the re-render when body is unchanged keeps the highlights stable.
-const MarkdownBody = memo(function MarkdownBody({ body }: { body: string }) {
-  // renderMarkdown is the shared "render markdown safely" chain
-  // (splitFrontmatter → marked → heading ids → DOMPurify) — the same one
-  // FullPageView and the /help viewer use, so sanitization and heading anchors
-  // stay consistent across every markdown surface. Without the DOMPurify step a
-  // `.md` artifact with a hidden <script> would run in arti's origin with the
-  // viewer's session cookie.
-  const { frontmatter, html } = useMemo(() => renderMarkdown(body), [body]);
-  return (
-    <article
-      className="
-        prose prose-sm prose-neutral max-w-none break-words
-        leading-[1.45]
-        prose-headings:font-semibold prose-headings:tracking-tight
-        prose-h1:text-[1.57em] prose-h2:text-[1.28em] prose-h3:text-[1.06em]
-        prose-h1:mt-0 prose-h1:mb-[15px] prose-h2:mt-[23px] prose-h2:mb-[9px] prose-h3:mt-[12px] prose-h3:mb-[4px]
-        prose-p:my-[10px] prose-li:my-[4.5px] prose-ul:my-[10px] prose-ol:my-[10px] prose-ul:pl-[22px] prose-ol:pl-[22px]
-        prose-hr:my-[17px]
-        prose-blockquote:my-[10px]
-        prose-table:my-[22px] prose-table:text-[0.81em]
-        prose-pre:my-[5px] prose-pre:px-[11px] prose-pre:py-[7px]
-        prose-pre:bg-neutral-50 prose-pre:text-neutral-800
-        prose-pre:border prose-pre:border-neutral-200 prose-pre:rounded-md
-        prose-pre:shadow-none
-        prose-code:text-[0.79em] prose-code:bg-neutral-100 prose-code:text-neutral-800
-        prose-code:px-1 prose-code:py-px prose-code:rounded
-        prose-code:font-medium
-        prose-code:before:content-none prose-code:after:content-none
-      "
-    >
-      {frontmatter !== null ? <Frontmatter raw={frontmatter} /> : null}
-      <div dangerouslySetInnerHTML={{ __html: html }} />
-    </article>
-  );
-});
-
 function RenderedBody({ body, ct, src, allowPopups }: { body: string; ct: string; src?: string; allowPopups?: boolean }) {
   if (isMarkdown(ct)) return <MarkdownBody body={body} />;
   if (isHTML(ct)) {
@@ -1020,6 +752,8 @@ export default function ArtifactViewer({
   const textScale = TEXT_SCALE[textSize];
   const [editing, setEditing] = useState(false);
   const [comparing, setComparing] = useState(false);
+  // Whether the open markdown editor is in Split. Per-view, like `editing`.
+  const [editorSplit, setEditorSplit] = useState(false);
   // Compare mode carries its own width, defaulting to Wide (reset on every
   // open, below) so a two-pane diff always opens roomy instead of inheriting a
   // narrow single-doc width. The width control drives THIS while comparing, so
@@ -1033,6 +767,7 @@ export default function ArtifactViewer({
     setOriginal(false);
     setEditing(false);
     setComparing(false);
+    setEditorSplit(false);
   }, [info.artifact_id]);
   const mode = useRailMode();
   const router = useRouter();
@@ -1098,6 +833,14 @@ export default function ArtifactViewer({
   // Diagrams are TEXT artifacts whose body happens to be a canvas document:
   // same versioning/edit/compare plumbing, different renderer.
   const isDiagram = info.artifact_type === "TEXT" && isDiagramContentType(info.content_type);
+  // A diagram renders at full width wherever it appears — reading it in a narrow
+  // column just scales the picture down. The markdown editor's Split layout wants
+  // the same thing, for the same reason: two panes in a reading column are two
+  // cramped panes. Both are forced transiently, the way compare mode does it, so
+  // neither writes to the persisted per-doc width — a reader who prefers Narrow
+  // prose still gets Narrow prose on the next markdown doc.
+  const forcedWide = isDiagram || (editing && editorSplit);
+  const effectiveWidth: Width = forcedWide ? "wide" : comparing ? compareWidth : width;
   const selectedInPkg = mode.kind === "package" ? mode.selected : null;
 
   // Permalink: stable, version-pinned, slug-free URL anyone can quote.
@@ -1249,12 +992,15 @@ export default function ArtifactViewer({
               {/* Row 4 — view controls + access + three-dot menu. */}
               <div className="mt-2 flex flex-wrap items-center gap-3">
                 <ViewerToolbar
-                  width={comparing ? compareWidth : width}
+                  width={effectiveWidth}
                   setWidth={comparing ? setCompareWidth : setWidth}
                   textSize={textSize}
                   setTextSize={setTextSize}
                   visitHref={visitHref}
                   fullHref={effectiveFullHref}
+                  // Inert while something forces full width — hidden rather
+                  // than left doing nothing.
+                  showWidth={!forcedWide}
                 />
                 <span className="ml-auto" />
                 {/* Raw is meaningless while the editor (which IS the raw
@@ -1313,7 +1059,7 @@ export default function ArtifactViewer({
       ) : (
         <section
           data-arti-doc
-          className={`mx-auto ${WIDTH_CLASS[comparing ? compareWidth : width]} px-6 py-8`}
+          className={`mx-auto ${WIDTH_CLASS[effectiveWidth]} px-6 py-8`}
           style={{ "--arti-text-scale": textScale } as React.CSSProperties}
         >
           {!isTextualContentType(info.content_type) ? (
@@ -1356,7 +1102,15 @@ export default function ArtifactViewer({
                 key={info.artifact_id}
                 info={info}
                 body={body ?? ""}
-                onClose={() => setEditing(false)}
+                onClose={() => {
+                  setEditing(false);
+                  // Don't leave a stale Split flag behind. `editing &&` already
+                  // keeps it from affecting the width once the editor is closed,
+                  // but clearing it means reopening can't briefly force wide on
+                  // the strength of a previous session's layout.
+                  setEditorSplit(false);
+                }}
+                onSplitChange={setEditorSplit}
               />
             )
           ) : isDiagram && !original ? (

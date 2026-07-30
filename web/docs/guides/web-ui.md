@@ -26,9 +26,15 @@ examples.
 
 The rail itself holds the filter groups:
 
-- **Type** — chips for `all`, `TEXT`, `PACKAGE`, `APP`, `ATTACHMENT`, plus
-  `markdown` and `html`. When you're logged in, a `👤 Owned by Me` chip filters
-  to artifacts you created.
+- **Type** — two families in one row. The uppercase chips (`TEXT`, `PACKAGE`,
+  `APP`, `ATTACHMENT`) are artifact types; the lowercase ones (`markdown`,
+  `diagram`, `html`, `json`, `image`) filter by *body* type, and are
+  exactly the families the viewer renders differently. `all` clears it. When
+  you're logged in, a `👤 Owned by Me` chip filters to artifacts you created.
+  These lowercase names also work as `type:` search tokens (`type:diagram`) and
+  in the REST/MCP/CLI list filters.
+- **Content types** — the exact content-type values that exist, with live counts,
+  when you want a specific one rather than a family.
 - **Scopes** — the most common [scopes](../overview/concepts.md#scope) by count.
   Each is a tri-state toggle: click once to filter to it, again to *exclude* it,
   again to clear.
@@ -54,9 +60,9 @@ actually exist across all artifacts before you start filtering.
 
 ## Uploading
 
-Click **Upload** in the rail to open the **Upload artifact** modal. (To make
-something instead of uploading it, **New diagram** sits right below — see
-[Drawing diagrams](diagrams.md).)
+Click **Upload** in the rail to open the **Upload artifact** modal. (To write
+something instead of uploading a file, **New** sits right below — see
+[Creating artifacts in the browser](#creating-artifacts-in-the-browser).)
 
 1. **Drop or choose a file.** The drop zone reads *"Drag & drop a file here / or
    click to choose — drop several to bundle them into a package."* Dropping
@@ -76,6 +82,49 @@ something instead of uploading it, **New diagram** sits right below — see
 
 **Upload** commits it (the button reads *Uploading…* while it works); **Cancel**
 closes the modal.
+
+## Creating artifacts in the browser
+
+Upload brings a file in from outside. **New** writes one here. Hover (or click)
+**New** in the rail and pick a kind:
+
+- **Text (Markdown)** — a markdown editor with a formatting toolbar and a
+  **Write / Split / Preview** switch. The preview is rendered by the same
+  component that renders the finished artifact, so it can't disagree with what
+  readers will see. What you type is stored verbatim: no editor rewrites your
+  markdown on save, so a one-word change stays a one-word diff in
+  [Compare versions](#versions).
+- **Diagram** — the drag-and-drop canvas; see [Drawing diagrams](diagrams.md).
+
+Both create an ordinary **TEXT** artifact — they differ only in content type —
+so either one gets slugs, versions, labels, scopes, access control, comments and
+search from the [artifact model](../overview/concepts.md).
+
+The page's header mirrors the viewer's, with one deliberate difference: every
+field is a plain edit box rather than click-to-edit. On the viewer, editing the
+title or a label saves immediately; here **nothing is written until you press
+Create**, so no field pretends otherwise. **Access** opens the same editor the
+viewer uses, labelled to say the access applies when the artifact is created.
+
+### Slugs and collisions
+
+The slug box shows what will actually be created:
+
+- Leave the title alone and the slug is `untitled-text-<yymmdd-hhmm>` — the
+  timestamp keeps an unnamed draft from colliding with the last one you
+  abandoned. It's stamped when the page opens and shown to you, not applied
+  silently on save.
+- Start typing a title and the slug follows it, without the timestamp.
+- Type a slug yourself and it wins. It's normalized (lowercased, dashed) when
+  you leave the field, so you see the final value before you commit.
+- Clear the slug entirely to create a slugless artifact — legal, but it can't be
+  versioned.
+
+If the slug is already taken, a dialog says so and asks for a different one,
+pre-filled with a timestamped variant. Creating here never quietly adds a version
+to an existing document; to do that deliberately, open that document and use
+**Edit**. The server enforces this too, so it holds even if someone claims the
+slug while you're typing.
 
 ## Viewing an artifact
 

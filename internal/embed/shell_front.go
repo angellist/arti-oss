@@ -22,11 +22,12 @@ func serveFrontShell(w http.ResponseWriter, surface string, surf Surface) {
 	w.Header().Del("X-Frame-Options")
 	w.Header().Set("Cache-Control", "no-store")
 
-	// Inject the surface name and shell_slug as JS string literals. Both are
-	// operator-configured (not user input); JSON-encode defensively anyway.
+	// Inject the surface name, shell_slug, and shell_query as JS string literals.
+	// All are operator-configured (not user input); JSON-encode defensively anyway.
 	page := frontShellHTML
 	page = strings.ReplaceAll(page, "__SURFACE__", jsString(surface))
 	page = strings.ReplaceAll(page, "__SHELL_SLUG__", jsString(surf.ShellSlug))
+	page = strings.ReplaceAll(page, "__SHELL_QUERY__", jsString(surf.ShellQuery))
 	_, _ = w.Write([]byte(page))
 }
 
@@ -36,10 +37,10 @@ func jsString(s string) string {
 	return "'" + r.Replace(s) + "'"
 }
 
-// frontShellHTML is the Front adapter page. __SURFACE__ / __SHELL_SLUG__ are
-// replaced with JS string literals at serve time. It frames a nested iframe and
-// swaps its src as the user moves between conversations, keeping the SDK
-// subscription alive (a top-level redirect would lose it).
+// frontShellHTML is the Front adapter page. __SURFACE__ / __SHELL_SLUG__ /
+// __SHELL_QUERY__ are replaced with JS string literals at serve time. It frames a
+// nested iframe and swaps its src as the user moves between conversations, keeping
+// the SDK subscription alive (a top-level redirect would lose it).
 const frontShellHTML = `<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -62,26 +63,31 @@ const frontShellHTML = `<!doctype html>
 <iframe id="doc" referrerpolicy="no-referrer"></iframe>
 <script>
 (function(){
-  var SURFACE = __SURFACE__, SHELL_SLUG = __SHELL_SLUG__;
+  var SURFACE = __SURFACE__, SHELL_SLUG = __SHELL_SLUG__, SHELL_QUERY = __SHELL_QUERY__;
   var secret = (new URLSearchParams(location.search)).get("auth_secret") || "";
   var frame = document.getElementById("doc"), msg = document.getElementById("msg"),
-      rf = document.getElementById("rf"), current = "", nonce = 0;
-  // docURL builds the inner doc route URL. nonce is a cache-buster bumped by the
-  // refresh button so re-assigning src to the SAME slug forces a refetch; the
-  // doc route ignores the extra param (it reads only slug/version/auth_secret).
-  function docURL(slug){
+      rf = document.getElementById("rf"), current = "", curQ = "", nonce = 0;
+  // docURL builds the inner doc route URL. q is the {id}-substituted SHELL_QUERY
+  // fragment (operator-configured, so kept URL-safe — letters/digits/_/-/=) and is
+  // appended verbatim; it rides through to the served app's window.arti.params.
+  // nonce is a cache-buster bumped by the refresh button so re-assigning src to
+  // the SAME slug forces a refetch; the doc route ignores it (it reads only
+  // slug/version/auth_secret plus whatever the served app declares).
+  function docURL(slug, q){
     return "/embed/" + SURFACE + "?slug=" + encodeURIComponent(slug) +
-           "&auth_secret=" + encodeURIComponent(secret) + (nonce ? "&_r=" + nonce : "");
+           "&auth_secret=" + encodeURIComponent(secret) +
+           (q ? "&" + q : "") + (nonce ? "&_r=" + nonce : "");
   }
   function show(cnv){
     var slug = SHELL_SLUG.replace("{id}", cnv);
-    if(slug === current){ return; }
-    current = slug; nonce = 0;
-    frame.src = docURL(slug);
+    var q = SHELL_QUERY ? SHELL_QUERY.replace("{id}", cnv) : "";
+    if(slug === current && q === curQ){ return; }
+    current = slug; curQ = q; nonce = 0;
+    frame.src = docURL(slug, q);
     frame.style.display = "block"; msg.style.display = "none"; rf.style.display = "block";
   }
-  function none(text){ current = ""; frame.style.display = "none"; rf.style.display = "none"; msg.style.display = "block"; msg.textContent = text; }
-  rf.addEventListener("click", function(){ if(current){ nonce++; frame.src = docURL(current); } });
+  function none(text){ current = ""; curQ = ""; frame.style.display = "none"; rf.style.display = "none"; msg.style.display = "block"; msg.textContent = text; }
+  rf.addEventListener("click", function(){ if(current){ nonce++; frame.src = docURL(current, curQ); } });
   if(!window.Front || !Front.contextUpdates){ none("Open this panel inside Front."); return; }
   Front.contextUpdates.subscribe(function(ctx){
     if(ctx && ctx.type === "singleConversation" && ctx.conversation && ctx.conversation.id){ show(ctx.conversation.id); }

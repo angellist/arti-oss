@@ -86,6 +86,11 @@ type Surface struct {
 	// ShellSlug (with a shell) is how the shell builds a slug from the host id,
 	// e.g. "deployment-ctx-{id}". Not a gate — SlugAllow is the gate.
 	ShellSlug string `json:"shell_slug"`
+	// ShellQuery (with a shell) is an extra query-fragment template appended to
+	// the doc-route fetch, {id}-substituted (e.g. "ctx=deploy-ctx-{id}"). Lets
+	// shell_slug be a static app slug while the per-thread id rides in the query.
+	// "" = none.
+	ShellQuery string `json:"shell_query"`
 }
 
 // Service serves the configured surfaces.
@@ -143,8 +148,14 @@ func ParseSurfaces(jsonStr string) (map[string]Surface, error) {
 		if s.Shell != "" && s.Shell != "front" {
 			return nil, fmt.Errorf("embed surface %q: unknown shell %q", name, s.Shell)
 		}
-		if s.Shell != "" && !strings.Contains(s.ShellSlug, "{id}") {
-			return nil, fmt.Errorf("embed surface %q: shell_slug must contain {id}", name)
+		// A shell ALWAYS builds a slug from shell_slug and fetches the doc route with it;
+		// an empty slug re-serves the shell loader (handleDoc), so the app never loads.
+		// Require it non-empty even though {id} may live in shell_query instead.
+		if s.Shell != "" && s.ShellSlug == "" {
+			return nil, fmt.Errorf("embed surface %q: shell_slug required with a shell (an empty slug re-serves the shell loader instead of the artifact)", name)
+		}
+		if s.Shell != "" && !strings.Contains(s.ShellSlug, "{id}") && !strings.Contains(s.ShellQuery, "{id}") {
+			return nil, fmt.Errorf("embed surface %q: shell_slug or shell_query must contain {id}", name)
 		}
 	}
 	return m, nil

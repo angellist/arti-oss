@@ -1,16 +1,8 @@
-import { SearchRailProvider } from "@/lib/rail-context";
-import NewDiagram from "@/components/NewDiagram";
+import { redirect } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
-export const metadata = { title: "New diagram" };
-
-export default function NewDiagramPage() {
-  return (
-    <SearchRailProvider>
-      <main className="min-h-screen bg-white pb-12">
-        <NewDiagram />
-      </main>
-    </SearchRailProvider>
-  );
+// The original "new diagram" route, kept as a redirect: it shipped, it's linked
+// from web/docs/guides/diagrams.md, and people bookmark URLs. Authoring now
+// lives under one /new/<kind> family.
+export default function LegacyNewDiagramPage() {
+  redirect("/new/diagram");
 }

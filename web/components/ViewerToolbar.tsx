@@ -88,26 +88,23 @@ export function RawToggle({
   );
 }
 
-export default function ViewerToolbar({
+// WidthControl — the three-way reading-width segmented control. Exported on its
+// own because two surfaces need it without the rest of the toolbar: the "New
+// artifact" page (which has no text-size or Full Page affordance) and the
+// viewer, which hides it entirely for diagrams rather than leave a control that
+// does nothing.
+export function WidthControl({
   width,
   setWidth,
-  textSize,
-  setTextSize,
-  visitHref,
-  fullHref,
 }: {
   width: Width;
   setWidth: (w: Width) => void;
-  textSize: TextSize;
-  setTextSize: (s: TextSize) => void;
-  visitHref?: string;
-  fullHref?: string;
 }) {
-  // Width control — three centered "content lines" that shrink from full-bleed
-  // (Wide) to a narrow column (Narrow), mirroring the reading width each option
-  // sets. The svg renders at 16px so the pill's height matches the text-size and
-  // Full Page pills (all a 16px line-box + py-1 = 26px). Tooltip + aria-label
-  // carry the word for anyone unsure of the glyph.
+  // Three centered "content lines" that shrink from full-bleed (Wide) to a
+  // narrow column (Narrow), mirroring the reading width each option sets. The
+  // svg renders at 16px so the pill's height matches the text-size and Full Page
+  // pills (all a 16px line-box + py-1 = 26px). Tooltip + aria-label carry the
+  // word for anyone unsure of the glyph.
   const widthIcon = (x1: number, x2: number) => (
     <svg
       width="16"
@@ -143,6 +140,39 @@ export default function ViewerToolbar({
     </button>
   );
 
+  return (
+    <div
+      className="inline-flex overflow-hidden rounded-md border border-neutral-200"
+      role="group"
+      aria-label="reading width"
+    >
+      {widthBtn("wide", widthIcon(3, 21), "Wide")}
+      {widthBtn("medium", widthIcon(6, 18), "Medium")}
+      {widthBtn("narrow", widthIcon(8, 16), "Narrow")}
+    </div>
+  );
+}
+
+export default function ViewerToolbar({
+  width,
+  setWidth,
+  textSize,
+  setTextSize,
+  visitHref,
+  fullHref,
+  showWidth = true,
+}: {
+  width: Width;
+  setWidth: (w: Width) => void;
+  textSize: TextSize;
+  setTextSize: (s: TextSize) => void;
+  visitHref?: string;
+  fullHref?: string;
+  // Diagrams always render at full width, so the control would be inert —
+  // hidden rather than shown doing nothing (same reasoning as hiding Raw while
+  // the editor is open).
+  showWidth?: boolean;
+}) {
   // Text-size toggle mirrors the width control's segmented style. A graduated
   // capital "A" (S/M/L). "A" is bottom-heavy, so a geometric center reads high —
   // each glyph is nudged down a hair (more for the smaller ones) to sit
@@ -190,15 +220,7 @@ export default function ViewerToolbar({
           Visit app ↗
         </a>
       ) : null}
-      <div
-        className="inline-flex overflow-hidden rounded-md border border-neutral-200"
-        role="group"
-        aria-label="reading width"
-      >
-        {widthBtn("wide", widthIcon(3, 21), "Wide")}
-        {widthBtn("medium", widthIcon(6, 18), "Medium")}
-        {widthBtn("narrow", widthIcon(8, 16), "Narrow")}
-      </div>
+      {showWidth ? <WidthControl width={width} setWidth={setWidth} /> : null}
 
       <div
         className="inline-flex overflow-hidden rounded-md border border-neutral-200"

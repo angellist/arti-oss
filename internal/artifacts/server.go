@@ -3199,6 +3199,47 @@ func (s *Service) requireSkillWrite(ctx context.Context, caller string, labelSet
 	return errForbidden("writing skill artifacts (kind:skill) requires the MANAGE_SKILLS permission")
 }
 
+// DiagramContentType is the body type of a diagram artifact. A diagram is an
+// ordinary TEXT artifact — this is the only thing that distinguishes it — which
+// is how it inherits slugs, versioning, compare, comments and access control.
+const DiagramContentType = "application/vnd.arti.diagram+json"
+
+// typePseudo maps the sidebar's pseudo-types onto content_type globs. They don't
+// name a real artifact_type (those are TEXT / PACKAGE / APP / ATTACHMENT) but a
+// family of bodies, so the rail can offer one-click filtering for the shapes
+// people actually look for without anyone typing content_type syntax.
+//
+// Keys are compared case-insensitively so the `type:markdown` search token works
+// as well as the rail's uppercase value.
+var typePseudo = map[string]string{
+	"MARKDOWN": "text/markdown*",
+	"HTML":     "text/html*",
+	"DIAGRAM":  DiagramContentType + "*",
+	"JSON":     "application/json*",
+	"PDF":      "application/pdf*",
+	"IMAGE":    "image/*",
+}
+
+// ApplyTypeFilter resolves one `type` filter value onto a ListInput: a
+// pseudo-type becomes a content_type glob, anything else an artifact_type.
+//
+// Deliberately shared by all three entry points that accept a type filter — the
+// ?type= query param, the `type:` search token, and the MCP/CLI list tool. It
+// used to live inline in the query-param path only, so `type=MARKDOWN` returned
+// results in the web UI but zero rows via MCP and via the search box (both fell
+// through to artifact_type, which matches nothing).
+func ApplyTypeFilter(in *pgstore.ListInput, v string) {
+	if v == "" {
+		return
+	}
+	if ct, ok := typePseudo[strings.ToUpper(v)]; ok {
+		in.ContentType = &ct
+		return
+	}
+	// Not a pseudo-type: pass through verbatim, preserving the caller's casing.
+	in.ArtifactType = &v
+}
+
 // slugConflict is returned from Create when the caller asked for
 // EnsureNew=true and the slug already has a non-deleted version. HTTP
 // layer maps it to 409; CLI / MCP surface the message verbatim.
@@ -3281,9 +3322,11 @@ func mergeFilters(in *pgstore.ListInput, filters, negated map[string][]string) {
 		}
 		return &v[0]
 	}
-	if in.ArtifactType == nil {
+	if in.ArtifactType == nil && in.ContentType == nil {
 		if v := first("type"); v != nil {
-			in.ArtifactType = v
+			// Same resolution as ?type=, so `type:markdown` in the search
+			// box means what the rail's markdown chip means.
+			ApplyTypeFilter(in, *v)
 		}
 	}
 	if in.Creator == nil {
@@ -3330,20 +3373,7 @@ func parseList(r *http.Request) pgstore.ListInput {
 		}
 	}
 	if v := q.Get("type"); v != "" {
-		// "MARKDOWN" / "HTML" are pseudo-types: they don't map to a
-		// real artifact_type (those are TEXT or PACKAGE) but to a
-		// content_type prefix so the sidebar can offer one-click
-		// filtering for the most common text shapes.
-		switch v {
-		case "MARKDOWN":
-			s := "text/markdown*"
-			in.ContentType = &s
-		case "HTML":
-			s := "text/html*"
-			in.ContentType = &s
-		default:
-			in.ArtifactType = &v
-		}
+		ApplyTypeFilter(&in, v)
 	}
 	if v := q.Get("creator"); v != "" {
 		in.Creator = &v

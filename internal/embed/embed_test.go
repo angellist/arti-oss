@@ -70,7 +70,8 @@ func (t fakeTok) VerifyEmbedFilesToken(string) (string, error) { return t.aid, t
 func testSurfaces() map[string]Surface {
 	return map[string]Surface{
 		"front": {Secret: "S", Origin: OriginList{"https://app.frontapp.com"}, Email: "e@x.com",
-			SlugAllow: []string{"deployment-ctx-*"}, Shell: "front", ShellSlug: "deployment-ctx-{id}"},
+			SlugAllow: []string{"deployment-ctx-*"}, Shell: "front", ShellSlug: "deployment-ctx-{id}",
+			ShellQuery: "ctx=deploy-ctx-{id}"},
 		"all": {Secret: "S2", Origin: OriginList{"https://dash.x"}, Email: "e2@x.com", SlugAllow: []string{"*"}},
 	}
 }
@@ -95,6 +96,14 @@ func TestParseSurfaces(t *testing.T) {
 	if _, err := ParseSurfaces(ok); err != nil {
 		t.Errorf("valid surface rejected: %v", err)
 	}
+	// The per-thread {id} may ride in shell_query instead of shell_slug: a static
+	// app slug served with a ?ctx= param. This must PASS, and shell_query round-trips.
+	okQuery := `{"front":{"secret":"s","origin":"https://app.frontapp.com","email":"e@x.com","slug_allow":["deployment-panel-v3-app"],"shell":"front","shell_slug":"deployment-panel-v3-app","shell_query":"ctx=deploy-ctx-{id}"}}`
+	if mq, err := ParseSurfaces(okQuery); err != nil {
+		t.Errorf("shell_query surface rejected: %v", err)
+	} else if got := mq["front"].ShellQuery; got != "ctx=deploy-ctx-{id}" {
+		t.Errorf("shell_query = %q, want the configured template", got)
+	}
 	bad := map[string]string{
 		"missing secret":     `{"x":{"origin":"o","email":"e","slug_allow":["*"]}}`,
 		"missing origin":     `{"x":{"secret":"s","email":"e","slug_allow":["*"]}}`,
@@ -102,6 +111,12 @@ func TestParseSurfaces(t *testing.T) {
 		"missing slug_allow": `{"x":{"secret":"s","origin":"o","email":"e"}}`,
 		"unknown shell":      `{"x":{"secret":"s","origin":"o","email":"e","slug_allow":["*"],"shell":"slack"}}`,
 		"shell wo {id}":      `{"x":{"secret":"s","origin":"o","email":"e","slug_allow":["*"],"shell":"front","shell_slug":"x-"}}`,
+		// {id} in NEITHER shell_slug nor shell_query — a shell that can never carry
+		// the per-thread id must fail fast.
+		"shell {id} in neither": `{"x":{"secret":"s","origin":"o","email":"e","slug_allow":["*"],"shell":"front","shell_slug":"static-app","shell_query":"ctx=static"}}`,
+		// Empty shell_slug with {id} only in shell_query: passes the {id} rule but an
+		// empty slug re-serves the shell loader at runtime — must fail fast.
+		"shell empty slug": `{"x":{"secret":"s","origin":"o","email":"e","slug_allow":["*"],"shell":"front","shell_query":"ctx=deploy-ctx-{id}"}}`,
 		// Identity-mode validation fails fast in BOTH directions.
 		"user mode with email": `{"x":{"secret":"s","origin":"o","identity":"user","email":"e","slug_allow":["*"]}}`,
 		"unknown identity":     `{"x":{"secret":"s","origin":"o","identity":"bot","email":"e","slug_allow":["*"]}}`,
@@ -239,7 +254,10 @@ func TestHandleShell_Front(t *testing.T) {
 		t.Error("shell kept X-Frame-Options (Front can't frame it)")
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"contextUpdates", "'front'", "deployment-ctx-{id}"} {
+	// The shell_slug literal, the shell_query literal, and the show() logic that
+	// {id}-substitutes shell_query and appends it to the doc-route fetch must all
+	// be present — that append is what carries the per-thread ctx to the app.
+	for _, want := range []string{"contextUpdates", "'front'", "deployment-ctx-{id}", "'ctx=deploy-ctx-{id}'", "SHELL_QUERY.replace"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("shell body missing %q", want)
 		}

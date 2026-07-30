@@ -20,10 +20,13 @@ Self-hostable on Postgres plus any S3-compatible object store.
 - **Beyond single files** — multi-file `PACKAGE` bundles with a file-tree
   viewer, and sandboxed `APP` mini-sites that can call MCP tools through a
   governed proxy.
-- **Draw, don't just upload** — a drag-and-drop **diagram** canvas
-  (`/diagrams/new`) for flowcharts and boxes-and-arrows, saved as an ordinary
-  artifact, so a diagram gets slugs, versions, diffs, comments and access
-  control for free, and exports to a standalone SVG.
+- **Write or draw, don't just upload** — **New** in the rail creates an
+  artifact without a file: `/new/text` is a **markdown editor** with a
+  formatting toolbar and a live preview rendered by the same component the
+  viewer uses, and `/new/diagram` is a drag-and-drop **diagram** canvas for
+  flowcharts and boxes-and-arrows. Both save as ordinary artifacts — only the
+  content type differs — so either gets slugs, versions, diffs, comments and
+  access control for free, and a diagram also exports to a standalone SVG.
 - **One service, four surfaces** — every operation is available over REST,
   MCP, the CLI, and the web UI; fetch by UUID or slug (`/a/{uuid}`,
   `/s/{slug}`, `/s/{slug}/v_{N}`).

@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import type { ArtifactInfo } from "@/lib/types";
 import { createArtifact, latestVersionForSlug } from "@/lib/arti";
 import { saveAsNewVersionInput, saveConfirmMessage } from "@/lib/edit";
+import { fullPageKind } from "@/lib/viewer";
+import MarkdownEditor from "./MarkdownEditor";
 
 // ArtifactEditor — the editable raw-source view entered via the ⋯ menu's
 // "Edit" item (TEXT artifacts with a slug only; see isEditableArtifact).
@@ -16,10 +18,14 @@ export default function ArtifactEditor({
   info,
   body,
   onClose,
+  onSplitChange,
 }: {
   info: ArtifactInfo;
   body: string;
   onClose: () => void;
+  // Split needs the whole page width, which only the viewer (owner of the doc
+  // container and the width control) can grant.
+  onSplitChange?: (split: boolean) => void;
 }) {
   const router = useRouter();
   const [text, setText] = useState(body);
@@ -27,6 +33,10 @@ export default function ArtifactEditor({
   const [err, setErr] = useState<string>("");
   const taRef = useRef<HTMLTextAreaElement>(null);
   const slug = info.named_slug ?? "";
+  // Markdown gets the toolbar + live preview; every other textual type (json,
+  // yaml, code, plain text) keeps the plain source textarea, where a markdown
+  // toolbar would be noise and a markdown preview would be wrong.
+  const markdown = fullPageKind(info.content_type) === "markdown";
 
   // Advisory next-version probe — same best-effort semantics as the upload
   // modal's "uploads as v{N+1}" hint (access-filtered, so it can undercount);
@@ -45,8 +55,10 @@ export default function ArtifactEditor({
   }, [slug]);
 
   useEffect(() => {
-    taRef.current?.focus();
-  }, []);
+    // MarkdownEditor focuses its own textarea (autoFocus); this ref only exists
+    // for the plain-source path.
+    if (!markdown) taRef.current?.focus();
+  }, [markdown]);
 
   const dirty = text !== body;
 
@@ -139,21 +151,32 @@ export default function ArtifactEditor({
           </button>
         </span>
       </div>
-      <textarea
-        ref={taRef}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") {
-            e.preventDefault();
-            cancel();
-          }
-        }}
-        disabled={saving}
-        spellCheck={false}
-        aria-label="artifact source"
-        className="min-h-[65vh] w-full resize-y whitespace-pre-wrap break-words rounded-md border border-neutral-200 bg-neutral-50 px-6 py-5 font-mono text-[12px] leading-relaxed text-neutral-800 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-200"
-      />
+      {markdown ? (
+        <MarkdownEditor
+          value={text}
+          onChange={setText}
+          autoFocus
+          disabled={saving}
+          minHeight="65vh"
+          onModeChange={(m) => onSplitChange?.(m === "split")}
+        />
+      ) : (
+        <textarea
+          ref={taRef}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            }
+          }}
+          disabled={saving}
+          spellCheck={false}
+          aria-label="artifact source"
+          className="min-h-[65vh] w-full resize-y whitespace-pre-wrap break-words rounded-md border border-neutral-200 bg-neutral-50 px-6 py-5 font-mono text-[12px] leading-relaxed text-neutral-800 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-200"
+        />
+      )}
     </div>
   );
 }
