@@ -93,4 +93,5 @@ jobs:
       - name: trufflehog
         run: |
           docker run --rm -v "$PWD:/repo" trufflesecurity/trufflehog:latest \
-            git file:///repo --only-verified --fail
+            git file:///repo --results=verified,unverified,unknown \
+            --exclude-paths=/repo/.trufflehog-exclude.txt --fail
