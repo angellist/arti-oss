@@ -35,6 +35,11 @@ interface Conflict {
   // The slug exists but this caller can't read/write it, so we know nothing
   // about it beyond "taken" — no version to quote.
   unreadable?: boolean;
+  // Which check raised this. Only the advisory blur check may retract its own
+  // verdict; a conflict the server stated by rejecting a create must survive a
+  // later "looks free" answer, because the advisory check is access-filtered
+  // and reports free for exactly the slug a 404 means we cannot write.
+  source: "check" | "create";
 }
 
 export default function NewArtifact({ kind }: { kind: NewKind }) {
@@ -130,8 +135,21 @@ export default function NewArtifact({ kind }: { kind: NewKind }) {
     // only one that describes the current slug.
     if (seq !== checkSeq.current) return;
     if (existing != null) {
-      setConflict({ slug: target, version: existing, creator: null });
+      setConflict({ slug: target, version: existing, creator: null, source: "check" });
+      return;
     }
+    // The slug is free now, so retract a stale warning — otherwise tabbing
+    // back, fixing the slug and blurring again leaves a dialog that
+    // contradicts the field. Exactly one verdict outranks this one: the server
+    // rejecting a create for THIS same slug, since the advisory check is
+    // access-filtered and answers "free" for a slug it cannot read. A
+    // server-raised conflict about a slug the user has since moved off is just
+    // as stale as our own.
+    setConflict((prev) => {
+      if (!prev) return prev;
+      if (prev.source === "create" && prev.slug === target) return prev;
+      return null;
+    });
   };
 
   const useSuggestedSlug = (next: string) => {
@@ -183,7 +201,13 @@ export default function NewArtifact({ kind }: { kind: NewKind }) {
       // access being set, not a statement about the slug.
       const status = e instanceof ArtiError ? e.status : 0;
       if (resolvedSlug && (status === 409 || status === 404)) {
-        setConflict({ slug: resolvedSlug, version: null, creator: null, unreadable: status === 404 });
+        setConflict({
+          slug: resolvedSlug,
+          version: null,
+          creator: null,
+          unreadable: status === 404,
+          source: "create",
+        });
       } else {
         setErr(e instanceof Error ? e.message : String(e));
       }

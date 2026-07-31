@@ -68,8 +68,11 @@ const frontShellHTML = `<!doctype html>
   var frame = document.getElementById("doc"), msg = document.getElementById("msg"),
       rf = document.getElementById("rf"), current = "", curQ = "", nonce = 0;
   // docURL builds the inner doc route URL. q is the {id}-substituted SHELL_QUERY
-  // fragment (operator-configured, so kept URL-safe — letters/digits/_/-/=) and is
-  // appended verbatim; it rides through to the served app's window.arti.params.
+  // fragment and is appended verbatim, so it must already be URL-safe: the
+  // TEMPLATE is operator-configured (letters/digits/_/-/=), but the {id} it
+  // carries is a live conversation id from Front, which is not — so the id is
+  // percent-encoded at substitution (see show()). It rides through to the served
+  // app's window.arti.params.
   // nonce is a cache-buster bumped by the refresh button so re-assigning src to
   // the SAME slug forces a refetch; the doc route ignores it (it reads only
   // slug/version/auth_secret plus whatever the served app declares).
@@ -80,7 +83,10 @@ const frontShellHTML = `<!doctype html>
   }
   function show(cnv){
     var slug = SHELL_SLUG.replace("{id}", cnv);
-    var q = SHELL_QUERY ? SHELL_QUERY.replace("{id}", cnv) : "";
+    // Encode the id, not the whole fragment: the template's own "=" and "&"
+    // are structure, the id is data. An id containing & or = would otherwise
+    // split into extra params and corrupt slug / auth_secret parsing.
+    var q = SHELL_QUERY ? SHELL_QUERY.replace("{id}", encodeURIComponent(cnv)) : "";
     if(slug === current && q === curQ){ return; }
     current = slug; curQ = q; nonce = 0;
     frame.src = docURL(slug, q);

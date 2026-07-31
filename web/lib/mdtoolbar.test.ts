@@ -97,6 +97,13 @@ describe("line prefixes", () => {
     );
   });
 
+  // Blank lines are left alone, so they must not consume a number either —
+  // numbering off the raw line index gave the line after a blank "3." when
+  // it is the second list item.
+  it("numbers only non-blank lines, so a blank line does not skip a number", () => {
+    expect(show(applyMarkdownAction(at("|one\n\ntwo|"), "ordered"))).toBe("|1. one\n\n2. two|");
+  });
+
   it("un-bullets an already-bulleted selection", () => {
     expect(show(applyMarkdownAction(at("|- one\n- two|"), "bullet"))).toBe("|one\ntwo|");
   });

@@ -140,9 +140,19 @@ function togglePrefix(
   const lines = s.text.slice(from, to).split("\n");
   const meaningful = lines.filter((l) => l.trim() !== "");
   const allPrefixed = meaningful.length > 0 && meaningful.every((l) => re.test(l));
+  // Ordinal among the NON-BLANK lines, not the raw line index: blank lines are
+  // passed through untouched, so letting them consume a number makes the item
+  // after a blank line read "3." when it is the second one. Precomputed rather
+  // than counted inside the callback because mapLines invokes it more than once
+  // (again for the caret delta), so a mutable counter would drift.
+  const ordinals = new Map<number, number>();
+  let n = 0;
+  lines.forEach((line, i) => {
+    if (line.trim() !== "") ordinals.set(i, n++);
+  });
   return mapLines(s, (line, i) => {
     if (line.trim() === "") return line;
-    return allPrefixed ? line.replace(re, "$1") : add(line, i);
+    return allPrefixed ? line.replace(re, "$1") : add(line, ordinals.get(i) ?? 0);
   });
 }
 

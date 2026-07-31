@@ -3240,6 +3240,25 @@ func ApplyTypeFilter(in *pgstore.ListInput, v string) {
 	in.ArtifactType = &v
 }
 
+// ApplyNotTypeFilter is ApplyTypeFilter for a negated `-type:` token: the same
+// resolution, appended to the exclusion lists instead of the scalar filters.
+//
+// It exists because negation reintroduced the very bug above: `-type:markdown`
+// was appended to NotArtifactType verbatim, and no artifact_type is ever named
+// "markdown", so the exclusion quietly matched nothing while the positive
+// filter worked. Both directions now share one resolution.
+func ApplyNotTypeFilter(in *pgstore.ListInput, v string) {
+	if v == "" {
+		return
+	}
+	if ct, ok := typePseudo[strings.ToUpper(v)]; ok {
+		// addNotScalar globs on `*`, so the exclusion covers the whole family.
+		in.NotContentType = append(in.NotContentType, ct)
+		return
+	}
+	in.NotArtifactType = append(in.NotArtifactType, v)
+}
+
 // slugConflict is returned from Create when the caller asked for
 // EnsureNew=true and the slug already has a non-deleted version. HTTP
 // layer maps it to 409; CLI / MCP surface the message verbatim.
@@ -3355,7 +3374,9 @@ func mergeFilters(in *pgstore.ListInput, filters, negated map[string][]string) {
 	in.NotLabels = append(in.NotLabels, negated["label"]...)
 	in.NotScope = append(in.NotScope, negated["scope"]...)
 	in.NotCreator = append(in.NotCreator, negated["creator"]...)
-	in.NotArtifactType = append(in.NotArtifactType, negated["type"]...)
+	for _, v := range negated["type"] {
+		ApplyNotTypeFilter(in, v)
+	}
 	in.NotContentType = append(in.NotContentType, negated["content_type"]...)
 }
 

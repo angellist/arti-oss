@@ -194,6 +194,35 @@ describe("NewArtifact", () => {
     expect(createArtifact).not.toHaveBeenCalled();
   });
 
+  // The dialog is an overlay, so the field behind it can't be clicked — but
+  // nothing traps focus, so a keyboard user can tab back out, fix the slug and
+  // blur again. That re-check must retract the warning: the field no longer
+  // names a taken slug, so a dialog saying it does is simply wrong.
+  it("closes the conflict dialog when a later check finds the slug free", async () => {
+    latestVersionForSlug.mockResolvedValueOnce(4).mockResolvedValueOnce(null);
+    await mount("text");
+
+    const slug = field(container, "slug");
+    await act(async () => {
+      type(slug, "taken-slug");
+    });
+    await act(async () => {
+      slug.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.body.textContent).toContain("That slug is taken");
+
+    await act(async () => {
+      type(slug, "free-slug");
+    });
+    await act(async () => {
+      slug.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(document.body.textContent).not.toContain("That slug is taken");
+  });
+
   // Two quick blurs against different slugs race. The response for the slug the
   // user ABANDONED must not raise a dialog naming it — that dialog would be
   // about a slug no longer in the field.
@@ -246,6 +275,63 @@ describe("NewArtifact", () => {
     expect(document.body.textContent).toContain("That slug is taken");
     // And it says the thing that's actually true: you can't go open it.
     expect(document.body.textContent).toContain("isn't shared with you");
+  });
+
+  // The advisory check is access-filtered: for an unreadable slug it reports
+  // "free" while create correctly gets a 404. So a conflict the SERVER stated
+  // must not be retracted by a later advisory "looks free" answer — that is the
+  // one case where the two disagree and the server is right.
+  it("keeps a create-raised conflict when a later advisory check finds the slug free", async () => {
+    const { ArtiError } = await import("@/lib/arti");
+    createArtifact.mockRejectedValue(new ArtiError(404, "not found"));
+    latestVersionForSlug.mockResolvedValue(null);
+    await mount("text");
+
+    await act(async () => {
+      type(field(container, "title"), "My Doc");
+    });
+    await act(async () => {
+      byText(container, "Create")!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.body.textContent).toContain("That slug is taken");
+
+    await act(async () => {
+      const slug = field(container, "slug");
+      type(slug, "my-doc");
+      slug.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(document.body.textContent).toContain("That slug is taken");
+  });
+
+  // The server's verdict outranks the advisory check only for the SAME slug.
+  // Once the user moves the field to a different, free slug, a dialog still
+  // naming the old one is as stale as one we raised ourselves.
+  it("drops a create-raised conflict once the field moves to a different free slug", async () => {
+    const { ArtiError } = await import("@/lib/arti");
+    createArtifact.mockRejectedValue(new ArtiError(404, "not found"));
+    latestVersionForSlug.mockResolvedValue(null);
+    await mount("text");
+
+    await act(async () => {
+      type(field(container, "title"), "My Doc");
+    });
+    await act(async () => {
+      byText(container, "Create")!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.body.textContent).toContain("That slug is taken");
+
+    await act(async () => {
+      const slug = field(container, "slug");
+      type(slug, "some-other-slug");
+      slug.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(document.body.textContent).not.toContain("That slug is taken");
   });
 
   // A 403 is about the access being set, not about the slug — it must NOT be

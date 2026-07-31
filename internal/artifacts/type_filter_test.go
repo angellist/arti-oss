@@ -1,6 +1,7 @@
 package artifacts
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/angellist/arti-oss/internal/store/pgstore"
@@ -76,5 +77,56 @@ func TestApplyTypeFilterPseudoLeavesArtifactTypeUnset(t *testing.T) {
 	ApplyTypeFilter(&in, "DIAGRAM")
 	if in.ArtifactType != nil {
 		t.Errorf("ArtifactType = %q, want unset for a pseudo-type", *in.ArtifactType)
+	}
+}
+
+// A negated `-type:` token must get the SAME resolution as the positive one.
+// Positive `type:markdown` became a content_type glob while `-type:markdown`
+// was appended to NotArtifactType verbatim — and no artifact_type is ever
+// named "markdown", so the exclusion silently matched nothing. This is the
+// exact bug ApplyTypeFilter was introduced to kill on the positive side,
+// reappearing on the negative side.
+func TestApplyNotTypeFilter(t *testing.T) {
+	tests := []struct {
+		name         string
+		in           string
+		wantNotCT    string // "" == nothing appended
+		wantNotArtTy string // "" == nothing appended
+	}{
+		{"real artifact type is excluded as artifact_type", "PACKAGE", "", "PACKAGE"},
+		{"markdown is excluded as a content-type glob", "markdown", "text/markdown*", ""},
+		{"diagram is excluded as a content-type glob", "diagram", DiagramContentType + "*", ""},
+		{"image is excluded as a wildcard subtype", "IMAGE", "image/*", ""},
+		{"empty value is ignored", "", "", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var in pgstore.ListInput
+			ApplyNotTypeFilter(&in, tc.in)
+
+			gotCT := strings.Join(in.NotContentType, ",")
+			gotAT := strings.Join(in.NotArtifactType, ",")
+			if gotCT != tc.wantNotCT {
+				t.Errorf("NotContentType = %q, want %q", gotCT, tc.wantNotCT)
+			}
+			if gotAT != tc.wantNotArtTy {
+				t.Errorf("NotArtifactType = %q, want %q", gotAT, tc.wantNotArtTy)
+			}
+		})
+	}
+}
+
+// End-to-end through the search-token parser: the token a user actually types.
+func TestParseQuery_NegatedPseudoType(t *testing.T) {
+	var in pgstore.ListInput
+	filters, negated, _ := parseQuery("-type:markdown")
+	mergeFilters(&in, filters, negated)
+
+	if got := strings.Join(in.NotContentType, ","); got != "text/markdown*" {
+		t.Errorf("NotContentType = %q, want text/markdown*", got)
+	}
+	if len(in.NotArtifactType) != 0 {
+		t.Errorf("NotArtifactType = %v, want empty (markdown is not an artifact_type)", in.NotArtifactType)
 	}
 }
