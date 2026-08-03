@@ -1,11 +1,23 @@
 # arti
 
-**An AI-first artifact workspace.** Agents produce more documents than people
-can chase through chat logs and shared drives — arti gives that output a
-durable home. Agents and scripts publish over **MCP, REST, or the CLI**;
-humans get a fast web workspace to **browse, read, comment, and share**.
-Every artifact is versioned, searchable, and addressable by a stable URL.
-Self-hostable on Postgres plus any S3-compatible object store.
+**An AI-first, human-friendly artifact workspace.** Agents produce more
+documents than people can chase through chat threads and automated
+pipelines — arti gives that output a durable home. The same store that
+holds reports and docs for people to read also holds what agents run on:
+**prompts, skills, memories, and knowledge**. Agents and scripts publish
+and operate on artifacts over **MCP, REST, and the CLI**; humans get a
+fast web workspace to **browse, read, comment, and share**. Storage like
+this is a mundane primitive of the agent-harness ecosystem — but a
+critical one, and arti is a solid, self-contained answer to it.
+
+Under the surfaces is a deliberately simple **base layer for authoring,
+storage, and retrieval** — versioned artifacts named by stable slugs and
+URLs, full-text search (optional OpenSearch, Postgres fallback), and a
+clean split of compute and state: the API server and web frontend are
+**stateless and scale horizontally**, while all state lives in **Postgres
+and any S3-compatible object store**. Self-hostable end to end, and built
+to take on new access paths (a vector index for semantic retrieval, say)
+without reworking the core.
 
 - **Versioned by design** — a stable `slug` names an artifact; re-uploads
   auto-version. Full version history, and a side-by-side **compare view**
