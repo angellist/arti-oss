@@ -1,0 +1,47 @@
+flowchart TB
+  cli[arti CLI / headless agent]
+  browser[Browser]
+  iframe[Cross-site iframe e.g. Front panel]
+
+  subgraph ingress[Ingress]
+    prot[ProtectedIngress -- oauth2-proxy plus Dex]
+    pub[PublicIngress -- no SSO]
+  end
+
+  browser --> prot
+  cli --> prot
+  iframe --> pub
+
+  subgraph server[arti-server -- Go]
+    authmw[RequireAuth plus EnforceUploadScope]
+    rest[REST API -- /api/artifacts]
+    mcp[MCP server -- /mcp]
+    apps[Apps proxy -- /apps]
+    obo[OBO broker]
+    embed[Embed surfaces -- /embed]
+    devauth[Device + CLI + MCP-OAuth endpoints]
+    feproxy[FE reverse proxy]
+  end
+
+  prot --> authmw
+  authmw --> rest
+  authmw --> mcp
+  pub --> apps
+  pub --> embed
+  pub --> devauth
+  prot --> feproxy
+
+  web[Web sidecar -- Next.js]
+  feproxy --> web
+
+  pg[(Postgres -- metadata)]
+  s3[(S3 / MinIO -- bytes)]
+  gateway[Upstream MCP servers / gateway]
+
+  rest --> pg
+  rest --> s3
+  mcp --> pg
+  apps --> obo
+  obo --> gateway
+  embed --> s3
+  devauth --> pg
