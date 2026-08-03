@@ -12,10 +12,10 @@ import type { ArtifactInfo } from "@/lib/types";
 // single-slug drill-in, which renders an extra `actions` header cell).
 // vi.hoisted because the mock factory runs at import time, before any plain
 // module-level `let` has been initialized.
-const nav = vi.hoisted(() => ({ search: "" }));
+const nav = vi.hoisted(() => ({ search: "", pushed: [] as string[] }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: () => {}, refresh: () => {} }),
+  useRouter: () => ({ push: (href: string) => nav.pushed.push(href), refresh: () => {} }),
   useSearchParams: () => new URLSearchParams(nav.search),
 }));
 
@@ -426,5 +426,125 @@ describe("CatalogTable review fixes", () => {
     nav.search = "arch=1"; // show-archived toggle: same page, different rows
     render();
     expect(box.scrollTop, "toggling a filter must return to the top").toBe(0);
+  });
+});
+
+describe("CatalogTable reorder drag vs the sort click", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    document.cookie = `${COLUMN_COOKIE}=; path=/; max-age=0`;
+    nav.search = "";
+    nav.pushed = [];
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    nav.search = "";
+    nav.pushed = [];
+  });
+
+  const render = () => {
+    act(() => {
+      root.render(
+        <CatalogTable rows={[row()]} total={1} page={1} me={null} initialColumns={defaultColumnPrefs()} />,
+      );
+    });
+  };
+
+  // A drag that ends away from its own header never produces a click on any
+  // sort button (a native click needs pointerdown and pointerup inside the
+  // same element), so arming the suppression flag there leaves it stale — and
+  // the next activation that DOESN'T pass through pointerdown, a keyboard
+  // Enter on the sort button, gets silently eaten.
+  it("does not swallow a keyboard sort after a drag that ends away from the source header", () => {
+    render();
+    const th = container.querySelector('thead th[data-col="title"]') as HTMLElement;
+    act(() => {
+      th.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 100 }));
+      window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: 400 }));
+      // Released over the row area: the pointerup's target is not the header.
+      window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 400 }));
+    });
+    // Keyboard activation fires a click with no preceding pointerdown, so the
+    // defensive clear in beginHeaderDrag never runs for it.
+    const sortBtn = th.querySelector("button") as HTMLButtonElement;
+    act(() => {
+      sortBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(nav.pushed, "a sort after an abandoned drag must not be swallowed").toHaveLength(1);
+  });
+
+  // The case the flag exists for — do not regress it while fixing the above:
+  // a drag that returns to its own sort button DOES produce a click (down and
+  // up share the button), and that click must not re-sort the column.
+  it("still swallows the click that ends a drag returning to its own sort button", () => {
+    render();
+    const th = container.querySelector('thead th[data-col="title"]') as HTMLElement;
+    const sortBtn = th.querySelector("button") as HTMLButtonElement;
+    act(() => {
+      sortBtn.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 100 }));
+      window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: 400 }));
+      sortBtn.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 100 }));
+      // The browser fires this because pointerdown and pointerup share the button.
+      sortBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(nav.pushed, "the click that ends a reorder drag must not sort").toHaveLength(0);
+    // And the suppression is consumed, not left armed for the next activation.
+    act(() => {
+      sortBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(nav.pushed, "only the drag-ending click is suppressed").toHaveLength(1);
+  });
+
+  // The drag's finish closure captures prefs from the render that started the
+  // gesture. Anything applied mid-drag (the column menu stays usable — it
+  // opens on right-click, which never enters the drag path) must survive the
+  // reorder commit.
+  it("keeps a column toggled during the drag when the reorder commits", () => {
+    render();
+    const colOrder = () =>
+      Array.from(container.querySelectorAll("thead th[data-col]")).map((e) => e.getAttribute("data-col"));
+    const firstCol = colOrder()[0]!;
+    const th = container.querySelector('thead th[data-col="type"]') as HTMLElement;
+
+    act(() => {
+      th.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 100 }));
+      // jsdom reports every rect as 0×0, so clientX 0 is the one coordinate
+      // that lands "before" the first header — a valid drop target.
+      window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: 0 }));
+    });
+
+    // Mid-drag, toggle a column on through the menu.
+    act(() => {
+      (container.querySelector("thead") as HTMLElement).dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 40 }),
+      );
+    });
+    const item = (
+      Array.from(document.querySelectorAll('[role="menuitemcheckbox"]')) as HTMLButtonElement[]
+    ).find((b) => b.title.startsWith("comments on this version"))!;
+    act(() => item.click());
+
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 0 }));
+    });
+
+    const restored = parseColumnPrefs(
+      document.cookie
+        .split(";")
+        .map((c) => c.trim())
+        .find((c) => c.startsWith(`${COLUMN_COOKIE}=`))
+        ?.slice(COLUMN_COOKIE.length + 1),
+    );
+    expect(restored.hidden, "the mid-drag toggle must survive the reorder commit").not.toContain("comments");
+    expect(restored.order.indexOf("type"), "and the reorder itself must still commit").toBeLessThan(
+      restored.order.indexOf(firstCol as never),
+    );
   });
 });

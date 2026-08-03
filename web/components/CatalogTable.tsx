@@ -106,12 +106,19 @@ export default function CatalogTable({
     startX: number;
     moved: boolean;
     target: { key: ColumnKey; side: "before" | "after" } | null;
+    fromButton: boolean;
   } | null>(null);
   const headerRowRef = useRef<HTMLTableRowElement>(null);
   const suppressClickRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const cols = visibleColumns(prefs);
+  // Latest prefs for handlers that outlive their render — the reorder drag
+  // parks its finish handler on the window until pointerup.
+  const prefsRef = useRef(prefs);
+  useEffect(() => {
+    prefsRef.current = prefs;
+  });
 
   // Inline archive/unarchive lives only in the drilled-into-slug view (the
   // version-history list). busy holds the artifact_id being mutated so its
@@ -409,7 +416,15 @@ export default function CatalogTable({
     // drag that ends over nothing never produces a click on this header, and a
     // stale flag would silently swallow the NEXT header click instead.
     suppressClickRef.current = false;
-    dragRef.current = { key, startX: e.clientX, moved: false, target: null };
+    dragRef.current = {
+      key,
+      startX: e.clientX,
+      moved: false,
+      target: null,
+      // A click can only need suppressing if the gesture began on the sort
+      // button — see finish.
+      fromButton: !!(e.target instanceof Element && e.target.closest("button")),
+    };
 
     // Listeners on the window, not the cell. A fast flick can put the very
     // first pointermove several cells away — with handlers bound to the source
@@ -445,7 +460,7 @@ export default function CatalogTable({
     // the common case — and without it the window listeners stay attached, the
     // dragged column stays dimmed, and the *next* pointerup anywhere on the
     // page finishes a drag the user abandoned.
-    const finish = (commit: boolean) => {
+    const finish = (commit: boolean, ev?: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
@@ -453,15 +468,31 @@ export default function CatalogTable({
       dragRef.current = null;
       if (commit && d?.moved) {
         // The click that follows this pointerup would otherwise re-sort the
-        // column the user just finished dragging.
-        suppressClickRef.current = true;
+        // column the user just finished dragging — but a native click only
+        // follows when pointerdown AND pointerup both landed on that column's
+        // sort button. Armed in any other case the flag goes stale and eats an
+        // unrelated later activation instead (a keyboard Enter on a sort
+        // button never passes through pointerdown, so nothing would clear it).
+        const upEl = ev?.target instanceof Element ? ev.target : null;
+        suppressClickRef.current =
+          d.fromButton &&
+          !!upEl?.closest("button") &&
+          upEl.closest("th[data-col]")?.getAttribute("data-col") === d.key;
         if (d.target) {
+          // Read the prefs through the ref, not the closure: this handler
+          // lives on the window for the whole gesture, and anything applied
+          // mid-drag (a column toggled through the menu) would otherwise be
+          // overwritten by the commit.
+          const p = prefsRef.current;
           // "after X" means "before whatever follows X" — moveColumn works in
           // terms of the successor, so a drop past the last column appends.
-          const visibleOrder = cols.map((c) => c.key);
-          const at = visibleOrder.indexOf(d.target.key);
-          const before = d.target.side === "before" ? d.target.key : (visibleOrder[at + 1] ?? null);
-          applyPrefs(moveColumn(prefs, d.key, before));
+          // The successor comes from the full order, not the visible one:
+          // inserting before a hidden column reads the same on screen, and the
+          // drop target itself may have been hidden mid-drag.
+          const order = p.order.filter((k) => k !== d.key);
+          const at = order.indexOf(d.target.key);
+          const before = d.target.side === "before" ? d.target.key : (order[at + 1] ?? null);
+          applyPrefs(moveColumn(p, d.key, before));
         }
       }
       setDragKey(null);
@@ -469,7 +500,7 @@ export default function CatalogTable({
     };
     // A cancelled gesture produces no click, so it must NOT arm the
     // click-suppression flag — that would eat the next real sort click.
-    const onUp = () => finish(true);
+    const onUp = (ev: PointerEvent) => finish(true, ev);
     const onCancel = () => finish(false);
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
