@@ -17,6 +17,15 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
+# Pre-built image for the CI web-quality job. Mirrors the Go `test` target in
+# the root Dockerfile: it carries the source plus devDependencies (eslint,
+# typescript, vitest) so `npm run lint`, `npm run typecheck` and `npm test` run
+# with no further installs and no network at step time. It reuses the `build`
+# stage, so the deps/build layers are shared with the web image.
+FROM build AS web_test
+WORKDIR /app
+CMD ["npm", "test"]
+
 FROM node:20-alpine AS web
 WORKDIR /app
 ENV NODE_ENV=production

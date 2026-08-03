@@ -3,6 +3,7 @@ import CatalogTable from "@/components/CatalogTable";
 import { SearchRailProvider } from "@/lib/rail-context";
 import { getMe, listArtifacts, type SortField, type SortDir } from "@/lib/arti";
 import { catalogView } from "@/lib/catalog";
+import { columnCookieFrom, parseColumnPrefs } from "@/lib/columns";
 import type { Me } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -75,13 +76,35 @@ export default async function Home({
 
   return (
     <SearchRailProvider>
-      <main className="min-h-screen pb-12">
+      {/* The catalog is an app-shell page, not a document page: it owns the
+          viewport height and scrolls *inside* itself. That is what lets the
+          table header stay pinned — a `position: sticky` thead sticks to its
+          nearest scrollport, and the table already needs a horizontal
+          scroll wrapper (many optional columns), so the wrapper is the
+          scrollport whether we like it or not. Making that wrapper the
+          vertical scroller too is what gives it something to stick to; with
+          document-level scrolling the header would just ride away. The
+          pagination bar comes along for free — it now stays visible instead
+          of living 50 rows down. h-dvh (not vh) so mobile browser chrome
+          doesn't hide the bottom bar; -3rem for SideNav's fixed mobile top
+          bar, which the layout's pt-12 accounts for. */}
+      <main className="flex h-[calc(100dvh-3rem)] flex-col overflow-hidden md:h-dvh">
         {err ? (
-          <div className="border-b border-rose-200 bg-rose-50 px-6 py-2 text-xs text-rose-700">
+          <div className="shrink-0 border-b border-rose-200 bg-rose-50 px-6 py-2 text-xs text-rose-700">
             error: {err}
           </div>
         ) : null}
-        <CatalogTable rows={rows} total={total} page={pageNum} me={me} />
+        <CatalogTable
+          rows={rows}
+          total={total}
+          page={pageNum}
+          me={me}
+          // Column layout is read from the request's own cookie so the server
+          // renders the user's columns directly. Handing it to the client as
+          // initial state instead (localStorage, or a useEffect) would paint
+          // the default layout first and visibly reshuffle on hydration.
+          initialColumns={parseColumnPrefs(columnCookieFrom(cookie))}
+        />
       </main>
     </SearchRailProvider>
   );

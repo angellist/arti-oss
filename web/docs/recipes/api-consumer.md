@@ -178,6 +178,13 @@ restricted versions stay hidden.
 substring matching on title/description. Both share the same filter and
 pagination params and return `ListResponse` (`{ "artifacts": [...], "total": N }`).
 
+List and search rows carry two extra fields that single-artifact fetches don't:
+`comment_count` (live comments on that *version* — comments anchor to
+`artifact_id`) and `open_thread_count` (how many of its threads are unresolved).
+They are computed for the whole page in one query. Both are omitted, rather than
+zero, if that count could not be produced — so treat "absent" as unknown and `0`
+as genuinely no comments.
+
 ### Pagination
 
 | Param | Default | Notes |

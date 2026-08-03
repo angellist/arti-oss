@@ -58,6 +58,45 @@ top, sort by count or name, and click any value to jump straight into the catalo
 filtered to it. It's the fastest way to discover what labels and content types
 actually exist across all artifacts before you start filtering.
 
+## The catalog table: columns
+
+The table itself is adjustable, and your layout is remembered per browser (in an
+`arti_cols` cookie, read server-side so a reload paints your layout directly
+rather than flashing the default first). Nothing is stored per account — a
+different browser starts fresh.
+
+- **Resize** — drag the divider on the right edge of any header. Double-click a
+  divider to return that one column to its default width. Widths are clamped so
+  a column can't be dragged to nothing.
+- **Reorder** — drag a header sideways; a blue edge shows where it will land.
+- **Choose columns** — **right-click any header** (or click the **⋮** at the far
+  right of the header row) for a checklist of every available column. The last
+  entry resets columns, order, and widths in one go.
+
+Shown by default: **title**, **slug**, **v**, **creator**, **scope · labels**,
+**type**, **created**. Available to switch on:
+
+| Column | What it shows |
+| --- | --- |
+| **comments** | Comments on *that version* — comments anchor to a version, not a slug. An amber **●** marks unresolved threads. |
+| **description** | The artifact's description, truncated (full text on hover). |
+| **content type** | The MIME type as its own column. (It rides under **type** as a subline while this column is off, so it's never shown twice.) |
+| **size** | Stored byte size of the content. |
+| **access** | Who can read it: `everyone`, `private` (creator-only), or the first entry of the read list with a `+n` for the rest. |
+| **modified** | Last change to that version. |
+| **archived** | When a version was archived — pairs with **show archived**. |
+| **id** | The artifact UUID of that exact version. |
+
+Sorting is unchanged: click a header to sort by it. **archived** sorts like the
+default columns do; the rest of the opt-in columns have no server-side sort
+order behind them, so their headers are plain labels rather than buttons.
+
+**The header stays put.** The rows scroll inside the catalog rather than
+scrolling the whole page, so the header row is always on screen — as are the
+search bar above it and the paging bar below it, and the horizontal scrollbar
+when enough columns are switched on to need one. Paging or re-sorting rewinds
+the list to the top.
+
 ## Uploading
 
 Click **Upload** in the rail to open the **Upload artifact** modal. (To write
@@ -141,7 +180,7 @@ link that filters the catalog.
 The toolbar on the right gives you:
 
 - **Width** — `Wide` / `Medium` / `Narrow` for the rendered content column.
-- **Full Page** — opens the content edge-to-edge, via a stable, slug/version-friendly `?v=full` URL. Works for any renderable artifact and for a selected file inside a PACKAGE (any directory).
+- **Full Page** — opens the content edge-to-edge, via a stable, slug/version-friendly `?v=full` URL. Works for any renderable artifact and for a selected file inside a PACKAGE (any directory). **APP** artifacts show **Visit app ↗** in this slot instead — the running app is already the chrome-less view.
 - **Raw Source** — toggle between rendered and raw text.
 - **↓ Download** — the file (or `↓ zip` for a whole PACKAGE).
 - **Access** / **Edit Access** — a colored dot shows the access tier (public,
@@ -177,7 +216,8 @@ The permalink chip (`a/<uuid>`) instead points at one specific version forever.
 ## Full-page view
 
 The **Full Page** button (and a direct `?v=full` on the URL) renders the content
-edge-to-edge with no chrome. The link is consistent across artifact types: it's
+edge-to-edge with no chrome. APP artifacts don't have it: **Visit app ↗** takes
+its place and opens the running app at `/app/<slug>/<version>`. The link is consistent across artifact types: it's
 the artifact's normal-view URL plus `?v=full` (add `&file=<path>` to deep-link a
 specific file inside a PACKAGE). Omit the version to always open the latest.
 

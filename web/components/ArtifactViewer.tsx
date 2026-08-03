@@ -11,7 +11,7 @@ import { isEditableArtifact } from "@/lib/edit";
 import { isComparableArtifact } from "@/lib/diff";
 import MarkdownBody from "./MarkdownBody";
 import { LabelEditor, ScopeEditor } from "./ChipEditors";
-import { archiveArtifact, encodeFilePath, hasPerm, latestVersionForSlug, sameEmail, unarchiveArtifact, updateArtifactTitle } from "@/lib/arti";
+import { archiveArtifact, encodeFilePath, fetchPackageFile, hasPerm, latestVersionForSlug, sameEmail, unarchiveArtifact, updateArtifactTitle } from "@/lib/arti";
 import ViewerToolbar, { RawToggle, TEXT_SCALE, WIDTH_CLASS, useViewerPrefs, type Width } from "./ViewerToolbar";
 import AccessModal from "./AccessModal";
 import CommentsLayer from "./CommentsLayer";
@@ -120,12 +120,22 @@ function EditableTitle({
   useEffect(() => {
     if (editing) inputRef.current?.select();
   }, [editing]);
-  // Keep displayed title in sync if server-side info.title changes
-  // between renders (e.g. after refresh).
-  useEffect(() => {
+  // Keep the displayed title in sync when server-side info.title changes between
+  // renders. This is load-bearing and was verified as such: rename the artifact
+  // out-of-band and call router.refresh() — which re-renders without remounting —
+  // and with this block removed the <h1> keeps the stale title while the
+  // server-rendered document <title> updates. Adjusted during render rather than
+  // in an effect so the new title lands in the same commit as the new prop.
+  //
+  // Keying this component on `initial` would also work, but it would reset
+  // `editing`, `saving` and `err` too — discarding an in-progress rename if a
+  // refresh happens to land mid-edit.
+  const [syncedTitle, setSyncedTitle] = useState(initial);
+  if (initial !== syncedTitle) {
+    setSyncedTitle(initial);
     setTitle(initial);
     setDraft(initial);
-  }, [initial]);
+  }
   // Clear the pending click timer on unmount to avoid state-after-unmount.
   useEffect(() => {
     return () => {
@@ -721,8 +731,8 @@ function NonTextBody({
     );
   }
   if (isImage(ct)) {
-    // eslint-disable-next-line @next/next/no-img-element
     return (
+      // eslint-disable-next-line @next/next/no-img-element
       <img
         src={src}
         alt={name}
@@ -761,14 +771,31 @@ export default function ArtifactViewer({
   // closing the diff falls back to that remembered width.
   const [compareWidth, setCompareWidth] = useState<Width>("wide");
   // Raw Source, edit, and compare modes are per-view, not sticky: reset all
-  // whenever we land on a different artifact (the viewer can stay mounted
-  // across client-side navigations, so in-memory state alone wouldn't reset).
-  useEffect(() => {
+  // whenever we land on a different artifact, in case this component instance is
+  // reused across a client-side navigation instead of remounting.
+  // Adjusted during render rather than in an effect, so the reset is applied in
+  // the same commit as the new artifact rather than one commit later.
+  //
+  // Caveat, measured rather than assumed: as of Next 16 this guard never
+  // actually fires. Every artifact→artifact navigation tried in a dev server —
+  // slug→slug and version→version, via both links and router.push — REMOUNTS
+  // this component, so `useState(false)` has already reset these four. Deleting
+  // it was tempting, but a dev-mode observation is not evidence about the
+  // production router, and the invariant it protects (per-view chrome must not
+  // survive a change of document) would fail silently and confusingly if the
+  // instance ever were reused. Kept as a cheap guard. To retire it, first
+  // confirm remount-on-nav against a production build.
+  //
+  // Keying the whole viewer on artifact_id would also work, but it would remount
+  // the comments overlay and the width machinery — far more than this needs.
+  const [renderedArtifactId, setRenderedArtifactId] = useState(info.artifact_id);
+  if (info.artifact_id !== renderedArtifactId) {
+    setRenderedArtifactId(info.artifact_id);
     setOriginal(false);
     setEditing(false);
     setComparing(false);
     setEditorSplit(false);
-  }, [info.artifact_id]);
+  }
   const mode = useRailMode();
   const router = useRouter();
   const canEdit = !!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(me.email, info.creator));
@@ -871,8 +898,14 @@ export default function ArtifactViewer({
   // to a raw /api/ URL per content type.
   const isFullPageable = (ct: string) =>
     isHTML(ct) || isMarkdown(ct) || isPlainCode(ct) || isDiagramContentType(ct);
+  // APP is the one type with no Full Page: "Visit app" already opens the
+  // running app chrome-less at /app/{ident}, so a second button pointing at a
+  // near-identical view is just two names for one thing. ViewerToolbar puts
+  // "Visit app" in the slot Full Page would have occupied.
   let effectiveFullHref: string | undefined;
-  if (isPackage && selectedInPkg) {
+  if (info.artifact_type === "APP") {
+    effectiveFullHref = undefined;
+  } else if (isPackage && selectedInPkg) {
     effectiveFullHref = `?v=full&file=${encodeURIComponent(selectedInPkg)}`;
   } else if (!isPackage && (isFullPageable(info.content_type) || isPDF(info.content_type) || isImage(info.content_type))) {
     effectiveFullHref = `?v=full`;
@@ -1177,12 +1210,33 @@ function PackageBody({
       setFileBody(null);
       return;
     }
-    fetch(`/api/artifacts/${info.artifact_id}/files/${encodeFilePath(selected)}`)
-      .then(async (r) => {
-        setFileCT(r.headers.get("content-type") ?? entryCT);
-        setFileBody(await r.text());
+    // Via fetchPackageFile rather than a bare fetch: this used to skip the
+    // response.ok check entirely, so a 403/404 put the server's error envelope
+    // into fileBody and RENDERED IT AS THE FILE'S CONTENTS. fetchPackageFile
+    // throws an ArtiError carrying just the `detail`, which lands in the catch
+    // below and is shown as an error instead of as content.
+    //
+    // `contentType || entryCT` (not `??`): the helper returns "" when the
+    // response carries no content-type, and an empty string must fall back to
+    // the manifest's type too.
+    //
+    // Cancellation guard so switching files quickly cannot let a slower earlier
+    // response overwrite the newer file's body — same convention as
+    // ArtifactCompare.
+    let cancelled = false;
+    fetchPackageFile(info.artifact_id, selected)
+      .then(({ body, contentType }) => {
+        if (cancelled) return;
+        setFileCT(contentType || entryCT);
+        setFileBody(body);
       })
-      .catch((e) => setFileBody("(error: " + (e as Error).message + ")"));
+      .catch((e) => {
+        if (cancelled) return;
+        setFileBody("(error: " + (e as Error).message + ")");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selected, nonText, entryCT, info.artifact_id]);
 
   // For HTML files inside a PACKAGE we render the iframe via `src` (the

@@ -796,7 +796,7 @@ func (s *Service) List(ctx context.Context, in pgstore.ListInput) (ListResponse,
 	if err != nil {
 		return ListResponse{}, err
 	}
-	return s.listResp(res), nil
+	return s.listResp(ctx, res), nil
 }
 
 func (s *Service) Search(ctx context.Context, q string, in pgstore.ListInput) (ListResponse, error) {
@@ -830,7 +830,7 @@ func (s *Service) Search(ctx context.Context, q string, in pgstore.ListInput) (L
 	if err != nil {
 		return ListResponse{}, err
 	}
-	return s.listResp(res), nil
+	return s.listResp(ctx, res), nil
 }
 
 // osSearch executes the query via OpenSearch and fetches full rows from Postgres.
@@ -945,15 +945,58 @@ func (s *Service) osSearch(ctx context.Context, q string, in pgstore.ListInput) 
 		info.Highlights = highlightMap[idStr]
 		out.Artifacts = append(out.Artifacts, info)
 	}
+	// Same annotation the Postgres list path applies, so the catalog's comment
+	// column doesn't blank out the moment a query routes through OpenSearch.
+	s.fillCommentCounts(ctx, out.Artifacts)
 	return out, nil
 }
 
-func (s *Service) listResp(res pgstore.ListResult) ListResponse {
+func (s *Service) listResp(ctx context.Context, res pgstore.ListResult) ListResponse {
 	out := ListResponse{Total: res.Total, Artifacts: make([]ArtifactInfo, 0, len(res.Rows))}
 	for _, r := range res.Rows {
 		out.Artifacts = append(out.Artifacts, ToInfo(r, s.baseURL))
 	}
+	s.fillCommentCounts(ctx, out.Artifacts)
 	return out
+}
+
+// fillCommentCounts annotates a page of list/search results with their comment
+// activity, in ONE query for the whole page (never per row — that is the N+1
+// this exists to avoid). The catalog renders it as an optional column.
+//
+// Best-effort by design: a failure here leaves the counts nil and the column
+// renders as "—". A comment-count widget is not worth failing a catalog page
+// over, and the artifacts themselves are already fetched and correct.
+func (s *Service) fillCommentCounts(ctx context.Context, infos []ArtifactInfo) {
+	if len(infos) == 0 {
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(infos))
+	for _, a := range infos {
+		id, err := uuid.Parse(a.ArtifactID)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	counts, err := s.store.CommentCounts(ctx, ids)
+	if err != nil {
+		slog.Warn("comment counts for catalog page failed", "err", err, "rows", len(infos))
+		return
+	}
+	for i := range infos {
+		id, err := uuid.Parse(infos[i].ArtifactID)
+		if err != nil {
+			continue
+		}
+		// Zero is meaningful ("no discussion yet"), so emit it for every row
+		// rather than only for rows present in the map — otherwise the client
+		// cannot tell "no comments" from "counts unavailable".
+		c := counts[id]
+		comments, open := c.Comments, c.OpenThreads
+		infos[i].CommentCount = &comments
+		infos[i].OpenThreadCount = &open
+	}
 }
 
 // Content returns a reader + content-type for the artifact body.

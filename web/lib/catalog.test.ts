@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { catalogView, ALL_VERSIONS_KEY, SHOW_ARCHIVED_KEY, SEARCH_OPEN_KEY } from "./catalog";
+import { catalogView, rowSetKey, ALL_VERSIONS_KEY, SHOW_ARCHIVED_KEY, SEARCH_OPEN_KEY } from "./catalog";
 
 const view = (params: Record<string, string>) => catalogView((k) => params[k]);
 
@@ -44,5 +44,38 @@ describe("catalogView", () => {
 
   it("free text merely containing 'slug' is not a drill-in", () => {
     expect(view({ q: "a slugger" }).drilledIntoSlug).toBe(false);
+  });
+});
+
+describe("rowSetKey", () => {
+  const of = (qs: string) => {
+    const p = new URLSearchParams(qs);
+    return rowSetKey((k) => p.get(k));
+  };
+
+  it("is stable for params that don't change the rows", () => {
+    // `find` only reveals the search bar; an unrelated param is not ours.
+    expect(of("find=1")).toBe(of(""));
+    expect(of("utm=x")).toBe(of(""));
+  });
+
+  it("changes for every filter, sort and page param", () => {
+    const base = of("");
+    for (const qs of [
+      "q=hello",
+      "slug=weekly-report",
+      "type=TEXT",
+      "order_by=title",
+      "order_dir=asc",
+      "page=2",
+      `${ALL_VERSIONS_KEY}=1`,
+      `${SHOW_ARCHIVED_KEY}=1`,
+    ]) {
+      expect(of(qs), `${qs} must be treated as a new row set`).not.toBe(base);
+    }
+  });
+
+  it("does not collide across params", () => {
+    expect(of("q=a")).not.toBe(of("type=a"));
   });
 });

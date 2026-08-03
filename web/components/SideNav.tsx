@@ -70,9 +70,24 @@ export default function SideNav() {
   // rendering on every layout consumer — including /_not-found,
   // which Next pre-renders statically.
   const pathname = usePathname();
-  useEffect(() => {
+  // Adjusted during render rather than in an effect, so the drawer is closed in
+  // the same commit as the new pathname instead of one commit later.
+  //
+  // This is the backstop for navigations that do NOT originate from a click
+  // inside the drawer (router.push from elsewhere, browser back/forward); clicks
+  // on the drawer's own links are already handled by the delegated onClick on
+  // the drawer aside below. Verified by opening the drawer and calling
+  // router.push directly — with no click to delegate from, this is what closes
+  // it.
+  //
+  // A `key` is not an option here: this is the layout rail, and remounting it on
+  // every navigation would drop the width, collapse and `me` state it
+  // deliberately keeps across pages.
+  const [pathAtDrawerOpen, setPathAtDrawerOpen] = useState(pathname);
+  if (pathname !== pathAtDrawerOpen) {
+    setPathAtDrawerOpen(pathname);
     setMobileOpen(false);
-  }, [pathname]);
+  }
 
   useEffect(() => {
     setCollapsed(readInitialCollapsed());

@@ -1,4 +1,4 @@
-.PHONY: setup hooks dev-up dev-down dev-reset build build-cli build-server generate test test-unit test-integration test-e2e lint migrate migrate-test psql server cli docs-diagrams docs-check
+.PHONY: setup hooks dev-up dev-down dev-reset build build-cli build-server generate test test-unit test-integration test-e2e lint lint-web test-web web-check web-install migrate migrate-test psql server cli docs-diagrams docs-check
 
 # Stamp the CLI build with its version + commit so `arti version` / the update
 # check can compare against origin/main. git describe gives the short SHA when
@@ -65,6 +65,21 @@ test-e2e:
 	go test -tags 'integration arti_test' ./tests/e2e/... -race -count=1
 
 test: test-unit test-integration
+
+# The web gates, matching the CI :react: Web Quality step exactly. Kept
+# separate from `lint` / `test-unit` on purpose: those two are what the
+# pre-push hook runs, and they must not start requiring node_modules for
+# someone pushing a Go-only change. Run `make web-install` once first.
+web-install:
+	cd web && npm ci
+
+lint-web:
+	cd web && npm run lint && npm run typecheck
+
+test-web:
+	cd web && npm test
+
+web-check: lint-web test-web
 
 lint:
 	gofmt -l . | (! grep .) || (echo "run gofmt" && exit 1)

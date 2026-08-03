@@ -46,6 +46,16 @@ type ArtifactInfo struct {
 	DeletedAt  *time.Time     `json:"deleted_at"`
 	URL        string         `json:"url"`
 
+	// CommentCount is the number of live (non-deleted) comments on THIS
+	// version, and OpenThreadCount how many of its threads are unresolved.
+	// Comments key off artifact_id (per-version), so both are version-scoped
+	// — the same scoping the viewer shows. Populated only on the catalog
+	// list/search responses, where the whole page is counted in one query;
+	// omitted (nil) elsewhere so a single-artifact GET doesn't pay for a
+	// count nobody renders.
+	CommentCount    *int32 `json:"comment_count,omitempty"`
+	OpenThreadCount *int32 `json:"open_thread_count,omitempty"`
+
 	// Score is the BM25 relevance score from OpenSearch. Zero when search
 	// is handled by Postgres or the result is from a non-search endpoint.
 	Score float64 `json:"score,omitempty"`

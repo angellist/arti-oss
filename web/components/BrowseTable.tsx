@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { BrowseFacet, BrowseValueCount } from "@/lib/types";
@@ -38,11 +38,20 @@ export default function BrowseTable({
   const sp = useSearchParams();
   const [query, setQuery] = useState("");
   // Switching facets (Type/Label/Scope/Content Type) keeps this component
-  // mounted, so a leftover query would silently filter the new facet's
-  // values against the old search term — reset it whenever the facet changes.
-  useEffect(() => {
+  // mounted, so a leftover query would silently filter the new facet's values
+  // against the old search term — clear it whenever the facet changes.
+  //
+  // Adjusted during render rather than in an effect, so the clear lands in the
+  // same commit as the new facet instead of one commit later. `key={facet}` on
+  // the caller would also work, but it puts
+  // the invariant in a different file from the state it protects, where a later
+  // edit to page.tsx could drop it silently. Here it is next to `query`, and
+  // BrowseTable.test.tsx fails if it goes away.
+  const [facetOfQuery, setFacetOfQuery] = useState(facet);
+  if (facet !== facetOfQuery) {
+    setFacetOfQuery(facet);
     setQuery("");
-  }, [facet]);
+  }
   const displayValues = useMemo(
     () => filterAndRankValues(values, query),
     [values, query],

@@ -211,15 +211,6 @@ export default function ViewerToolbar({
 
   return (
     <>
-      {visitHref ? (
-        <a
-          href={visitHref}
-          className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white shadow-sm transition hover:bg-blue-700"
-          title="open the running app, full-page"
-        >
-          Visit app ↗
-        </a>
-      ) : null}
       {showWidth ? <WidthControl width={width} setWidth={setWidth} /> : null}
 
       <div
@@ -255,6 +246,20 @@ export default function ViewerToolbar({
             <line x1="3" y1="21" x2="10" y2="14" />
           </svg>
           Full Page
+        </a>
+      ) : null}
+
+      {/* APP artifacts take this slot instead of Full Page: the running app IS
+          the chrome-less view, so showing both read as two names for one thing
+          (ArtifactViewer suppresses fullHref for APP). Same trailing position
+          so the row's shape doesn't shift between types. */}
+      {visitHref ? (
+        <a
+          href={visitHref}
+          className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white shadow-sm transition hover:bg-blue-700"
+          title="open the running app, full-page"
+        >
+          Visit app ↗
         </a>
       ) : null}
     </>

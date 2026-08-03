@@ -28,6 +28,13 @@ export interface ArtifactInfo {
   modified_at: string;
   deleted_at: string | null;
   url: string;
+  // comment_count / open_thread_count: discussion on THIS version (comments
+  // key off artifact_id, which is per-version). Present on catalog list and
+  // search responses — where the server counts the whole page in one query —
+  // and absent elsewhere. undefined means "not computed", which the catalog
+  // renders as "—"; 0 means "no comments".
+  comment_count?: number;
+  open_thread_count?: number;
   score?: number;
   highlights?: Record<string, string[]>;
 }

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "npm run build:embed && next build",
     "start": "next start",
-    "lint": "eslint",
+    "lint": "eslint --max-warnings 12",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build:embed": "esbuild embed/comments-embed.ts --bundle --minify --format=iife --platform=browser --define:process.env.ARTI_API_URL='\"\"' --define:process.env.NODE_ENV='\"production\"' --outfile=public/comments-embed.js"
   },

@@ -18,6 +18,12 @@ import {
   type ThreadDTO,
   type CommentDTO,
 } from "./arti";
+import {
+  computeShift as computeShiftFrom,
+  CARD_RIGHT,
+  CARD_WIDTH,
+  type Shift,
+} from "./commentsGeometry";
 
 // The overlay talks to the server through this small interface so it can be
 // driven by either the cookie-based client (in-app viewer) or a token-based
@@ -65,7 +71,7 @@ const CSS = `
 .ac-pin .ac-n{transform:rotate(-45deg);color:#fff;font-size:11px;font-weight:700}
 .ac-pin.ac-resolved .ac-bub{background:#a8a8a2;box-shadow:none}
 .ac-pin.ac-active .ac-bub,.ac-pin.ac-draft .ac-bub{outline:3px solid #eff4ff}
-.ac-card{position:fixed;width:344px;pointer-events:auto;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);border-radius:13px;box-shadow:0 6px 24px -10px rgba(40,40,30,.24);padding:11px 12px;cursor:pointer}
+.ac-card{position:fixed;width:${CARD_WIDTH}px;pointer-events:auto;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);border-radius:13px;box-shadow:0 6px 24px -10px rgba(40,40,30,.24);padding:11px 12px;cursor:pointer}
 .ac-cmt{position:relative}
 .ac-del,.ac-edit,.ac-link{position:absolute;top:0;border:none;background:transparent;color:#c9c8c3;font-size:12px;cursor:pointer;padding:2px 4px;line-height:1;opacity:0}
 .ac-link{right:0}
@@ -81,7 +87,7 @@ const CSS = `
 .ac-edit-input{font:inherit;font-size:12.5px;width:100%;border:1px solid #2563eb;border-radius:6px;padding:5px 8px;background:#fff;resize:none;min-height:32px}
 .ac-edit-input:focus{outline:none}
 .ac-edit-acts{display:flex;gap:4px;margin-top:4px}
-.ac-panel{position:fixed;width:344px;max-height:70vh;overflow:auto;pointer-events:auto;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);border-radius:13px;box-shadow:0 10px 34px -12px rgba(40,40,30,.34);padding:6px}
+.ac-panel{position:fixed;width:${CARD_WIDTH}px;max-height:70vh;overflow:auto;pointer-events:auto;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);border-radius:13px;box-shadow:0 10px 34px -12px rgba(40,40,30,.34);padding:6px}
 .ac-panel h4{margin:8px 8px 4px;font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:#9b9b95;font-weight:600}
 .ac-prow{display:flex;align-items:flex-start;gap:8px;padding:8px;border-radius:9px;cursor:pointer}
 .ac-prow:hover{background:#f6f5f2}
@@ -840,16 +846,13 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
 
   // ── document left-bias ──────────────────────────────────────────────
   // When a doc has text comments (which render as cards in the fixed right
-  // column at `right:78`), slide the document AND the toolbar's inner content
+  // column at CARD_RIGHT), slide the document AND the toolbar's inner content
   // left just enough that the card column clears the text — spending the empty
   // left margin instead of overlapping. The shift depends only on
   // (has-text-comments, viewport width), never on whether the panel is open, so
   // toggling comments never reflows the text. Comment-free docs — and the
   // full-page view, which has no toolbar — never shift. Cards themselves are
   // left untouched; the doc retreats from them.
-  const CARD_FOOTPRINT = 78 + 344; // fixed card column: right offset + card width
-  const SHIFT_GAP = 20;            // gap between the doc's right edge and the card
-  const SHIFT_LMIN = 24;           // keep at least this much left margin (≈ px-6)
   let docShift = 0;                // px the doc body is currently translated left by
   let tbShift = 0;                 // px the toolbar content is translated left by (≤ docShift; capped by the toolbar's own margin)
   let pendingTextCommit = false;   // a text comment is mid-create (draft cleared, thread not yet in `threads`) — keep the shift so it doesn't drop and snap back
@@ -862,7 +865,10 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   // instead FOLLOWS the doc, capped by its own margin, and so can never slide
   // under the sidebar; at Wide the two margins are equal, so they move in
   // lockstep and stay aligned.
-  function computeShift(): { doc: number; tb: number } {
+  // Measure, then delegate: the arithmetic lives in commentsGeometry.ts, where
+  // it is reachable from a test. This wrapper only decides WHETHER to shift and
+  // reads the rects to feed it.
+  function computeShift(): Shift {
     const none = { doc: 0, tb: 0 };
     if (!container) return none;
     const topbar = document.querySelector<HTMLElement>("[data-arti-topbar]");
@@ -871,19 +877,17 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // comment on a doc must clear the composer before it's ever committed.
     if (!threads.some((t) => t.anchor.type === "text") && draft?.type !== "text" && !pendingTextCommit) return none;
     const main = container.closest("main");
-    const mainLeft = main ? main.getBoundingClientRect().left : 0;
     const docRect = container.getBoundingClientRect();
-    const docLeft = docRect.left + docShift;   // undo the current translate → natural edges
-    const docRight = docRect.right + docShift;
-    const cardLeft = window.innerWidth - CARD_FOOTPRINT;
-    const needed = docRight - (cardLeft - SHIFT_GAP);
-    const docSlack = Math.max(0, docLeft - mainLeft - SHIFT_LMIN);
-    const doc = Math.max(0, Math.min(needed, docSlack));
-    // Toolbar follows the doc, but never past its own left margin.
     const inner = topbar.firstElementChild as HTMLElement | null;
-    const innerLeft = (inner ? inner.getBoundingClientRect().left : docRect.left) + tbShift;
-    const tbSlack = Math.max(0, innerLeft - mainLeft - SHIFT_LMIN);
-    return { doc, tb: Math.min(doc, tbSlack) };
+    return computeShiftFrom({
+      viewportWidth: window.innerWidth,
+      mainLeft: main ? main.getBoundingClientRect().left : 0,
+      docLeft: docRect.left,
+      docRight: docRect.right,
+      toolbarInnerLeft: inner ? inner.getBoundingClientRect().left : docRect.left,
+      docShift,
+      tbShift,
+    });
   }
 
   // Recomputed cheaply on every place() (load / render / scroll / resize /
@@ -935,7 +939,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
 
   function place() {
     applyDocShift();
-    const right = 78, vw = window.innerWidth, vh = window.innerHeight, gap = 10;
+    const right = CARD_RIGHT, vw = window.innerWidth, vh = window.innerHeight, gap = 10;
     const top0 = topGuard();
     // panel pinned just below the toolbar
     const panel = layer.querySelector<HTMLElement>(".ac-panel");
@@ -967,7 +971,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       const anchor = c.dataset.draft ? draft!.anchor : find(c.dataset.tid!)!.anchor;
       const pt = pinPointOf(anchor);
       if (!pt) { c.style.display = "none"; return; }
-      const w = c.offsetWidth || 344, h = c.offsetHeight;
+      const w = c.offsetWidth || CARD_WIDTH, h = c.offsetHeight;
       let left = pt.left + 16;
       if (left + w > vw - 8) left = pt.left - w - 16; // flip to the pin's left
       left = Math.min(Math.max(8, left), vw - w - 8);

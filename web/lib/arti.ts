@@ -28,6 +28,67 @@ export class ArtiError extends Error {
   }
 }
 
+// Read a failed response into an ArtiError.
+//
+// The server's error envelope is `{detail, code}` on every endpoint, and an
+// ArtiError's `message` is rendered directly to the user by a dozen components
+// (`setErr(e.message)`). So the body must be unwrapped to its `detail` — a bare
+// `await resp.text()` puts `{"detail":"…","code":"Conflict"}` on screen
+// verbatim, which is what most call sites here used to do.
+//
+// One helper for every call site, rather than the parse being inlined in the
+// few that bothered: sharing it is the only thing that keeps the 17 throw sites
+// from drifting apart again.
+async function errorFrom(resp: Response): Promise<ArtiError> {
+  let detail = "";
+  try {
+    const body = (await resp.text()).trim();
+    if (body) detail = detailFromBody(body);
+  } catch {
+    // Body already consumed or the stream failed; fall back to the status line.
+  }
+  // `HTTP <status>` last, and it is NOT redundant: HTTP/2 and HTTP/3 dropped the
+  // reason phrase, so browsers report an EMPTY statusText for every response
+  // over them — which is how arti is actually served in production. Without this
+  // the message would be blank exactly where it matters, and the components that
+  // do setErr(e.message) would render an empty error. statusText is still
+  // preferred when present (HTTP/1.1, and the Node fetch used for SSR).
+  return new ArtiError(resp.status, detail || resp.statusText || `HTTP ${resp.status}`);
+}
+
+// Longest body we are willing to show verbatim. Past this it is a document, not
+// a message, and belongs in devtools rather than a toast.
+const MAX_INLINE_BODY = 200;
+
+function detailFromBody(body: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // Not JSON, so this came from infrastructure we do not control: a gateway
+    // error page, or a plain-text message. Echo it only when it reads as prose.
+    //
+    // A length cap alone is not enough — a DEFAULT NGINX ERROR PAGE IS ~142
+    // CHARACTERS, so it slips under any sane cutoff and lands raw markup in a
+    // toast. Worse, it would be a regression: the call sites that used to go
+    // through resp.json() got statusText for an HTML body, because parsing
+    // threw. So reject anything opening like markup or a broken data structure
+    // and let the status line speak instead.
+    if (/^[<{[]/.test(body)) return "";
+    return body.length <= MAX_INLINE_BODY ? body : "";
+  }
+  // It parsed, so it is machine output. Only our envelope's `detail` is written
+  // for a human — a proxy's own `{message}`, a bare scalar, or an array must
+  // never be pasted on screen, which is the whole point of this helper. The
+  // narrow type check also keeps `null` and a non-string `detail` from reaching
+  // the UI as the literal "null" or "[object Object]".
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const d = (parsed as { detail?: unknown }).detail;
+    if (typeof d === "string") return d.trim();
+  }
+  return "";
+}
+
 async function http<T>(
   path: string,
   init: RequestInit = {},
@@ -44,14 +105,7 @@ async function http<T>(
     credentials: "include",
   });
   if (!resp.ok) {
-    let detail = "";
-    try {
-      const j = await resp.json();
-      detail = j.detail ?? "";
-    } catch {
-      // ignore
-    }
-    throw new ArtiError(resp.status, detail || resp.statusText);
+    throw await errorFrom(resp);
   }
   // 204 No Content (e.g. DELETE) has no body; resp.json() would throw.
   if (resp.status === 204) {
@@ -157,7 +211,7 @@ export async function fetchContent(
     credentials: "include",
   });
   if (!resp.ok) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
   return { body: await resp.text(), contentType: resp.headers.get("content-type") ?? "" };
 }
@@ -188,7 +242,7 @@ export async function fetchPackageFile(
     credentials: "include",
   });
   if (!resp.ok) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
   return { body: await resp.text(), contentType: resp.headers.get("content-type") ?? "" };
 }
@@ -230,7 +284,7 @@ export async function archiveArtifact(id: string): Promise<void> {
     credentials: "include",
   });
   if (!resp.ok && resp.status !== 204) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
 }
 
@@ -242,7 +296,7 @@ export async function unarchiveArtifact(id: string): Promise<void> {
     credentials: "include",
   });
   if (!resp.ok && resp.status !== 204) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
 }
 
@@ -281,13 +335,7 @@ export async function createArtifact(input: CreateArtifactInput): Promise<Artifa
     body: JSON.stringify(input),
   });
   if (!resp.ok) {
-    let detail = "";
-    try {
-      detail = (await resp.json()).detail ?? "";
-    } catch {
-      // ignore
-    }
-    throw new ArtiError(resp.status, detail || resp.statusText);
+    throw await errorFrom(resp);
   }
   return resp.json();
 }
@@ -387,14 +435,14 @@ export async function replyComment(threadId: string, body: string): Promise<Comm
 // resolve/reopen return 204 (no body), so use a raw fetch.
 async function postVoid(path: string): Promise<void> {
   const resp = await fetch(path, { method: "POST", credentials: "include" });
-  if (!resp.ok && resp.status !== 204) throw new ArtiError(resp.status, await resp.text());
+  if (!resp.ok && resp.status !== 204) throw await errorFrom(resp);
 }
 export const resolveThread = (threadId: string) => postVoid(`/api/comments/${threadId}/resolve`);
 export const reopenThread = (threadId: string) => postVoid(`/api/comments/${threadId}/reopen`);
 
 async function del(path: string): Promise<void> {
   const resp = await fetch(path, { method: "DELETE", credentials: "include" });
-  if (!resp.ok && resp.status !== 204) throw new ArtiError(resp.status, await resp.text());
+  if (!resp.ok && resp.status !== 204) throw await errorFrom(resp);
 }
 export const deleteComment = (threadId: string, commentId: string) =>
   del(`/api/comments/${threadId}/comments/${commentId}`);
@@ -415,7 +463,7 @@ export async function hardDeleteArtifact(id: string): Promise<void> {
     credentials: "include",
   });
   if (!resp.ok && resp.status !== 204) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
 }
 
@@ -429,7 +477,7 @@ export async function updateArtifactTitle(id: string, title: string): Promise<Ar
     body: JSON.stringify({ title }),
   });
   if (!resp.ok) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
   return resp.json();
 }
@@ -444,7 +492,7 @@ export async function updateArtifactLabels(id: string, labels: string[]): Promis
     body: JSON.stringify({ labels }),
   });
   if (!resp.ok) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
   return resp.json();
 }
@@ -459,7 +507,7 @@ export async function updateArtifactScopes(id: string, scopes: string[]): Promis
     body: JSON.stringify({ scopes }),
   });
   if (!resp.ok) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
   return resp.json();
 }
@@ -485,7 +533,7 @@ export async function updateArtifactAccess(
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
   return resp.json();
 }
@@ -520,13 +568,7 @@ export async function createGroup(input: {
     body: JSON.stringify(input),
   });
   if (!resp.ok) {
-    let detail = "";
-    try {
-      detail = (await resp.json()).detail ?? "";
-    } catch {
-      // ignore
-    }
-    throw new ArtiError(resp.status, detail || resp.statusText);
+    throw await errorFrom(resp);
   }
   return resp.json();
 }
@@ -544,13 +586,7 @@ export async function updateGroup(
     body: JSON.stringify(patch),
   });
   if (!resp.ok) {
-    let detail = "";
-    try {
-      detail = (await resp.json()).detail ?? "";
-    } catch {
-      // ignore
-    }
-    throw new ArtiError(resp.status, detail || resp.statusText);
+    throw await errorFrom(resp);
   }
   return resp.json();
 }
@@ -563,7 +599,7 @@ export async function deleteGroup(name: string): Promise<void> {
     credentials: "include",
   });
   if (!resp.ok && resp.status !== 204) {
-    throw new ArtiError(resp.status, await resp.text());
+    throw await errorFrom(resp);
   }
 }
 
@@ -577,13 +613,7 @@ async function mutate(path: string, method: string, body?: unknown): Promise<voi
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!resp.ok && resp.status !== 204) {
-    let detail = "";
-    try {
-      detail = (await resp.json()).detail ?? "";
-    } catch {
-      // ignore
-    }
-    throw new ArtiError(resp.status, detail || resp.statusText);
+    throw await errorFrom(resp);
   }
 }
 

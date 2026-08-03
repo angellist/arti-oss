@@ -53,3 +53,29 @@ export function catalogView(
     searchOpen: get(SEARCH_OPEN_KEY) === "1",
   };
 }
+
+// Every URL param that changes WHICH rows the catalog shows — the filters and
+// sort that app/page.tsx passes to the API, plus the page number. `find` is
+// deliberately absent: it only reveals the search bar and leaves the row set
+// alone.
+//
+// The rows scroll inside their own box, so a navigation that swaps them out
+// has to rewind that box by hand (the browser only restores document scroll).
+// Deciding "did the rows change?" from a hand-listed set of params is exactly
+// where that drifts — a toggle gets added to the URL and nobody remembers the
+// scroll effect — so the list lives here, next to the params themselves.
+export const ROW_SET_KEYS = [
+  "q",
+  "slug",
+  "type",
+  "order_by",
+  "order_dir",
+  "page",
+  ALL_VERSIONS_KEY,
+  SHOW_ARCHIVED_KEY,
+] as const;
+
+/** A value that changes exactly when the catalog's row set does. */
+export function rowSetKey(get: (key: string) => string | null | undefined): string {
+  return ROW_SET_KEYS.map((k) => `${k}=${get(k) ?? ""}`).join("&");
+}

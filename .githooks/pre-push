@@ -43,4 +43,23 @@ if ! make test-unit; then
 	exit 1
 fi
 
+# CI now gates the web tree too (:react: Web Lint & Test). Run the same checks
+# here when the deps are already installed, so a frontend change can't sail
+# through the hook and fail in CI. Deliberately conditional: someone pushing a
+# Go-only change should not be forced to install node_modules — but the skip is
+# loud, never silent, so nobody mistakes it for "the web checks passed".
+if [ -d web/node_modules ]; then
+	if ! make lint-web; then
+		echo "pre-push: BLOCKED — 'make lint-web' failed (eslint --max-warnings / tsc). See web/eslint.config.mjs." >&2
+		exit 1
+	fi
+	if ! make test-web; then
+		echo "pre-push: BLOCKED — 'make test-web' failed. Don't push a red web suite to main." >&2
+		exit 1
+	fi
+else
+	echo "pre-push: NOTE — web checks SKIPPED (no web/node_modules)." >&2
+	echo "pre-push:        CI still runs them. If you touched web/, run 'make web-install && make web-check' first." >&2
+fi
+
 echo "pre-push: checks passed — pushing to main."

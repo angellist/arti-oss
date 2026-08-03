@@ -41,12 +41,19 @@ jobs:
       - name: Go tests (unit + integration)
         run: make test
 
-      - name: Web tests + build
-        working-directory: web
+      # Via the make targets, which are the same ones the internal pipeline's
+      # :react: Web step runs — so the public and private web gates cannot
+      # drift. web-check is eslint (with its pinned --max-warnings ratchet)
+      # + tsc --noEmit + vitest; `npm run build` additionally proves the embed
+      # bundle and the Next production build.
+      - name: Web lint + typecheck + tests
         run: |
-          npm ci
-          npm test
-          npm run build
+          make web-install
+          make web-check
+
+      - name: Web build
+        working-directory: web
+        run: npm run build
 
       - name: Docker build (api target)
         run: docker build --target api .

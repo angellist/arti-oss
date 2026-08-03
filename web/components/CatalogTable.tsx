@@ -1,57 +1,117 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { ArtifactInfo, Me } from "@/lib/types";
 import { archiveArtifact, hasPerm, sameEmail, unarchiveArtifact, type SortDir, type SortField } from "@/lib/arti";
-import { ALL_VERSIONS_KEY, SEARCH_OPEN_KEY, SHOW_ARCHIVED_KEY, catalogView } from "@/lib/catalog";
+import { ALL_VERSIONS_KEY, SEARCH_OPEN_KEY, SHOW_ARCHIVED_KEY, catalogView, rowSetKey } from "@/lib/catalog";
+import {
+  clampWidth,
+  defaultColumnPrefs,
+  moveColumn,
+  setWidth,
+  toggleColumn,
+  visibleColumns,
+  widthOf,
+  writeColumnCookie,
+  type ColumnDef,
+  type ColumnKey,
+  type ColumnPrefs,
+} from "@/lib/columns";
 import { relativeTime } from "@/lib/time";
+import { formatBytes } from "@/lib/format";
 import CreatorName from "@/components/CreatorName";
+import ColumnMenu from "@/components/ColumnMenu";
 import { SearchIcon } from "@/components/SearchIcon";
 
-type ColKey = SortField;
-
-type Col = {
-  key: ColKey;
-  label: string;
-  sortable: boolean;
-  className?: string;
-};
-
-// Column order — title is the wide content column, type sits as a
-// metadata pill just before created. Widths are explicit so
-// table-fixed lays them out predictably even with sparse data.
-const COLS: Col[] = [
-  { key: "title",   label: "title",   sortable: true,  className: "min-w-[280px] w-[36%] pl-6 pr-2" },
-  { key: "slug",    label: "slug",    sortable: true,  className: "w-44 px-2" },
-  { key: "version", label: "v",       sortable: true,  className: "w-16 px-2" },
-  { key: "creator", label: "creator", sortable: true,  className: "w-36 px-2" },
-  // scope + labels share one column; the combined width equals the two
-  // former columns (w-52 + w-40 = 368px). Purple scope chips and neutral
-  // label chips stay color-coded. Sorting still keys off scope.
-  { key: "scope",   label: "scope · labels", sortable: true,  className: "w-[368px] px-2" },
-  { key: "type",    label: "type",    sortable: true,  className: "w-28 px-2" },
-  { key: "created", label: "created", sortable: true,  className: "w-36 px-2 pr-6" },
-];
-
 const PAGE_SIZE = 50;
+
+// Width of the trailing cell that holds the ⋮ column-menu button. Fixed and
+// tiny — it exists so the menu has a visible, keyboard-reachable affordance,
+// since a right-click menu is otherwise invisible.
+const MENU_COL_WIDTH = 30;
+
+// Shared by every header cell. Sticky per-cell rather than on <thead>: cell
+// stickiness is the universally supported form (Safari only grew `position:
+// sticky` on thead/tr later), and the cell is what needs the opaque
+// background anyway — the thead's own background scrolls out from under a
+// pinned cell and rows would show through.
+const HEADER_CELL = "sticky top-0 z-20 bg-neutral-50 ";
+const HEADER_RULE = "inset 0 -1px 0 0 rgb(229 229 229)"; // neutral-200
+const DROP_MARK = "rgb(37 99 235)"; // blue-600
+
+// Exported for its own test: getting this wrong is silent — the header keeps
+// working and just loses its bottom edge while a column is being dragged.
+export function headerShadow(dropBefore: boolean, dropAfter: boolean): string {
+  const layers = [HEADER_RULE];
+  if (dropBefore) layers.push(`inset 2px 0 0 0 ${DROP_MARK}`);
+  if (dropAfter) layers.push(`inset -2px 0 0 0 ${DROP_MARK}`);
+  return layers.join(", ");
+}
 
 export default function CatalogTable({
   rows,
   total,
   page,
   me,
+  initialColumns,
 }: {
   rows: ArtifactInfo[];
   total: number;
   page: number; // 1-indexed
   me?: Me | null;
+  // Parsed from the arti_cols cookie during SSR so the first paint already has
+  // the user's layout — see lib/columns.
+  initialColumns?: ColumnPrefs;
 }) {
   const router = useRouter();
   const sp = useSearchParams();
   const orderBy = (sp.get("order_by") as SortField | null) ?? "created";
   const orderDir = (sp.get("order_dir") as SortDir | null) ?? "desc";
+
+  // ─── column layout state ───────────────────────────────────────────────
+  const [prefs, setPrefs] = useState<ColumnPrefs>(() => initialColumns ?? defaultColumnPrefs());
+  // Every mutation goes through here so state and cookie can't drift.
+  const applyPrefs = useCallback((next: ColumnPrefs) => {
+    setPrefs(next);
+    writeColumnCookie(next);
+  }, []);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const [dragKey, setDragKey] = useState<ColumnKey | null>(null);
+  const [dropAt, setDropAt] = useState<{ key: ColumnKey; side: "before" | "after" } | null>(null);
+  const colEls = useRef(new Map<ColumnKey, HTMLTableColElement | null>());
+  // Live drag state for a resize. A ref, not state: pointermove fires at screen
+  // rate and re-rendering 50 rows per frame makes the drag lag behind the
+  // cursor. The <col> element's width is mutated directly during the drag and
+  // committed to state (and the cookie) once, on pointerup.
+  const resizeRef = useRef<{
+    key: ColumnKey;
+    startX: number;
+    startW: number;
+    latest: number;
+    // Did this gesture actually change the width? A bare click on the grip
+    // must not be committed — see endResize.
+    moved: boolean;
+    // Table width minus this column, so the table can be widened in step with
+    // the column during the drag (see moveResize).
+    otherW: number;
+  } | null>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const [resizingKey, setResizingKey] = useState<ColumnKey | null>(null);
+  // Same reasoning for the reorder drag: the live pointer state is a ref, and
+  // only the drop indicator (which changes rarely) is state.
+  const dragRef = useRef<{
+    key: ColumnKey;
+    startX: number;
+    moved: boolean;
+    target: { key: ColumnKey; side: "before" | "after" } | null;
+  } | null>(null);
+  const headerRowRef = useRef<HTMLTableRowElement>(null);
+  const suppressClickRef = useRef(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const cols = visibleColumns(prefs);
 
   // Inline archive/unarchive lives only in the drilled-into-slug view (the
   // version-history list). busy holds the artifact_id being mutated so its
@@ -114,10 +174,28 @@ export default function CatalogTable({
     if (searchOpen && !q) searchInputRef.current?.focus();
   }, [searchOpen, q]);
 
+  // The rows scroll inside their own box now, so a navigation that swaps the
+  // rows out (next page, a re-sort, a new query, a toggled filter) has to
+  // rewind it by hand — the browser only restores *document* scroll, which no
+  // longer moves. Without this, page 2 opens halfway down the list.
+  //
+  // The dependency is rowSetKey over the URL rather than a hand-listed set of
+  // values: naming them here means every new filter has to remember to come
+  // back and be added (the `allv` / `arch` / `type` toggles were missed
+  // exactly that way), while the key lives beside the params it covers.
+  const rowsKey = rowSetKey((k) => sp.get(k));
+  useEffect(() => {
+    // Assigning scrollTop rather than scrollTo(): no smooth-scroll animation
+    // wanted on a row swap, and jsdom implements the property but not the
+    // method, so the tests can observe it.
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+  }, [rowsKey]);
+
   // Keyboard: `/` opens (and focuses) search from anywhere on the catalog;
   // typing any printable key while the bar is already open jumps focus into the
   // box (type-to-search). Ignored while another field is focused, under a
   // modifier, or in the single-slug drill-in view (which has no search bar).
+  const menuOpen = !!menuAt;
   useEffect(() => {
     const isEditable = (el: Element | null) =>
       el instanceof HTMLElement &&
@@ -133,6 +211,8 @@ export default function CatalogTable({
       // so its presence is a reliable "a modal is open" test even when focus
       // sits on a non-editable element inside it.
       if (document.querySelector('[aria-modal="true"]')) return;
+      // Same rule for the column menu: it owns Escape and arrow keys while up.
+      if (menuOpen) return;
       if (isEditable(document.activeElement)) return; // already typing somewhere
       if (e.key === "/") {
         e.preventDefault();
@@ -157,7 +237,7 @@ export default function CatalogTable({
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [searchOpen, drilledIntoSlug, router]);
+  }, [searchOpen, drilledIntoSlug, router, menuOpen]);
 
   // Free-text query terms, for client-side highlighting of slug and
   // scope/label chip hits. Server-side highlights only cover title/body
@@ -250,19 +330,189 @@ export default function CatalogTable({
     );
   }
 
-  const arrow = (key: ColKey) => {
-    if (orderBy !== key) return "";
+  const arrow = (key: SortField | null) => {
+    if (!key || orderBy !== key) return "";
     return orderDir === "asc" ? " ↑" : " ↓";
   };
+
+  // ─── resize ────────────────────────────────────────────────────────────
+  function beginResize(e: ReactPointerEvent<HTMLSpanElement>, key: ColumnKey) {
+    // stopPropagation keeps the mousedown from also starting the header's
+    // HTML5 reorder drag; resizeRef doubles as the guard in onDragStart for the
+    // case where the browser has already begun one.
+    e.preventDefault();
+    e.stopPropagation();
+    const th = e.currentTarget.closest("th");
+    // Measure what is actually on screen rather than the stored preference:
+    // the flexible title column has no stored width, and a fixed-layout table
+    // can stretch columns to fill, so the two can differ.
+    const startW = th ? th.getBoundingClientRect().width : widthOf(prefs, key);
+    resizeRef.current = {
+      key,
+      startX: e.clientX,
+      startW,
+      latest: clampWidth(key, startW),
+      moved: false,
+      otherW: (tableRef.current?.getBoundingClientRect().width ?? totalWidth) - startW,
+    };
+    setResizingKey(key);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  function moveResize(e: ReactPointerEvent<HTMLSpanElement>) {
+    const r = resizeRef.current;
+    if (!r) return;
+    const w = clampWidth(r.key, r.startW + (e.clientX - r.startX));
+    if (w !== r.latest) r.moved = true;
+    r.latest = w;
+    const el = colEls.current.get(r.key);
+    if (el) el.style.width = `${w}px`;
+    // The table's own width has to grow with the column, or a fixed-layout
+    // table just steals the pixels back from its neighbours and the dragged
+    // edge stops tracking the cursor.
+    if (tableRef.current) tableRef.current.style.width = `${r.otherW + w}px`;
+  }
+
+  function endResize(e: ReactPointerEvent<HTMLSpanElement>) {
+    const r = resizeRef.current;
+    resizeRef.current = null;
+    setResizingKey(null);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    // Only a gesture that actually moved the edge is a width preference. A
+    // bare click on the grip would otherwise persist the width the column
+    // happens to be rendering at — and that is usually NOT its stored width:
+    // the table is min-w-full, so columns stretch to fill a wide viewport.
+    // Committing that stretched pixel value pins the column, at one width, on
+    // a click the user never meant as a resize.
+    if (r?.moved) applyPrefs(setWidth(prefs, r.key, r.latest));
+  }
+
+  // Double-clicking the grip returns one column to its designed width.
+  function resetWidth(key: ColumnKey) {
+    const widths = { ...prefs.widths };
+    delete widths[key];
+    applyPrefs({ ...prefs, widths });
+  }
+
+  // ─── reorder ───────────────────────────────────────────────────────────
+  //
+  // Pointer events rather than HTML5 drag-and-drop. DnD would be less code,
+  // but it does nothing on touch, its drag image of a table cell is a
+  // half-rendered ghost, and a `draggable` <th> swallows the text selection and
+  // click behaviour of the sort button inside it. Pointer capture gives one
+  // code path for mouse, pen and touch — and one that a test can drive.
+  function beginHeaderDrag(e: ReactPointerEvent<HTMLTableCellElement>, key: ColumnKey) {
+    if (e.button !== 0 || resizeRef.current) return; // left button only; grip wins
+    // Clear any leftover suppression here rather than in the click handler: a
+    // drag that ends over nothing never produces a click on this header, and a
+    // stale flag would silently swallow the NEXT header click instead.
+    suppressClickRef.current = false;
+    dragRef.current = { key, startX: e.clientX, moved: false, target: null };
+
+    // Listeners on the window, not the cell. A fast flick can put the very
+    // first pointermove several cells away — with handlers bound to the source
+    // <th>, that event never arrives and the drag silently dies. (Pointer
+    // capture would also fix delivery, but capturing on pointerdown retargets
+    // the subsequent click away from the sort button inside the header.)
+    const onMove = (ev: PointerEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      if (!d.moved) {
+        // A few px of slop so a click that jitters still sorts.
+        if (Math.abs(ev.clientX - d.startX) < 5) return;
+        d.moved = true;
+        setDragKey(d.key);
+      }
+      const next = dropTargetAt(ev.clientX, d.key);
+      // Re-render only when the indicator actually moves: pointermove fires per
+      // frame and each one would otherwise re-render every row in the table.
+      const same =
+        (next === null && d.target === null) ||
+        (next !== null &&
+          d.target !== null &&
+          next.key === d.target.key &&
+          next.side === d.target.side);
+      if (!same) {
+        d.target = next;
+        setDropAt(next);
+      }
+    };
+    // Teardown is shared by pointerup and pointercancel. Cancel is not
+    // optional bookkeeping: the browser fires it whenever it takes the gesture
+    // over — a touch that turns into a pan of this (now two-axis) scroll box is
+    // the common case — and without it the window listeners stay attached, the
+    // dragged column stays dimmed, and the *next* pointerup anywhere on the
+    // page finishes a drag the user abandoned.
+    const finish = (commit: boolean) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      const d = dragRef.current;
+      dragRef.current = null;
+      if (commit && d?.moved) {
+        // The click that follows this pointerup would otherwise re-sort the
+        // column the user just finished dragging.
+        suppressClickRef.current = true;
+        if (d.target) {
+          // "after X" means "before whatever follows X" — moveColumn works in
+          // terms of the successor, so a drop past the last column appends.
+          const visibleOrder = cols.map((c) => c.key);
+          const at = visibleOrder.indexOf(d.target.key);
+          const before = d.target.side === "before" ? d.target.key : (visibleOrder[at + 1] ?? null);
+          applyPrefs(moveColumn(prefs, d.key, before));
+        }
+      }
+      setDragKey(null);
+      setDropAt(null);
+    };
+    // A cancelled gesture produces no click, so it must NOT arm the
+    // click-suppression flag — that would eat the next real sort click.
+    const onUp = () => finish(true);
+    const onCancel = () => finish(false);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+  }
+
+  // Which header the pointer is over, and which side of its midpoint — read
+  // from live geometry so it works no matter what element the event targeted.
+  function dropTargetAt(clientX: number, source: ColumnKey) {
+    const row = headerRowRef.current;
+    if (!row) return null;
+    for (const th of Array.from(row.querySelectorAll<HTMLElement>("th[data-col]"))) {
+      const r = th.getBoundingClientRect();
+      if (clientX >= r.left && clientX <= r.right) {
+        const key = th.dataset.col as ColumnKey;
+        if (key === source) return null;
+        return { key, side: clientX > r.left + r.width / 2 ? ("after" as const) : ("before" as const) };
+      }
+    }
+    return null;
+  }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const from = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
   const to = Math.min(total, from + rows.length - 1);
+  // Body columns = the visible ones, plus the drill-in actions cell, plus the
+  // trailing ⋮ cell.
+  const bodyColSpan = cols.length + (drilledIntoSlug ? 1 : 0) + 1;
+  const ACTIONS_COL_WIDTH = 160;
+  const totalWidth =
+    cols.reduce((sum, c) => sum + widthOf(prefs, c.key), 0) +
+    (drilledIntoSlug ? ACTIONS_COL_WIDTH : 0) +
+    MENU_COL_WIDTH;
 
   return (
-    <div>
+    // A column that fills the page shell (app/page.tsx gives it a definite
+    // height): fixed chrome above and below, one scrolling region between.
+    // min-h-0 is load-bearing — a flex child's default min-height:auto would
+    // let the table push the column taller than the viewport and nothing
+    // would ever scroll inside.
+    <div className="flex min-h-0 flex-1 flex-col">
       {actionErr ? (
-        <div className="border-b border-rose-200 bg-rose-50 px-6 py-2 text-xs text-rose-700">
+        <div className="shrink-0 border-b border-rose-200 bg-rose-50 px-6 py-2 text-xs text-rose-700">
           error: {actionErr}
         </div>
       ) : null}
@@ -272,7 +522,7 @@ export default function CatalogTable({
           toggles + a close control. Hidden when drilled into a single slug
           (that view already shows full history with its own inline controls). */}
       {searchOpen ? (
-        <div className="space-y-2.5 border-b border-neutral-200 bg-white px-6 py-3">
+        <div className="shrink-0 space-y-2.5 border-b border-neutral-200 bg-white px-6 py-3">
           <form onSubmit={submitSearch} className="flex items-center gap-2">
             <SearchIcon className="h-4 w-4 shrink-0 text-neutral-400" />
             <input
@@ -328,56 +578,175 @@ export default function CatalogTable({
           </div>
         </div>
       ) : null}
-      <div className="overflow-x-auto">
+      {/* The one scrolling region on the page, in both axes: vertically
+          because the shell above bounds its height, horizontally because the
+          columns can sum past the viewport. Both live here on purpose — the
+          sticky header sticks to *this* box, so the box has to be the thing
+          that scrolls. Side effects worth having: the horizontal scrollbar
+          sits at the bottom of the viewport instead of 50 rows down, and the
+          pagination bar below stays put.
+
+          tabIndex makes the region keyboard-scrollable (PageDown/arrows).
+          Chrome ≥127 and Firefox focus scrollers automatically; Safari does
+          not, so it is declared rather than assumed. */}
+      <div
+        ref={scrollRef}
+        tabIndex={0}
+        aria-label="artifact catalog"
+        className="min-h-0 flex-1 overflow-auto bg-white focus:outline-none focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-blue-300"
+      >
         {/* <mark>s — server-side highlight fragments and the client-side
             slug/label ones alike — are restyled here from the browser's neon
-            yellow to a soft amber. (Layout note: with width:auto, table-fixed
-            never actually engages and this is an auto-layout table; column
-            sizing is protected from snippet blowup in HighlightSnippets.) */}
-        <table className="min-w-full table-fixed bg-white text-[13px] leading-snug [&_mark]:rounded-sm [&_mark]:bg-amber-100 [&_mark]:text-inherit">
-          <thead className="border-b border-neutral-200 bg-neutral-50 text-left text-[12px] text-neutral-700">
-            <tr>
-              {COLS.map((c) => {
+            yellow to a soft amber.
+
+            Layout: table-fixed + an explicit <colgroup> is what makes columns
+            resizable at all — under auto layout the browser re-derives widths
+            from content on every render and a dragged width would not stick.
+            Every column carries a width, and the table is min-w-full: when
+            the columns are narrower than the viewport the browser stretches
+            them to fill it, and when they are wider the wrapper scrolls. An
+            "auto" column that absorbed the slack instead would read better at
+            the default width but collapse to ZERO once enough optional columns
+            are switched on — which is exactly when the title matters most. */}
+        <table
+          ref={tableRef}
+          // An explicit pixel width is what makes table-layout:fixed actually
+          // engage — with width:auto the browser silently falls back to the
+          // auto algorithm and sizes columns from their content, ignoring the
+          // <colgroup> entirely (a trap this table has fallen into before).
+          // minWidth:100% then fills the viewport when the columns are narrow,
+          // and the wrapper scrolls when they are not.
+          style={{ width: `${totalWidth}px`, minWidth: "100%" }}
+          className={
+            "min-w-full table-fixed bg-white text-[13px] leading-snug [&_mark]:rounded-sm [&_mark]:bg-amber-100 [&_mark]:text-inherit " +
+            (resizingKey ? "select-none" : "")
+          }
+        >
+          <colgroup>
+            {cols.map((c) => (
+              <col
+                key={c.key}
+                ref={(el) => {
+                  colEls.current.set(c.key, el);
+                }}
+                style={{ width: `${widthOf(prefs, c.key)}px` }}
+              />
+            ))}
+            {drilledIntoSlug ? <col style={{ width: `${ACTIONS_COL_WIDTH}px` }} /> : null}
+            <col style={{ width: `${MENU_COL_WIDTH}px` }} />
+          </colgroup>
+          {/* The header's bottom rule is a box-shadow, not a border: under
+              `border-collapse: collapse` (Tailwind's preflight default) the
+              collapsed border belongs to the table grid, not to the sticky
+              cell, so it stays behind at the top of the table and the pinned
+              header scrolls away bare. Shadows travel with the cell. */}
+          <thead
+            className="bg-neutral-50 text-left text-[12px] text-neutral-700"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenuAt({ x: e.clientX, y: e.clientY });
+            }}
+          >
+            <tr ref={headerRowRef}>
+              {cols.map((c, i) => {
                 const headerLabel = c.key === "version" ? versionColLabel : c.label;
+                const isDropBefore = dropAt?.key === c.key && dropAt.side === "before";
+                const isDropAfter = dropAt?.key === c.key && dropAt.side === "after";
                 return (
-                  <th key={c.key} className={`py-2 font-bold ${c.className ?? ""}`}>
-                    {c.sortable ? (
+                  <th
+                    key={c.key}
+                    data-col={c.key}
+                    onPointerDown={(e) => beginHeaderDrag(e, c.key)}
+                    // The drop indicator is a second shadow layered on the
+                    // header rule, not a replacement for it — as two classes
+                    // the later `shadow-*` would simply win and the pinned
+                    // header would lose its bottom edge mid-drag.
+                    style={{ boxShadow: headerShadow(isDropBefore, isDropAfter) }}
+                    className={
+                      HEADER_CELL +
+                      "relative select-none py-2 font-bold " +
+                      (i === 0 ? "pl-6 pr-2 " : "px-2 ") +
+                      (c.numeric ? "text-right " : "") +
+                      (dragKey ? "cursor-grabbing " : "") +
+                      (dragKey === c.key ? "opacity-40 " : "")
+                    }
+                    title={`${c.help} — drag to reorder, right-click for column options`}
+                  >
+                    {c.sort ? (
                       <button
-                        onClick={() => router.push(sortHref(c.key as SortField))}
+                        onClick={() => {
+                          // Swallow the click that ends a reorder drag.
+                          if (suppressClickRef.current) {
+                            suppressClickRef.current = false;
+                            return;
+                          }
+                          router.push(sortHref(c.sort as SortField));
+                        }}
                         className="cursor-pointer select-none transition hover:text-neutral-900"
                       >
                         {headerLabel}
-                        {arrow(c.key)}
+                        {arrow(c.sort)}
                       </button>
                     ) : (
-                      headerLabel
+                      <span className="select-none">{headerLabel}</span>
                     )}
+                    {/* Resize grip: a 9px hit area ending at the cell border,
+                        with its 1px rule on the border itself (justify-end).
+                        It used to straddle the border, 4px of it overhanging
+                        into the next cell — which stopped working the moment
+                        the header went sticky: sticky always creates a
+                        stacking context, so a child can no longer paint above
+                        the *next* header cell, and those 4px started hitting
+                        the neighbour (a reorder drag) instead of the grip.
+                        Keeping the whole hit area inside its own cell is what
+                        makes it reachable again. */}
+                    <span
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label={`resize ${c.label} column`}
+                      onPointerDown={(e) => beginResize(e, c.key)}
+                      onPointerMove={moveResize}
+                      onPointerUp={endResize}
+                      onPointerCancel={endResize}
+                      onDoubleClick={() => resetWidth(c.key)}
+                      className={
+                        "absolute right-0 top-0 z-10 flex h-full w-[9px] cursor-col-resize touch-none items-stretch justify-end " +
+                        "after:my-1 after:w-px after:bg-neutral-200 after:transition hover:after:bg-blue-500 " +
+                        (resizingKey === c.key ? "after:bg-blue-500" : "")
+                      }
+                    />
                   </th>
                 );
               })}
               {drilledIntoSlug ? (
-                <th className="w-40 px-2 pr-6 py-2 font-bold text-right">actions</th>
+                <th
+                  style={{ boxShadow: headerShadow(false, false) }}
+                  className={HEADER_CELL + "px-2 py-2 text-right font-bold"}
+                >
+                  actions
+                </th>
               ) : null}
+              <th
+                style={{ boxShadow: headerShadow(false, false) }}
+                className={HEADER_CELL + "px-1 py-2 text-right"}
+              >
+                <button
+                  type="button"
+                  aria-label="choose columns"
+                  title="choose columns (or right-click any header)"
+                  onClick={(e) => {
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setMenuAt({ x: r.right - 4, y: r.bottom + 4 });
+                  }}
+                  className="rounded px-1 text-neutral-400 transition hover:bg-neutral-200 hover:text-neutral-700"
+                >
+                  ⋮
+                </button>
+              </th>
             </tr>
           </thead>
           <tbody>
             {rows.map((a) => {
-              const localURL = a.named_slug
-                ? a.version != null
-                  ? `/s/${a.named_slug}/${a.version}`
-                  : `/s/${a.named_slug}`
-                : `/a/${a.artifact_id}`;
-              // APP rows get a "Visit app" launcher to the running app at
-              // /app/{ident} (Go-served, version-pinned) — same target as the
-              // view-mode toolbar button, so an app is one click from the list.
-              const appHref =
-                a.artifact_type === "APP"
-                  ? a.named_slug
-                    ? a.version != null
-                      ? `/app/${a.named_slug}/${a.version}`
-                      : `/app/${a.named_slug}`
-                    : `/app/${a.artifact_id}`
-                  : null;
               const archived = !!a.deleted_at;
               // Dim the *content* cells of an archived version, but NOT the
               // actions cell — CSS opacity flattens a whole row as one group,
@@ -394,129 +763,27 @@ export default function CatalogTable({
                     (archived ? "bg-neutral-50/60" : "")
                   }
                 >
-                  <td className={`pl-6 pr-2 py-1.5 ${dim}`}>
-                    <Link
-                      href={localURL}
-                      className="group text-[15px] font-medium text-blue-700"
+                  {cols.map((c, i) => (
+                    <td
+                      key={c.key}
+                      className={
+                        "py-1.5 align-top " +
+                        (i === 0 ? "pl-6 pr-2 " : "px-2 ") +
+                        (c.numeric ? "text-right " : "") +
+                        dim
+                      }
                     >
-                      {a.highlights?.title?.[0] ? (
-                        // OpenSearch already returns a highlighted title
-                        // fragment; render it so matched terms are marked in
-                        // the title, not just the body snippet.
-                        <span
-                          className="group-hover:underline"
-                          dangerouslySetInnerHTML={{
-                            __html: sanitizeHighlight(a.highlights.title[0]),
-                          }}
-                        />
-                      ) : (
-                        <span className="group-hover:underline">{a.title}</span>
-                      )}
-                      {a.artifact_type === "PACKAGE" ? (
-                        <span
-                          className="ml-1.5 text-base"
-                          title="multi-file PACKAGE artifact"
-                          aria-label="package"
-                        >
-                          📦
-                        </span>
-                      ) : null}
-                    </Link>
-                    {appHref ? (
-                      // Plain <a> (not Link): /app/{ident} is served by the Go
-                      // edge, not a Next route, so it needs a full navigation.
-                      <a
-                        href={appHref}
-                        className="ml-2 inline-flex items-center rounded-md bg-blue-600 px-1.5 py-0.5 align-middle text-[11px] font-medium text-white shadow-sm transition hover:bg-blue-700"
-                        title="open the running app, full-page"
-                        aria-label="open the running app"
-                      >
-                        ↗
-                      </a>
-                    ) : null}
-                    <HighlightSnippets highlights={a.highlights} />
-                  </td>
-                  <td className={`px-2 py-1.5 text-neutral-700 ${dim}`}>
-                    {a.named_slug ? (
-                      <Link
-                        href={slugFilterHref(a.named_slug)}
-                        className="text-blue-700 hover:underline"
-                        title="filter to every version of this slug"
-                      >
-                        <Highlighted text={a.named_slug} terms={terms} />
-                      </Link>
-                    ) : (
-                      <span className="text-neutral-300">—</span>
-                    )}
-                  </td>
-                  <td className={`px-2 py-1.5 text-neutral-700 ${dim}`}>
-                    {a.version != null ? (
-                      `v${a.version}`
-                    ) : (
-                      <span className="text-neutral-300">—</span>
-                    )}
-                    {archived ? (
-                      <span
-                        className="ml-1 rounded bg-neutral-200 px-1 py-0.5 text-[10px] uppercase tracking-wide text-neutral-500"
-                        title={a.deleted_at ? `archived ${a.deleted_at}` : "archived"}
-                      >
-                        archived
-                      </span>
-                    ) : null}
-                  </td>
-                  <td className={`px-2 py-1.5 text-neutral-700 ${dim}`}>
-                    <CreatorName email={a.creator} />
-                  </td>
-                  <td className={`px-2 py-1.5 text-neutral-500 ${dim}`}>
-                    {a.scopes.length > 0 || a.labels.length > 0 ? (
-                      <span className="inline-flex flex-wrap gap-1">
-                        {a.scopes.map((sc) => (
-                          <Link
-                            key={`scope:${sc}`}
-                            href={`/?q=${encodeURIComponent("scope:" + sc)}`}
-                            className="inline-block rounded-full bg-purple-50 px-2 py-0.5 text-[11px] text-purple-800 ring-1 ring-purple-200 transition hover:bg-purple-100"
-                            title="filter by this scope"
-                          >
-                            <Highlighted text={sc} terms={terms} />
-                          </Link>
-                        ))}
-                        {a.labels.map((l) => (
-                          <Link
-                            key={`label:${l}`}
-                            href={`/?q=${encodeURIComponent("label:" + l)}`}
-                            className="inline-block rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] text-neutral-700 ring-1 ring-neutral-200 transition hover:bg-neutral-200"
-                            title="filter by this label"
-                          >
-                            <Highlighted text={l} terms={terms} />
-                          </Link>
-                        ))}
-                      </span>
-                    ) : (
-                      <span className="text-neutral-300">—</span>
-                    )}
-                  </td>
-                  <td className={`px-2 py-1.5 ${dim}`}>
-                    <span
-                      className="inline-block rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-600"
-                      title={a.content_type}
-                    >
-                      {a.artifact_type}
-                    </span>
-                    <div className="mt-0.5 text-[11px] text-neutral-400">{a.content_type}</div>
-                  </td>
-                  <td
-                    className={
-                      "whitespace-nowrap px-2 py-1.5 text-neutral-500 " +
-                      (drilledIntoSlug ? "" : "pr-6") +
-                      " " +
-                      dim
-                    }
-                    title={a.created_at}
-                  >
-                    {relativeTime(a.created_at)}
-                  </td>
+                      <Cell
+                        col={c}
+                        a={a}
+                        terms={terms}
+                        showContentTypeSubline={!isColVisible(cols, "content_type")}
+                        slugFilterHref={slugFilterHref}
+                      />
+                    </td>
+                  ))}
                   {drilledIntoSlug ? (
-                    <td className="whitespace-nowrap px-2 pr-6 py-1.5 text-right">
+                    <td className="whitespace-nowrap px-2 py-1.5 text-right">
                       <button
                         type="button"
                         disabled={!canActOn(a) || busy === a.artifact_id}
@@ -539,15 +806,13 @@ export default function CatalogTable({
                       </button>
                     </td>
                   ) : null}
+                  <td />
                 </tr>
               );
             })}
             {rows.length === 0 ? (
               <tr>
-                <td
-                  colSpan={COLS.length + (drilledIntoSlug ? 1 : 0)}
-                  className="px-6 py-12 text-center text-neutral-400"
-                >
+                <td colSpan={bodyColSpan} className="px-6 py-12 text-center text-neutral-400">
                   no artifacts
                 </td>
               </tr>
@@ -556,7 +821,21 @@ export default function CatalogTable({
         </table>
       </div>
 
-      <nav className="flex items-center justify-between border-t border-neutral-200 bg-white px-6 py-2 text-[11px] text-neutral-500">
+      {menuAt ? (
+        <ColumnMenu
+          x={menuAt.x}
+          y={menuAt.y}
+          prefs={prefs}
+          onToggle={(k) => applyPrefs(toggleColumn(prefs, k))}
+          onReset={() => {
+            applyPrefs(defaultColumnPrefs());
+            setMenuAt(null);
+          }}
+          onClose={() => setMenuAt(null)}
+        />
+      ) : null}
+
+      <nav className="flex shrink-0 items-center justify-between border-t border-neutral-200 bg-white px-6 py-2 text-[11px] text-neutral-500">
         <span>
           {total === 0 ? (
             "no artifacts"
@@ -587,6 +866,269 @@ export default function CatalogTable({
         ) : null}
       </nav>
     </div>
+  );
+}
+
+function isColVisible(cols: ColumnDef[], key: ColumnKey): boolean {
+  return cols.some((c) => c.key === key);
+}
+
+// Cell renders one artifact field. Every column in lib/columns is handled here;
+// the switch is exhaustive so adding a registry entry without a renderer is a
+// type error rather than a blank column.
+function Cell({
+  col,
+  a,
+  terms,
+  showContentTypeSubline,
+  slugFilterHref,
+}: {
+  col: ColumnDef;
+  a: ArtifactInfo;
+  terms: string[];
+  showContentTypeSubline: boolean;
+  slugFilterHref: (slug: string) => string;
+}) {
+  const dash = <span className="text-neutral-300">—</span>;
+  switch (col.key) {
+    case "title": {
+      const localURL = a.named_slug
+        ? a.version != null
+          ? `/s/${a.named_slug}/${a.version}`
+          : `/s/${a.named_slug}`
+        : `/a/${a.artifact_id}`;
+      // APP rows get a "Visit app" launcher to the running app at
+      // /app/{ident} (Go-served, version-pinned) — same target as the
+      // view-mode toolbar button, so an app is one click from the list.
+      const appHref =
+        a.artifact_type === "APP"
+          ? a.named_slug
+            ? a.version != null
+              ? `/app/${a.named_slug}/${a.version}`
+              : `/app/${a.named_slug}`
+            : `/app/${a.artifact_id}`
+          : null;
+      return (
+        <>
+          <div className="flex items-start gap-2">
+            <Link href={localURL} className="group text-[15px] font-medium text-blue-700">
+              {a.highlights?.title?.[0] ? (
+                // OpenSearch already returns a highlighted title fragment;
+                // render it so matched terms are marked in the title, not just
+                // the body snippet.
+                <span
+                  className="group-hover:underline"
+                  dangerouslySetInnerHTML={{ __html: sanitizeHighlight(a.highlights.title[0]) }}
+                />
+              ) : (
+                <span className="group-hover:underline">{a.title}</span>
+              )}
+              {a.artifact_type === "PACKAGE" ? (
+                <span className="ml-1.5 text-base" title="multi-file PACKAGE artifact" aria-label="package">
+                  📦
+                </span>
+              ) : null}
+            </Link>
+            {appHref ? (
+              // Plain <a> (not Link): /app/{ident} is served by the Go edge, not
+              // a Next route, so it needs a full navigation. Pushed to the
+              // column's right edge (ml-auto) and styled neutral rather than
+              // blue: it's secondary to the title link, and a stack of blue
+              // chips down the list shouted over the titles. shrink-0 so a
+              // wrapping title never squeezes the label.
+              <a
+                href={appHref}
+                className="ml-auto inline-flex shrink-0 items-center rounded-md border border-neutral-200 bg-white px-2 py-0.5 text-[11px] font-medium text-neutral-600 shadow-sm transition hover:bg-neutral-50 hover:text-neutral-900"
+                title="open the running app, full-page"
+                aria-label="open the running app"
+              >
+                Visit app ↗
+              </a>
+            ) : null}
+          </div>
+          <HighlightSnippets highlights={a.highlights} />
+        </>
+      );
+    }
+    case "slug":
+      return a.named_slug ? (
+        <Link
+          href={slugFilterHref(a.named_slug)}
+          className="block truncate text-blue-700 hover:underline"
+          title="filter to every version of this slug"
+        >
+          <Highlighted text={a.named_slug} terms={terms} />
+        </Link>
+      ) : (
+        dash
+      );
+    case "version":
+      return (
+        <span className="text-neutral-700">
+          {a.version != null ? `v${a.version}` : dash}
+          {a.deleted_at ? (
+            <span
+              className="ml-1 rounded bg-neutral-200 px-1 py-0.5 text-[10px] uppercase tracking-wide text-neutral-500"
+              title={`archived ${a.deleted_at}`}
+            >
+              archived
+            </span>
+          ) : null}
+        </span>
+      );
+    case "creator":
+      return (
+        <span className="block truncate text-neutral-700">
+          <CreatorName email={a.creator} />
+        </span>
+      );
+    case "scope":
+      return a.scopes.length > 0 || a.labels.length > 0 ? (
+        <span className="inline-flex flex-wrap gap-1 text-neutral-500">
+          {a.scopes.map((sc) => (
+            <Link
+              key={`scope:${sc}`}
+              href={`/?q=${encodeURIComponent("scope:" + sc)}`}
+              className="inline-block rounded-full bg-purple-50 px-2 py-0.5 text-[11px] text-purple-800 ring-1 ring-purple-200 transition hover:bg-purple-100"
+              title="filter by this scope"
+            >
+              <Highlighted text={sc} terms={terms} />
+            </Link>
+          ))}
+          {a.labels.map((l) => (
+            <Link
+              key={`label:${l}`}
+              href={`/?q=${encodeURIComponent("label:" + l)}`}
+              className="inline-block rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] text-neutral-700 ring-1 ring-neutral-200 transition hover:bg-neutral-200"
+              title="filter by this label"
+            >
+              <Highlighted text={l} terms={terms} />
+            </Link>
+          ))}
+        </span>
+      ) : (
+        dash
+      );
+    case "type":
+      return (
+        <>
+          <span
+            className="inline-block rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-600"
+            title={a.content_type}
+          >
+            {a.artifact_type}
+          </span>
+          {/* The MIME type rides along under the pill only while it has no
+              column of its own — otherwise it would appear twice in one row. */}
+          {showContentTypeSubline ? (
+            <div className="mt-0.5 truncate text-[11px] text-neutral-400">{a.content_type}</div>
+          ) : null}
+        </>
+      );
+    case "content_type":
+      return <span className="block truncate text-neutral-500">{a.content_type}</span>;
+    case "description":
+      return a.description ? (
+        <span className="block truncate text-neutral-500" title={a.description}>
+          {a.description}
+        </span>
+      ) : (
+        dash
+      );
+    case "size":
+      return a.size_bytes != null ? (
+        <span className="whitespace-nowrap text-neutral-500">{formatBytes(a.size_bytes)}</span>
+      ) : (
+        dash
+      );
+    case "comments":
+      return <CommentsCell a={a} />;
+    case "access":
+      return <AccessCell a={a} />;
+    case "modified":
+      return (
+        <span className="whitespace-nowrap text-neutral-500" title={a.modified_at}>
+          {relativeTime(a.modified_at)}
+        </span>
+      );
+    case "created":
+      return (
+        <span className="whitespace-nowrap text-neutral-500" title={a.created_at}>
+          {relativeTime(a.created_at)}
+        </span>
+      );
+    case "archived":
+      return a.deleted_at ? (
+        <span className="whitespace-nowrap text-neutral-500" title={a.deleted_at}>
+          {relativeTime(a.deleted_at)}
+        </span>
+      ) : (
+        dash
+      );
+    case "id":
+      return (
+        <span className="block truncate font-mono text-[11px] text-neutral-400" title={a.artifact_id}>
+          {a.artifact_id}
+        </span>
+      );
+  }
+}
+
+// CommentsCell shows discussion volume on THIS version (comments are anchored
+// to artifact_id, which is per-version). A filled dot marks unresolved threads
+// — "someone is waiting on an answer here" is the signal worth scanning for.
+// Undefined (not zero) means the server didn't compute counts for this
+// response, which renders as an em dash rather than a misleading "0".
+function CommentsCell({ a }: { a: ArtifactInfo }) {
+  if (a.comment_count == null) return <span className="text-neutral-300">—</span>;
+  const open = a.open_thread_count ?? 0;
+  // Zero comments does NOT imply zero open threads: a thread whose comments
+  // were all deleted is still open and still awaiting a reply (pgstore's
+  // CommentCounts counts it on purpose — LEFT JOIN, not JOIN). Returning
+  // early on comment_count === 0 hid the amber marker for exactly that row.
+  if (a.comment_count === 0 && open === 0) return <span className="text-neutral-300">0</span>;
+  return (
+    <span
+      className="whitespace-nowrap text-neutral-600"
+      title={
+        open > 0
+          ? `${a.comment_count} comment${a.comment_count === 1 ? "" : "s"} on this version, ${open} unresolved thread${open === 1 ? "" : "s"}`
+          : `${a.comment_count} comment${a.comment_count === 1 ? "" : "s"} on this version, all resolved`
+      }
+    >
+      {open > 0 ? <span className="mr-1 text-amber-500">●</span> : null}
+      {a.comment_count}
+    </span>
+  );
+}
+
+// AccessCell collapses allowed_access into a scannable label. `['*']` is the
+// server default (everyone authenticated) and `[]` means creator-only; anything
+// else is a list of email globs / group tokens shown as a count with the full
+// list on hover.
+function AccessCell({ a }: { a: ArtifactInfo }) {
+  const acl = a.allowed_access ?? [];
+  if (acl.includes("*")) {
+    return (
+      <span className="text-neutral-400" title="every authenticated user can read this">
+        everyone
+      </span>
+    );
+  }
+  if (acl.length === 0) {
+    return (
+      <span className="text-amber-700" title="only the creator can read this">
+        private
+      </span>
+    );
+  }
+  return (
+    <span className="block truncate text-neutral-600" title={acl.join("\n")}>
+      {acl[0]}
+      {acl.length > 1 ? (
+        <span className="text-neutral-400"> +{acl.length - 1}</span>
+      ) : null}
+    </span>
   );
 }
 

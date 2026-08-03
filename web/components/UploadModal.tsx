@@ -15,7 +15,6 @@ import {
   bundleFiles,
   bytesToBase64,
   detectType,
-  guessContentType,
   humanBytes,
   isTextualContentType,
   slugFromFilename,
