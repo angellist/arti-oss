@@ -69,9 +69,32 @@ verification command after every step) in
    IdP; arti slots in. Each dependency maps to one configuration section and
    is verified independently.
 
-The docs are written to be followed by you **or your AI coding assistant** —
-a root `AGENTS.md` briefs the assistant, and every configuration error names
-the key at fault.
+### Set it up with your AI agent
+
+This repository is built to be **driven by a coding agent** — Claude Code,
+Cursor, Codex, or similar. Clone it, open your agent at the repo root, and
+ask it to do the setup. A prompt like:
+
+> Set up arti from this repo. Read `AGENTS.md` first. I want **[local
+> evaluation / a single-box deployment / a retrofit into my environment]**.
+> My infrastructure: Postgres at **[DSN / "none, use the compose one"]**,
+> object store **[AWS S3 / MinIO / R2 / B2 / "none"]**, login via **[my IdP
+> (Okta, Google, Entra, Keycloak, …) / my authenticating proxy / disabled,
+> local only]**. Configure it, run `arti-server doctor` until it passes,
+> then verify a login and an upload round-trip.
+
+The repo meets the agent halfway:
+
+- A root [`AGENTS.md`](AGENTS.md) briefs it on the three profiles, the
+  configuration model, and the verification loop.
+- **Each infrastructure choice maps to one configuration section** —
+  Postgres (`ARTI_DATABASE_URL`), any S3-compatible store (static keys or
+  the ambient IAM chain), and one of the three auth modes — and each is
+  verified independently by `arti-server doctor`, so the agent can retrofit
+  one dependency at a time.
+- Every configuration error **names the key at fault**, and the self-hosting
+  docs are checklists with a verification command after every step — an
+  agent (or you) always knows exactly where the setup stands.
 
 ### Your main tool: `arti-server doctor`
 
