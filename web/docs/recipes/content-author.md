@@ -39,6 +39,8 @@ Two pieces of metadata do the work of making something discoverable months later
   and stick to it: a `kind` label (`report`, `study`, `design-doc`, `postmortem`),
   a project label, and `auto-gen` when a tool produced it. **Always add at least
   one label** — an unlabeled artifact is hard to find in a busy catalog.
+  Forgot on the way in? Labels *and* the description are editable in place
+  (`PATCH /api/artifacts/{id}`, or `arti label`) without minting a new version.
 
 ```sh
 arti add q2-cr-efficiency.md \

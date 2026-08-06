@@ -63,6 +63,7 @@ func (c *DoctorCmd) Run(_ *kong.Context) error {
 	checks := []doctorCheck{
 		{"signing key", checkSigningKey},
 		{"base URL & cookies", checkBaseURL},
+		{"access gate", checkAccessGate},
 	}
 	if !c.ConfigOnly {
 		checks = append(checks,
@@ -117,6 +118,39 @@ func checkBaseURL(_ context.Context, cfg *config.Config) (string, bool, error) {
 		return "", false, fmt.Errorf("ARTI_COOKIE_SECURE is true but the base URL is plain http — browsers will drop the session cookie")
 	}
 	return cfg.Server.BaseURL, false, nil
+}
+
+// checkAccessGate spells out who the email allowlist actually admits, which
+// is not always what the operator reads into it. Deliberately judges no
+// domain: whether `example.com` means "my colleagues" or "the internet"
+// depends on who can get an account there, which only the operator knows —
+// so the check states the implication for every domain entry rather than
+// pattern-matching a doomed list of public mail providers. Empty is the one
+// configuration it calls out, because fail-closed means nobody at all.
+func checkAccessGate(_ context.Context, cfg *config.Config) (string, bool, error) {
+	if cfg.Auth.Disabled {
+		return "auth disabled — everyone is local@example.com; not for shared or public deployments", true, nil
+	}
+	var domains, addresses []string
+	for _, e := range auth.NormalizeAllowlist(cfg.Auth.AllowedDomains) {
+		if strings.Contains(e, "@") {
+			addresses = append(addresses, e)
+			continue
+		}
+		domains = append(domains, e)
+	}
+	if len(domains)+len(addresses) == 0 {
+		return "AUTH_ALLOWED_DOMAINS (auth.allowed_domains) is empty — fail-closed, so no interactive login can succeed; list the domains and/or full email addresses allowed to sign in", true, nil
+	}
+	var parts []string
+	if len(addresses) > 0 {
+		parts = append(parts, fmt.Sprintf("%d address(es) — exactly %s", len(addresses), strings.Join(addresses, ", ")))
+	}
+	if len(domains) > 0 {
+		parts = append(parts, fmt.Sprintf("%d domain(s) — EVERY account your issuer will authenticate at %s (if that is a shared mail provider rather than a domain you control, list full addresses instead)",
+			len(domains), strings.Join(domains, ", ")))
+	}
+	return strings.Join(parts, "; "), false, nil
 }
 
 func checkDatabase(ctx context.Context, cfg *config.Config) (string, bool, error) {
@@ -226,7 +260,20 @@ func checkIssuer(ctx context.Context, cfg *config.Config) (string, bool, error) 
 	if cfg.Auth.Mode == "oidc" && cfg.Auth.ClientSecret == "" {
 		detail += "; note: AUTH_OIDC_CLIENT_SECRET is empty (public client — most issuers require a secret)"
 	}
+	detail += issuerAudienceNote(cfg)
 	return detail, false, nil
+}
+
+// issuerAudienceNote returns the trailing note for an oidc deployment whose
+// expected `aud` is not its client ID — nearly always a leftover from the
+// Dex-shaped default. Scoped deliberately: only raw ID-token bearer auth
+// consults the audience, so the note must not read as "login is broken".
+func issuerAudienceNote(cfg *config.Config) string {
+	if cfg.Auth.Mode != "oidc" || cfg.Auth.ClientID == "" || cfg.Auth.Audience == cfg.Auth.ClientID {
+		return ""
+	}
+	return fmt.Sprintf("; note: AUTH_JWT_AUDIENCE %q differs from AUTH_OIDC_CLIENT_ID %q — standard issuers set `aud` to the client ID, so raw ID-token bearer auth will reject every token (interactive login is unaffected; leave AUTH_JWT_AUDIENCE unset to default it to the client ID)",
+		cfg.Auth.Audience, cfg.Auth.ClientID)
 }
 
 // fetchJWKS resolves jwks_uri from the issuer's discovery document and

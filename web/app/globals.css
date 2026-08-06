@@ -120,3 +120,32 @@ pre {
 .prose blockquote p:last-of-type::after {
   content: none;
 }
+
+/*
+ * arti-fullpage-layer — the ?v=full render surface (was a literal
+ * `fixed inset-0 z-50` on each renderer).
+ *
+ * The layer is `position: fixed` so it covers the sidebar rail from the root
+ * layout. That also means an in-flow element above it can't push it down: when
+ * StaleVersionBanner renders in `floating` mode (?v=full) it used to sit ON TOP
+ * of the first line of content. So the strip measures itself and publishes its
+ * height as --arti-top-strip on <html>, and the layer starts below it. Default
+ * 0px = no strip (or strip dismissed), layer covers the full viewport.
+ */
+.arti-fullpage-layer {
+  position: fixed;
+  top: var(--arti-top-strip, 0px);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 50;
+}
+/*
+ * Replaced elements don't stretch to `bottom` (CSS 2.1 § 10.6.5 keeps the
+ * intrinsic height), so the iframe layers need an explicit height instead of
+ * the `h-full` they carried under inset-0 — `h-full` would resolve to the full
+ * viewport and hang the last strip-height pixels off the bottom edge.
+ */
+iframe.arti-fullpage-layer {
+  height: calc(100dvh - var(--arti-top-strip, 0px));
+}

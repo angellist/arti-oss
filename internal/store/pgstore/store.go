@@ -1067,6 +1067,20 @@ func (s *Store) UpdateTitle(ctx context.Context, id uuid.UUID, title string) (in
 	})
 }
 
+// UpdateDescription replaces the description on an artifact. An empty string
+// clears it (stored as NULL), matching how Put treats an absent description.
+// Permission is enforced at the HTTP layer (creator or admin).
+func (s *Store) UpdateDescription(ctx context.Context, id uuid.UUID, desc string) (int64, error) {
+	var d *string
+	if desc != "" {
+		d = &desc
+	}
+	return s.q.UpdateArtifactDescription(ctx, sqlc.UpdateArtifactDescriptionParams{
+		ArtifactID:  pgUUID(id),
+		Description: d,
+	})
+}
+
 // UpdateLabels replaces the labels array on an artifact. nil labels is
 // normalized to an empty slice so the column never holds NULL.
 // Permission is enforced at the HTTP layer (creator or admin).

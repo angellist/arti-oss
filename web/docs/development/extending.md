@@ -152,10 +152,15 @@ rewritten to `/help/...`.
 
 1. Write the Mermaid source next to the page: `web/docs/<section>/<name>.mmd`.
 2. Reference it from the markdown as `![alt text](./<name>.svg)` — do **not** use
-   a fenced ```mermaid block (it won't render).
+   a fenced ```mermaid block for help diagrams that must work without
+   JavaScript.
 3. Render it: `make docs-diagrams` (needs `mmdc`) writes
    `web/public/help-diagrams/<section>/<name>.svg`. Commit both the `.mmd` and
    the `.svg`.
+
+Markdown artifacts and help pages support fenced `mermaid` blocks in the
+browser. Prefer committed SVGs for help docs: they are server-rendered and
+work without JavaScript.
 
 `make docs-check` (part of `make lint`) fails if any `.mmd` lacks a committed
 `.svg`, so diagrams can't silently rot — see

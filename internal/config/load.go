@@ -13,6 +13,11 @@ import (
 	yaml "go.yaml.in/yaml/v3"
 )
 
+// legacyDexAudience is the `aud` claim Dex issues behind oauth2-proxy, and
+// the fallback for every non-oidc mode so existing proxy deployments that
+// never set AUTH_JWT_AUDIENCE keep working unchanged.
+const legacyDexAudience = "auth"
+
 // Defaults returns the baseline configuration — the same values the legacy
 // ServeCmd env-tag defaults carried.
 func Defaults() *Config {
@@ -28,7 +33,9 @@ func Defaults() *Config {
 			UseSSL: true,
 		},
 		Auth: Auth{
-			Audience:        "auth",
+			// Resolved in LoadFrom once the mode is known: standard issuers
+			// put the client ID in `aud`, a Dex-fronted proxy uses "auth".
+			Audience:        "",
 			Scopes:          []string{"openid", "email", "profile"},
 			GroupsClaim:     "groups",
 			IdPGroupsMaxAge: Duration(14 * 24 * time.Hour), // 336h
@@ -143,6 +150,19 @@ func LoadFrom(lookup LookupFn, reqs ...Requirement) (*Config, error) {
 		}
 	default:
 		return nil, fmt.Errorf("ARTI_AUTH_MODE: unknown mode %q (want oidc, proxy, or disabled)", cfg.Auth.Mode)
+	}
+
+	// AUTH_JWT_AUDIENCE is the `aud` claim demanded of raw ID-token bearer
+	// auth. Left unset it resolves from the mode rather than to a constant:
+	// every standard issuer (Google, Okta, Entra, Auth0…) sets `aud` to the
+	// client ID, so hard-defaulting to Dex's "auth" rejected every such
+	// token. An explicit value always wins.
+	if cfg.Auth.Audience == "" {
+		if cfg.Auth.Mode == "oidc" {
+			cfg.Auth.Audience = cfg.Auth.ClientID
+		} else {
+			cfg.Auth.Audience = legacyDexAudience
+		}
 	}
 
 	var missing []string

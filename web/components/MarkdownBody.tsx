@@ -1,8 +1,9 @@
 "use client";
 
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 
 import { Frontmatter, renderMarkdown } from "@/lib/markdown";
+import { renderMermaidIn } from "@/lib/mermaid";
 
 // MarkdownBody is THE rendered form of a markdown document in arti. Extracted
 // from ArtifactViewer so the markdown editor's live preview renders through the
@@ -15,7 +16,13 @@ import { Frontmatter, renderMarkdown } from "@/lib/markdown";
 // re-applies the dangerouslySetInnerHTML, which wipes the comment overlay's
 // imperatively-injected <mark> highlights (they'd flash away and get re-seeded).
 // Skipping the re-render when body is unchanged keeps the highlights stable.
-const MarkdownBody = memo(function MarkdownBody({ body }: { body: string }) {
+const MarkdownBody = memo(function MarkdownBody({
+  body,
+  debounceMermaid = false,
+}: {
+  body: string;
+  debounceMermaid?: boolean;
+}) {
   // renderMarkdown is the shared "render markdown safely" chain
   // (splitFrontmatter → marked → heading ids → DOMPurify) — the same one
   // FullPageView and the /help viewer use, so sanitization and heading anchors
@@ -23,8 +30,23 @@ const MarkdownBody = memo(function MarkdownBody({ body }: { body: string }) {
   // `.md` artifact with a hidden <script> would run in arti's origin with the
   // viewer's session cookie.
   const { frontmatter, html } = useMemo(() => renderMarkdown(body), [body]);
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const container = ref.current;
+    if (!container) return;
+    const render = () => {
+      void renderMermaidIn(container).catch(() => {});
+    };
+    if (!debounceMermaid) {
+      render();
+      return;
+    }
+    const timer = window.setTimeout(render, 200);
+    return () => window.clearTimeout(timer);
+  }, [debounceMermaid, html]);
   return (
     <article
+      ref={ref}
       className="
         prose prose-sm prose-neutral max-w-none break-words
         leading-[1.45]

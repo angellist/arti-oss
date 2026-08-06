@@ -124,6 +124,8 @@ make docs-check      # verifies every .mmd has a committed .svg (no mmdc needed)
   its rendered SVG fails lint and can't reach `main`. Add a diagram, run
   `make docs-diagrams`, and commit both files. See
   [Extending arti](extending.md#help-docs) for the authoring flow.
+- Fenced `mermaid` blocks in markdown are rendered in the browser at hydration
+  time; they do not replace the committed-SVG pipeline for help diagrams.
 
 ## What CI runs
 

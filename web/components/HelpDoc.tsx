@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import MermaidRenderer from "./MermaidRenderer";
 
 // Renders a help doc's sanitized HTML and makes its diagrams click-to-zoom.
 // The body is server-rendered markdown (dangerouslySetInnerHTML); we delegate
@@ -40,6 +41,7 @@ export default function HelpDoc({ html, className }: { html: string; className: 
         onClick={handleClick}
         dangerouslySetInnerHTML={{ __html: html }}
       />
+      <MermaidRenderer />
       {zoom ? (
         <div
           role="dialog"

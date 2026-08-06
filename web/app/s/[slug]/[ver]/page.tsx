@@ -86,6 +86,10 @@ export default async function BySlugVersion({
         currentVersion={info.version}
         latestVersion={latest.version}
         latestHref={`/s/${slug}${viewQuery(sp)}`}
+        // ?v=full paints a fixed full-viewport layer, so the strip has to be
+        // pinned above it; the normal viewer takes it in-flow at the top of
+        // the right pane.
+        floating={isFullPageView(sp)}
       />
     ) : null;
 

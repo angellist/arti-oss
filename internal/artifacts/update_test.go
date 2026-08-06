@@ -129,3 +129,48 @@ func TestUpdateMetadataNotFound(t *testing.T) {
 		t.Fatalf("error = %v, want pgstore.ErrNotFound", err)
 	}
 }
+
+// Description is editable in place for the same reason labels are: the two are
+// what browse/search surface, so a bad description is a findability defect. It
+// used to be immutable, which meant the only way to fix one was minting a
+// content version — impossible for a PACKAGE/ATTACHMENT whose original bytes
+// are gone. An explicit "" clears it; a nil pointer leaves it alone.
+func TestUpdateMetadataEditsDescription(t *testing.T) {
+	ctx := context.Background()
+	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
+	svc := artifacts.NewService(st, "http://localhost", nil, nil)
+
+	id, _ := seedArtifact(t, st, "alice@example.com", []string{"keepme"})
+
+	desc := "  what this doc is and when to read it  "
+	info, err := svc.UpdateMetadata(ctx, id, artifacts.UpdateMetadataRequest{Description: &desc}, "alice@example.com")
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if info.Description == nil || *info.Description != "what this doc is and when to read it" {
+		t.Errorf("description = %v, want the trimmed string", info.Description)
+	}
+	// Editing only the description must not disturb labels or the version.
+	if len(info.Labels) != 1 || info.Labels[0] != "keepme" {
+		t.Errorf("labels = %v, want [keepme] untouched", info.Labels)
+	}
+	if info.Version == nil || *info.Version != 1 {
+		t.Errorf("version = %v, want 1 (metadata edit must not version)", info.Version)
+	}
+
+	// Explicit empty clears it.
+	empty := ""
+	info, err = svc.UpdateMetadata(ctx, id, artifacts.UpdateMetadataRequest{Description: &empty}, "alice@example.com")
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if info.Description != nil && *info.Description != "" {
+		t.Errorf("description = %v, want cleared", *info.Description)
+	}
+
+	// A nil pointer leaves the (now empty) value alone rather than erroring.
+	newTitle := "Title Only"
+	if _, err := svc.UpdateMetadata(ctx, id, artifacts.UpdateMetadataRequest{Title: &newTitle}, "alice@example.com"); err != nil {
+		t.Fatalf("title-only after clear: %v", err)
+	}
+}
