@@ -92,6 +92,11 @@ independently — do them in order and run doctor between steps.
      network-reachable except through that proxy.
 4. **Allow and administer**: `AUTH_ALLOWED_DOMAINS=yourdomain.com` (empty
    admits nobody) and `ARTI_ADMIN_EMAILS=you@yourdomain.com`.
+   Entries may be **full addresses** as well as domains, and on a consumer
+   IdP they must be: `AUTH_ALLOWED_DOMAINS=you@gmail.com` gates on you,
+   whereas `gmail.com` admits every Google account on the internet. Mix
+   them freely — `you@gmail.com,yourdomain.com`. Doctor's `access gate`
+   check spells out what each entry admits.
 5. Verify end to end: `arti-server doctor` all green → start the server →
    log in → upload something with the `arti` CLI → open its URL.
 

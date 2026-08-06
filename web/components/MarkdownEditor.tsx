@@ -222,7 +222,7 @@ export default function MarkdownEditor({
             {value.trim() === "" ? (
               <p className="text-[12px] text-neutral-400">Nothing to preview yet.</p>
             ) : (
-              <MarkdownBody body={value} />
+              <MarkdownBody body={value} debounceMermaid />
             )}
           </div>
         ) : null}

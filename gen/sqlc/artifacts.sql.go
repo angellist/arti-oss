@@ -481,6 +481,24 @@ func (q *Queries) UpdateArtifactAccess(ctx context.Context, arg UpdateArtifactAc
 	return result.RowsAffected(), nil
 }
 
+const updateArtifactDescription = `-- name: UpdateArtifactDescription :execrows
+UPDATE artifacts SET description = $2, modified_at = now()
+WHERE artifact_id = $1
+`
+
+type UpdateArtifactDescriptionParams struct {
+	ArtifactID  pgtype.UUID
+	Description *string
+}
+
+func (q *Queries) UpdateArtifactDescription(ctx context.Context, arg UpdateArtifactDescriptionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateArtifactDescription, arg.ArtifactID, arg.Description)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateArtifactLabels = `-- name: UpdateArtifactLabels :execrows
 UPDATE artifacts SET labels = $2, modified_at = now()
 WHERE artifact_id = $1

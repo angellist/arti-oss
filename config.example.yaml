@@ -28,11 +28,16 @@ auth:
   # Register arti as a client with redirect URI <base_url>/auth/callback.
   issuer_url: https://id.example.com
   client_id: arti
+  # `aud` demanded of raw ID-token bearer auth. Omit it and oidc mode uses
+  # client_id, which is what standard issuers put in `aud`.
   audience: arti
-  # Who may sign in: email domains (empty admits NOBODY), plus optional
-  # group membership from the ID token.
+  # Who may sign in (empty admits NOBODY): bare domains admit everyone at
+  # that domain, full addresses admit exactly one person — on a consumer
+  # IdP use addresses, since `gmail.com` is every Google account. Optional
+  # group membership from the ID token narrows it further.
   allowed_domains:
     - example.com
+    - you@gmail.com
   required_groups: []
   # How long a login-captured IdP group snapshot stays valid for `idp:<name>`
   # access grants. Every interactive login refreshes it; grants fail closed

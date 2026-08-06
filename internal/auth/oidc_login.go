@@ -95,6 +95,10 @@ func NewOIDCLogin(ctx context.Context, cfg OIDCLoginConfig) (*OIDCLogin, error) 
 		fin: loginFinisher{
 			signer: cfg.Signer, pairs: cfg.Pairs, deviceStore: cfg.DeviceStore,
 			accessTTL: cfg.AccessTTL, cookieSecure: cfg.CookieSecure, capturer: cfg.Capturer,
+			// CallbackHandler verifies the signed state cookie and compares
+			// the returned `state` before reaching finish(), which is
+			// strictly stronger CSRF protection than Sec-Fetch-Site.
+			stateVerified: true,
 		},
 	}, nil
 }

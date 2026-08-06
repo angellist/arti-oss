@@ -394,6 +394,67 @@ func TestOIDCLogin_CLIPairing(t *testing.T) {
 	}
 }
 
+// driveCrossSite is drive() plus the one header a real browser always
+// attaches to the redirect back from the issuer. Production OIDC callbacks
+// are ALWAYS Sec-Fetch-Site: cross-site, because the navigation is initiated
+// by the IdP's origin (accounts.google.com, Okta, …). drive() omits it, which
+// is why TestOIDCLogin_CLIPairing passed while the flow was broken in the
+// field against every real IdP.
+func driveCrossSite(t *testing.T, mux *http.ServeMux, f *fakeIdP, loginPath string) *httptest.ResponseRecorder {
+	t.Helper()
+	r1 := httptest.NewRequest("GET", loginPath, nil)
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, r1)
+	if w1.Code != http.StatusFound {
+		t.Fatalf("login: code = %d, body=%s", w1.Code, w1.Body.String())
+	}
+	cbURL := f.authorize(t, w1.Header().Get("Location"))
+	r2 := httptest.NewRequest("GET", cbURL, nil)
+	r2.Header.Set("Sec-Fetch-Site", "cross-site")
+	for _, c := range w1.Result().Cookies() {
+		r2.AddCookie(c)
+	}
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, r2)
+	return w2
+}
+
+// Regression for the oidc-mode CLI/device lockout: finish()'s Sec-Fetch-Site
+// guard must not fire on the OIDC callback, where the HMAC-signed state
+// cookie already proves this browser started the transaction. Before the fix
+// this returned 403 "cross-site login confirmation rejected" 100% of the time,
+// making `arti login` and device approval impossible in oidc mode.
+func TestOIDCLogin_CLIPairing_CrossSiteCallbackAllowed(t *testing.T) {
+	f := newFakeIdP(t, "arti")
+	f.email = "alice@example.com"
+	mux, _, pairs := loginStack(t, f, nil)
+
+	w := driveCrossSite(t, mux, f, "/auth/login?cli_code=abc123")
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 confirmation page; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Authorize CLI sign-in") {
+		t.Fatalf("body = %q, want confirmation page", w.Body.String())
+	}
+	// The fix must not weaken the flow: the code is still only bound by the
+	// explicit POST /auth/login/confirm, never by this GET.
+	if email, ok := pairs.Take("abc123"); ok || email != "" {
+		t.Fatalf("GET must not bind CLI code, got %q, %v", email, ok)
+	}
+}
+
+// The device-approval half of the same code path.
+func TestOIDCLogin_DeviceApproval_CrossSiteCallbackAllowed(t *testing.T) {
+	f := newFakeIdP(t, "arti")
+	f.email = "alice@example.com"
+	mux, _, _ := loginStack(t, f, nil)
+
+	w := driveCrossSite(t, mux, f, "/auth/login?user_code=ABCD-2345")
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("cross-site IdP callback must not be rejected; body=%s", w.Body.String())
+	}
+}
+
 func TestOIDCLogin_ReturnToSanitized(t *testing.T) {
 	f := newFakeIdP(t, "arti")
 	f.email = "alice@example.com"

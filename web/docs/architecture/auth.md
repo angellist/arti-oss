@@ -15,8 +15,9 @@ apply on every path: an **email-domain allowlist** and, when configured,
 
 ## The two gates
 
-- **Domain allowlist** — the email domain must be in the allowed-domains config
-  (`AUTH_ALLOWED_DOMAINS`; empty admits nobody). Applied on every path.
+- **Email allowlist** — the address, or its domain, must be in the allowlist
+  config (`AUTH_ALLOWED_DOMAINS`; entries are bare domains or full addresses,
+  empty admits nobody). Applied on every path.
 - **Required groups** — matched against the groups the proxy forwards or the
   OIDC groups claim. Providers that emit groups as `name@domain` (e.g. Dex)
   have the suffix stripped before matching, so the config can stay short

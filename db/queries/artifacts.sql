@@ -68,6 +68,10 @@ DELETE FROM artifacts WHERE artifact_id = $1;
 UPDATE artifacts SET title = $2, modified_at = now()
 WHERE artifact_id = $1;
 
+-- name: UpdateArtifactDescription :execrows
+UPDATE artifacts SET description = $2, modified_at = now()
+WHERE artifact_id = $1;
+
 -- name: UpdateArtifactLabels :execrows
 UPDATE artifacts SET labels = $2, modified_at = now()
 WHERE artifact_id = $1;

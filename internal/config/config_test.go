@@ -362,3 +362,50 @@ func TestEffectiveConfigRoundTrips(t *testing.T) {
 		t.Errorf("dump should carry Go duration syntax, got:\n%s", dumped)
 	}
 }
+
+// AUTH_JWT_AUDIENCE names the `aud` claim demanded of raw ID-token bearer
+// auth. Hard-defaulting it to Dex's "auth" made oidc mode reject tokens
+// from every standard issuer, all of which set `aud` to the client ID —
+// while the variable's name and docs gave no hint that it had to be
+// changed. Unset, it must now follow the mode; set, it must be obeyed.
+func TestAudienceResolvesFromAuthMode(t *testing.T) {
+	oidcEnv := func(extra map[string]string) map[string]string {
+		env := map[string]string{
+			"ARTI_AUTH_MODE":      "oidc",
+			"AUTH_DEX_ISSUER_URL": "https://accounts.google.com",
+			"AUTH_OIDC_CLIENT_ID": "123.apps.googleusercontent.com",
+		}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return required(env)
+	}
+
+	cfg, err := loadWith(t, oidcEnv(nil), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.Audience != "123.apps.googleusercontent.com" {
+		t.Errorf("oidc + unset audience: Auth.Audience = %q, want the client ID", cfg.Auth.Audience)
+	}
+
+	// An explicit value always wins — including one that equals the legacy
+	// default, so a Dex-issuer oidc deployment can still ask for "auth".
+	cfg, err = loadWith(t, oidcEnv(map[string]string{"AUTH_JWT_AUDIENCE": "auth"}), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.Audience != "auth" {
+		t.Errorf("explicit audience: Auth.Audience = %q, want %q", cfg.Auth.Audience, "auth")
+	}
+
+	// Proxy mode is untouched: existing deployments that never set the
+	// variable keep the Dex audience they have always had.
+	cfg, err = loadWith(t, required(map[string]string{"ARTI_AUTH_MODE": "proxy"}), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.Audience != "auth" {
+		t.Errorf("proxy mode: Auth.Audience = %q, want %q", cfg.Auth.Audience, "auth")
+	}
+}

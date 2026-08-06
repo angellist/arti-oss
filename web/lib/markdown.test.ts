@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from "vitest";
 import { slugifyHeading, renderMarkdown } from "./markdown";
 
@@ -61,5 +62,33 @@ describe("renderMarkdown", () => {
     const { html } = renderMarkdown("mix ~~real~~ and ~approx~ here\n");
     expect(html).toContain("<del>real</del>");
     expect(html).toContain("~approx~");
+  });
+
+  it("renders Mermaid fences as sanitized placeholders", () => {
+    const { html } = renderMarkdown('```mermaid\nflowchart TD\n  A["<script>"] --> B\n```\n');
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const placeholder = doc.querySelector(".mermaid[data-arti-zoom][data-mermaid-placeholder]");
+    expect(placeholder).not.toBeNull();
+    expect(placeholder?.querySelector("pre")?.textContent).toContain('<script>');
+    expect(html).not.toContain("<script>");
+  });
+
+  it("accepts Mermaid info-string parameters", () => {
+    const { html } = renderMarkdown("```mermaid theme=neutral\nflowchart TD\n A --> B\n```\n");
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.querySelector(".mermaid[data-mermaid-placeholder]")).not.toBeNull();
+  });
+
+  it("does not replace non-Mermaid fences or inline code", () => {
+    const { html } = renderMarkdown("`mermaid`\n\n```javascript\nconst x = 1;\n```\n");
+    expect(html).toContain("<code>mermaid</code>");
+    expect(html).toContain("language-javascript");
+    expect(html).not.toContain("data-mermaid-placeholder");
+  });
+
+  it("handles indented fences nested in lists", () => {
+    const { html } = renderMarkdown("- item\n\n  ```mermaid\n  flowchart TD\n    A --> B\n  ```\n");
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.querySelector(".mermaid[data-mermaid-placeholder]")).not.toBeNull();
   });
 });

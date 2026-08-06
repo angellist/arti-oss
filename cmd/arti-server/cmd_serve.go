@@ -118,11 +118,12 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	signer := auth.NewJWTSigner([]byte(cfg.Auth.SigningKey))
 	pairs := auth.NewInMemPairStore()
 
-	// Email-domain allowlist used by every auth path (Dex verifier,
-	// HS256 test-mode tokens, and the /auth/test issuer). Lives in
-	// process state so callers don't have to thread it through.
+	// Email allowlist used by every auth path (Dex verifier, HS256
+	// test-mode tokens, and the /auth/test issuer). Entries are bare
+	// domains or full addresses. Lives in process state so callers don't
+	// have to thread it through.
 	auth.SetAllowedDomains(cfg.Auth.AllowedDomains)
-	logger.Info("email-domain allowlist", "domains", auth.AllowedDomains())
+	logger.Info("email allowlist", "entries", auth.AllowedDomains())
 
 	auth.SetAdminEmails(cfg.Admin.Emails)
 	logger.Info("admin allowlist", "emails", auth.AdminEmails())

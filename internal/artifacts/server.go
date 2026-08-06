@@ -1873,7 +1873,16 @@ func nameFromEmail(email string) string {
 // including an empty slice to clear (e.g. AllowedAccess=[] → creator-only).
 // Content and artifact_type are immutable — version via Create to change those.
 type UpdateMetadataRequest struct {
-	Title         *string   `json:"title"`
+	Title *string `json:"title"`
+	// Description is editable for the same reason Labels is: together they are
+	// the only two fields arti's browse/search actually surface, so a bad or
+	// missing description is a findability defect. Making labels fixable in
+	// place but not the description meant an agent that published a doc with a
+	// useless description could only fix it by minting a content version — and
+	// for a PACKAGE or ATTACHMENT that requires the original bytes, which the
+	// session that wrote them has usually long since discarded.
+	// An explicit "" clears it.
+	Description   *string   `json:"description"`
 	Scopes        *[]string `json:"scopes"`
 	Labels        *[]string `json:"labels"`
 	AllowedAccess *[]string `json:"allowed_access"`
@@ -1900,7 +1909,7 @@ func cleanStringSlice(in []string) []string {
 	return out
 }
 
-// UpdateMetadata edits the mutable fields (title, scopes, labels,
+// UpdateMetadata edits the mutable fields (title, description, scopes, labels,
 // allowed_access) of ONE artifact version in place — content / type stay
 // immutable (create a new version to change those). Only fields whose pointer
 // is non-nil are touched; an explicit empty slice clears the field. The edit
@@ -1938,6 +1947,11 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 			return ArtifactInfo{}, errBadRequest("title cannot be empty")
 		}
 		if _, err := s.store.UpdateTitle(ctx, id, t); err != nil {
+			return ArtifactInfo{}, err
+		}
+	}
+	if req.Description != nil {
+		if _, err := s.store.UpdateDescription(ctx, id, strings.TrimSpace(*req.Description)); err != nil {
 			return ArtifactInfo{}, err
 		}
 	}
@@ -1997,9 +2011,10 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 	return info, nil
 }
 
-// httpPatch updates editable fields on an artifact. `title`, `scopes`,
-// `labels`, and `allowed_access` are mutable post-publish; content / type
-// stay immutable (create a new version to change those). Creator or admin only.
+// httpPatch updates editable fields on an artifact. `title`, `description`,
+// `scopes`, `labels`, and `allowed_access` are mutable post-publish; content /
+// type stay immutable (create a new version to change those). Creator or admin
+// only.
 func (s *Service) httpPatch(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseUUIDParam(w, r, "id")
 	if !ok {

@@ -173,7 +173,7 @@ func toolSpecs() []toolSpec {
 		},
 		{
 			Name:        "update_artifact",
-			Description: "Update an existing artifact's METADATA in place — title, scopes, labels, and/or allowed_access — WITHOUT creating a new version. Content and artifact_type are immutable: to change the body, call add_artifact with the same named_slug to publish a new version. `ident` is a UUID (edits that exact version) or a slug (edits the latest version you can read; sibling versions keep their prior metadata, so edit them individually if needed). Only fields you pass are changed; omit a field to leave it untouched, or pass an empty array to clear it (e.g. allowed_access:[] = creator-only). allowed_write is the subset of readers who may write (omit = writers follow readers; [] = creator-only writes); it is unioned into allowed_access. Creator-or-MANAGE_ARTIFACTS only; editing a kind:skill artifact also requires MANAGE_SKILLS.",
+			Description: "Update an existing artifact's METADATA in place — title, description, scopes, labels, and/or allowed_access — WITHOUT creating a new version. Use this to LABEL or re-describe a doc that was published bare: labels and description are the two fields browse/search surface, so fixing them is how you make an existing artifact findable. Content and artifact_type are immutable: to change the body, call add_artifact with the same named_slug to publish a new version. `ident` is a UUID (edits that exact version) or a slug (edits the latest version you can read; sibling versions keep their prior metadata, so edit them individually if needed). Only fields you pass are changed; omit a field to leave it untouched, or pass an empty value to clear it (e.g. allowed_access:[] = creator-only, description:\"\" = no description). allowed_write is the subset of readers who may write (omit = writers follow readers; [] = creator-only writes); it is unioned into allowed_access. Creator-or-MANAGE_ARTIFACTS only; editing a kind:skill artifact also requires MANAGE_SKILLS.",
 			InputSchema: map[string]any{
 				"type":     "object",
 				"required": []string{"ident"},
@@ -181,6 +181,7 @@ func toolSpecs() []toolSpec {
 					"ident":          str(),
 					"version":        map[string]any{"type": "integer"},
 					"title":          str(),
+					"description":    str(),
 					"scopes":         strArr(),
 					"labels":         strArr(),
 					"allowed_access": strArr(),

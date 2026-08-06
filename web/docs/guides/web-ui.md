@@ -133,6 +133,7 @@ Upload brings a file in from outside. **New** writes one here. Hover (or click)
   readers will see. What you type is stored verbatim: no editor rewrites your
   markdown on save, so a one-word change stays a one-word diff in
   [Compare versions](#versions).
+  Fenced `mermaid` blocks render in the preview and finished artifact.
 - **Diagram** — the drag-and-drop canvas; see [Drawing diagrams](diagrams.md).
 
 Both create an ordinary **TEXT** artifact — they differ only in content type —
@@ -198,7 +199,7 @@ The toolbar on the right gives you:
 
 | Type | What you see |
 |---|---|
-| **TEXT, markdown** | Rendered prose (sanitized). Frontmatter is shown separately; code blocks are highlighted. |
+| **TEXT, markdown** | Rendered prose (sanitized). Frontmatter is shown separately; code blocks are highlighted and fenced `mermaid` blocks render as diagrams. |
 | **TEXT, HTML** | A **sandboxed `<iframe>`** with scripts allowed but *not* same-origin access — the page can't touch your session. |
 | **TEXT, code/JSON/YAML** | Monospace, as-is. |
 | **PDF / image** | Native browser viewer / inline image. |

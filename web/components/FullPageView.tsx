@@ -6,6 +6,7 @@ import type { Me } from "@/lib/types";
 import { Frontmatter, renderMarkdown, PROSE_CLASSNAME } from "@/lib/markdown";
 import { fullPageKind, isJSONContentType, prettyPrintJSON } from "@/lib/viewer";
 import { encodeFilePath } from "@/lib/arti";
+import MermaidRenderer from "./MermaidRenderer";
 
 // Standalone "no-chrome" view of an artifact body. Used when the URL
 // carries `?v=full` (or the legacy `?view=fullpage`).
@@ -74,7 +75,8 @@ export default function FullPageView({
       : `/api/artifacts/${artifactID}`
     : undefined;
   // Cover the whole viewport — including the sidebar from the root
-  // layout. `fixed inset-0 z-50 bg-white` puts the content on its own
+  // layout. `.arti-fullpage-layer` (globals.css: fixed, inset 0 but top =
+  // var(--arti-top-strip)) + `bg-white` puts the content on its own
   // top-layer plane so the rail underneath isn't visible (and isn't
   // accidentally interactable behind the rendered body).
   if (kind === "html") {
@@ -93,9 +95,10 @@ export default function FullPageView({
         {/* The iframe lives in FullPageHtmlFrame (a client component) so it can
           listen for the injected page's file-nav reports and keep ?file= in
           sync. Dimensions: an absolutely-positioned replaced element with no
-          explicit size uses its intrinsic 300×150 (CSS 2.1 § 10.3.8), so
-          `w-full h-full` stretches it to the fixed containing block (the
-          viewport) — avoiding the iOS-Safari 100vw/100vh overshoot. */}
+          explicit size uses its intrinsic 300×150 (CSS 2.1 § 10.3.8), so it
+          needs `w-full` plus the explicit height in the
+          `iframe.arti-fullpage-layer` rule — it can't stretch to `bottom` the
+          way the <div> layers do. */}
         <FullPageHtmlFrame
           src={src}
           srcDoc={src ? undefined : body}
@@ -121,7 +124,7 @@ export default function FullPageView({
       // drift, which a generic `overflow-auto` honors as a real X-axis
       // pan. Pinning X-overflow keeps reading steady.
       <div
-        className="fixed inset-0 z-50 overflow-y-auto overflow-x-hidden bg-white"
+        className="arti-fullpage-layer overflow-y-auto overflow-x-hidden bg-white"
         style={{ "--arti-text-scale": textScale } as React.CSSProperties}
       >
         {comments}
@@ -129,6 +132,7 @@ export default function FullPageView({
           {frontmatter !== null ? <Frontmatter raw={frontmatter} /> : null}
           <div dangerouslySetInnerHTML={{ __html: html }} />
         </article>
+        <MermaidRenderer />
       </div>
     );
   }
@@ -136,7 +140,7 @@ export default function FullPageView({
   // (not the raw bytes URL) so it scales as vector art at any window size.
   if (kind === "diagram") {
     return (
-      <div className="fixed inset-0 z-50 bg-white p-4">
+      <div className="arti-fullpage-layer bg-white p-4">
         {comments}
         <FullPageDiagram body={body} title={title} />
       </div>
@@ -146,7 +150,7 @@ export default function FullPageView({
   // the viewport (mirrors NonTextBody in the in-viewer body).
   if (kind === "image" && rawSrc) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center overflow-auto bg-white p-4">
+      <div className="arti-fullpage-layer flex items-center justify-center overflow-auto bg-white p-4">
         {comments}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={rawSrc} alt={title} className="max-h-full max-w-full object-contain" />
@@ -157,7 +161,7 @@ export default function FullPageView({
   if (kind === "pdf" && rawSrc) {
     return (
       <>
-        <iframe src={rawSrc} title={title} className="fixed inset-0 z-50 block h-full w-full border-0 bg-white" />
+        <iframe src={rawSrc} title={title} className="arti-fullpage-layer block w-full border-0 bg-white" />
         {comments}
       </>
     );
@@ -166,7 +170,7 @@ export default function FullPageView({
   // dumping raw bytes into a <pre>.
   if (kind === "binary" && rawSrc) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-white p-4">
+      <div className="arti-fullpage-layer flex items-center justify-center bg-white p-4">
         {comments}
         <a
           href={`${rawSrc}?download=1`}
@@ -185,7 +189,7 @@ export default function FullPageView({
   const displayBody = isJSONContentType(contentType) ? prettyPrintJSON(body) : body;
   return (
     <div
-      className="fixed inset-0 z-50 overflow-y-auto overflow-x-hidden bg-white p-4 sm:p-6"
+      className="arti-fullpage-layer overflow-y-auto overflow-x-hidden bg-white p-4 sm:p-6"
       style={{ "--arti-text-scale": textScale } as React.CSSProperties}
     >
       {comments}

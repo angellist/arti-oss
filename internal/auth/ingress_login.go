@@ -89,6 +89,15 @@ type loginFinisher struct {
 	accessTTL    time.Duration
 	cookieSecure bool
 	capturer     GroupCapturer
+
+	// stateVerified marks a front door that already proved this login
+	// transaction was the one this browser started — the OIDC callback,
+	// which round-trips cli_code/user_code inside an HMAC-signed state
+	// cookie and compares the returned `state` before calling finish().
+	// The proxy front door has no such proof (identity arrives in a
+	// header, the codes in plain query params), so it leaves this false
+	// and relies on the Sec-Fetch-Site check in finish() instead.
+	stateVerified bool
 }
 
 // GroupCapturer records a user's IdP (SSO) group memberships at login so they
@@ -100,7 +109,13 @@ type GroupCapturer interface {
 }
 
 func (f loginFinisher) finish(w http.ResponseWriter, r *http.Request, email, name, picture, cliCode, userCode, returnTo string, groups []string) {
-	if (cliCode != "" || userCode != "") && r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+	// Guard against a cross-site page walking a logged-in user through a
+	// CLI-pair or device approval they didn't initiate. Skipped when the
+	// front door already verified a signed state blob: in `oidc` mode the
+	// callback is a redirect from the issuer and is therefore ALWAYS
+	// Sec-Fetch-Site: cross-site, so applying it there would make CLI login
+	// and device approval impossible rather than merely safe.
+	if !f.stateVerified && (cliCode != "" || userCode != "") && r.Header.Get("Sec-Fetch-Site") == "cross-site" {
 		http.Error(w, "cross-site login confirmation rejected", http.StatusForbidden)
 		return
 	}

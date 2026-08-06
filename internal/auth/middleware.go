@@ -29,29 +29,40 @@ const (
 	LocalEmailHeader = "X-Arti-Local-Email"
 )
 
-// allowedDomains is the email-domain allowlist. There is deliberately no
+// allowedDomains is the email allowlist. There is deliberately no
 // baked-in default: with authentication enabled, an empty allowlist admits
-// nobody (fail closed), and deployments configure their own domains via
+// nobody (fail closed), and deployments configure their own entries via
 // AUTH_ALLOWED_DOMAINS / auth.allowed_domains.
 var (
 	allowedDomainsMu sync.RWMutex
 	allowedDomains   []string
 )
 
-// SetAllowedDomains replaces the email-domain allowlist used by
-// IsAllowed (and therefore by RequireAuth, the Dex verifier, and
-// test-mode token issuance). Domains are stored lower-cased; an empty
-// list means no email is allowed. Safe to call before any handler is
-// wired.
-func SetAllowedDomains(domains []string) {
-	cleaned := make([]string, 0, len(domains))
-	for _, d := range domains {
-		d = strings.TrimSpace(strings.ToLower(d))
-		d = strings.TrimPrefix(d, "@")
-		if d != "" {
-			cleaned = append(cleaned, d)
+// NormalizeAllowlist lower-cases and trims allowlist entries, drops empty
+// ones, and strips a leading "@" so both `example.com` and `@example.com`
+// mean the same domain. Shared by SetAllowedDomains and by anything that
+// needs to report on the configured gate (doctor), so there is exactly one
+// definition of what an entry means.
+func NormalizeAllowlist(entries []string) []string {
+	cleaned := make([]string, 0, len(entries))
+	for _, e := range entries {
+		e = strings.TrimSpace(strings.ToLower(e))
+		e = strings.TrimPrefix(e, "@")
+		if e != "" {
+			cleaned = append(cleaned, e)
 		}
 	}
+	return cleaned
+}
+
+// SetAllowedDomains replaces the email allowlist used by IsAllowed (and
+// therefore by RequireAuth, the Dex verifier, and test-mode token
+// issuance). Entries are stored lower-cased and may be a bare domain
+// (`example.com`, admitting everyone there) or a full address
+// (`someone@example.com`, admitting exactly that person). An empty list
+// means no email is allowed. Safe to call before any handler is wired.
+func SetAllowedDomains(domains []string) {
+	cleaned := NormalizeAllowlist(domains)
 	allowedDomainsMu.Lock()
 	defer allowedDomainsMu.Unlock()
 	if len(cleaned) == 0 {
@@ -116,19 +127,28 @@ func WithTestClaims(ctx context.Context, c Claims) context.Context {
 	return withClaims(ctx, c)
 }
 
-// IsAllowed reports whether the email's domain matches the active
-// allowlist (case-insensitive). It does NOT check email_verified —
-// that's the OIDC issuer's responsibility.
+// IsAllowed reports whether the email matches the active allowlist
+// (case-insensitive) — either as a full address or by its domain. Full
+// addresses matter for anyone hosting against a consumer IdP, where the
+// only expressible domain (say gmail.com) would otherwise admit every
+// account at that provider. It does NOT check email_verified — that's the
+// OIDC issuer's responsibility.
 func IsAllowed(email string) bool {
+	// Normalize here rather than at the call sites. IsAllowed is the shared
+	// gate for every auth path — bearer claims, API keys, embed mints,
+	// device, MCP OAuth, app tokens — and only the two interactive login
+	// handlers trimmed before calling. Leaving it to callers meant one
+	// identity could pass a domain entry and fail an address entry.
+	email = strings.TrimSpace(email)
 	at := strings.LastIndex(email, "@")
 	if at < 0 {
 		return false
 	}
-	dom := strings.ToLower(email[at+1:])
+	dom := email[at+1:]
 	allowedDomainsMu.RLock()
 	defer allowedDomainsMu.RUnlock()
 	for _, allowed := range allowedDomains {
-		if dom == allowed {
+		if strings.EqualFold(dom, allowed) || strings.EqualFold(email, allowed) {
 			return true
 		}
 	}

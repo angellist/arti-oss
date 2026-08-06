@@ -664,6 +664,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     if (!container) return;
     mediaEls().forEach((m) => {
       if (m.dataset.acZoom === "1") return;
+      if (m.matches(".mermaid[data-mermaid-placeholder]:not([data-mermaid-rendered])")) return;
       m.dataset.acZoom = "1";
       m.classList.add("ac-zoomable");
       const onClick = (e: Event) => {
@@ -1522,7 +1523,16 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // load still gets its zoom/pin handler. The `dead` guard stops a debounced
     // batch that fires after teardown from re-adding media listeners the
     // dispose cleanup already removed.
-    reseedTimer = setTimeout(() => { reseedPending = false; reseedTimer = null; if (dead) return; maybeReseed(); wireMedia(); }, 250);
+    reseedTimer = setTimeout(() => {
+      reseedPending = false;
+      reseedTimer = null;
+      if (dead) return;
+      maybeReseed();
+      wireMedia();
+      // Mermaid replaces its source <pre> asynchronously; highlights may stay
+      // intact, but their cards and pins still need a fresh geometry pass.
+      place();
+    }, 250);
   });
 
   // The viewer's width toggle (Wide/Medium/Narrow) changes the prose
