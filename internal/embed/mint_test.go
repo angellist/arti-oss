@@ -21,7 +21,7 @@ import (
 // TestMain grants the reserved example domain: the mint handler re-checks
 // auth.IsAllowed, and the binary ships with an empty (deny-all) allowlist.
 func TestMain(m *testing.M) {
-	auth.SetAllowedDomains([]string{"example.com"})
+	auth.SetAllowedEmails([]string{"example.com"})
 	os.Exit(m.Run())
 }
 

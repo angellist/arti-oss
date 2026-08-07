@@ -132,7 +132,7 @@ func checkAccessGate(_ context.Context, cfg *config.Config) (string, bool, error
 		return "auth disabled — everyone is local@example.com; not for shared or public deployments", true, nil
 	}
 	var domains, addresses []string
-	for _, e := range auth.NormalizeAllowlist(cfg.Auth.AllowedDomains) {
+	for _, e := range auth.NormalizeAllowlist(cfg.Auth.AllowedEmails) {
 		if strings.Contains(e, "@") {
 			addresses = append(addresses, e)
 			continue
@@ -140,7 +140,7 @@ func checkAccessGate(_ context.Context, cfg *config.Config) (string, bool, error
 		domains = append(domains, e)
 	}
 	if len(domains)+len(addresses) == 0 {
-		return "AUTH_ALLOWED_DOMAINS (auth.allowed_domains) is empty — fail-closed, so no interactive login can succeed; list the domains and/or full email addresses allowed to sign in", true, nil
+		return "AUTH_ALLOWED_EMAILS (auth.allowed_emails) is empty — fail-closed, so no interactive login can succeed; list the domains and/or full email addresses allowed to sign in", true, nil
 	}
 	var parts []string
 	if len(addresses) > 0 {

@@ -97,11 +97,11 @@ func TestAllowlist(t *testing.T) {
 
 func TestAllowlist_Configurable(t *testing.T) {
 	// Restore the suite baseline (TestMain) at the end of the test.
-	t.Cleanup(func() { auth.SetAllowedDomains([]string{"example.com", "example.org"}) })
+	t.Cleanup(func() { auth.SetAllowedEmails([]string{"example.com", "example.org"}) })
 
-	auth.SetAllowedDomains([]string{"example.com", "Partner.com"})
+	auth.SetAllowedEmails([]string{"example.com", "Partner.com"})
 	if !auth.IsAllowed("alice@partner.com") {
-		t.Error("partner.com should be allowed after SetAllowedDomains")
+		t.Error("partner.com should be allowed after SetAllowedEmails")
 	}
 	if !auth.IsAllowed("alice@example.com") {
 		t.Error("example.com should still be allowed")
@@ -112,7 +112,7 @@ func TestAllowlist_Configurable(t *testing.T) {
 
 	// There is no baked-in default: an empty allowlist denies everyone
 	// (fail closed), it does not fall back to any organization's domains.
-	auth.SetAllowedDomains(nil)
+	auth.SetAllowedEmails(nil)
 	if auth.IsAllowed("alice@example.com") {
 		t.Error("empty allowlist must deny example.com (fail closed)")
 	}

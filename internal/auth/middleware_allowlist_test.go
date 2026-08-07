@@ -9,10 +9,10 @@ import "testing"
 // accepted alongside domains; a domain can never contain "@", so entries
 // that were previously inert now mean exactly one person.
 func TestIsAllowed_AddressesAndDomains(t *testing.T) {
-	prev := AllowedDomains()
-	t.Cleanup(func() { SetAllowedDomains(prev) })
+	prev := AllowedEmails()
+	t.Cleanup(func() { SetAllowedEmails(prev) })
 
-	SetAllowedDomains([]string{"me@gmail.com", "Example.COM", "@example.org"})
+	SetAllowedEmails([]string{"me@gmail.com", "Example.COM", "@example.org"})
 
 	for _, tc := range []struct {
 		email string
@@ -41,10 +41,10 @@ func TestIsAllowed_AddressesAndDomains(t *testing.T) {
 // inside the gate keeps a domain entry and an address entry agreeing about
 // the same identity, which they did not while trimming was the caller's job.
 func TestIsAllowed_NormalizesUntrimmedInput(t *testing.T) {
-	prev := AllowedDomains()
-	t.Cleanup(func() { SetAllowedDomains(prev) })
+	prev := AllowedEmails()
+	t.Cleanup(func() { SetAllowedEmails(prev) })
 
-	SetAllowedDomains([]string{"alice@example.com", "other.example"})
+	SetAllowedEmails([]string{"alice@example.com", "other.example"})
 
 	for _, email := range []string{
 		" alice@example.com",
@@ -74,10 +74,10 @@ func TestIsAllowed_NormalizesUntrimmedInput(t *testing.T) {
 // subdomains or wildcards, that has to be a new, explicitly-named mechanism
 // — not a loosening of this comparison.
 func TestIsAllowed_MatchesExactlyNeverBySuffix(t *testing.T) {
-	prev := AllowedDomains()
-	t.Cleanup(func() { SetAllowedDomains(prev) })
+	prev := AllowedEmails()
+	t.Cleanup(func() { SetAllowedEmails(prev) })
 
-	SetAllowedDomains([]string{"example.com", "alice@example.com"})
+	SetAllowedEmails([]string{"example.com", "alice@example.com"})
 
 	for _, tc := range []struct {
 		email string
@@ -106,14 +106,14 @@ func TestIsAllowed_MatchesExactlyNeverBySuffix(t *testing.T) {
 // Fail-closed is the documented default and the reason an empty allowlist
 // is safe to ship: it admits nobody rather than everybody.
 func TestIsAllowed_EmptyAllowlistAdmitsNobody(t *testing.T) {
-	prev := AllowedDomains()
-	t.Cleanup(func() { SetAllowedDomains(prev) })
+	prev := AllowedEmails()
+	t.Cleanup(func() { SetAllowedEmails(prev) })
 
-	SetAllowedDomains(nil)
+	SetAllowedEmails(nil)
 	if IsAllowed("anyone@example.com") {
 		t.Error("empty allowlist admitted an email")
 	}
-	SetAllowedDomains([]string{"  ", "@", ""})
+	SetAllowedEmails([]string{"  ", "@", ""})
 	if IsAllowed("anyone@example.com") {
 		t.Error("blank entries must normalize away, leaving nobody admitted")
 	}

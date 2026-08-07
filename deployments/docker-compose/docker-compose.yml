@@ -14,7 +14,12 @@ services:
       - arti_pg_data:/var/lib/postgresql/data
       - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # Probe over TCP (-h), not the unix socket. During initdb the postgres
+      # image runs a temporary server with listen_addresses='' — socket up,
+      # TCP closed — so a socket probe can report ready before anything can
+      # actually connect, and the `migrate` service (depends_on:
+      # service_healthy) then dies with "connection refused" on a cold start.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d arti_dev -h 127.0.0.1"]
       interval: 2s
       timeout: 2s
       retries: 30

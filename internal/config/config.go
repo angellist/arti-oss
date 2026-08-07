@@ -85,7 +85,7 @@ type Auth struct {
 	// disagree on its name and some need it enabled explicitly.
 	GroupsClaim    string   `yaml:"groups_claim"`
 	RequiredGroups []string `yaml:"required_groups"`
-	AllowedDomains []string `yaml:"allowed_domains"`
+	AllowedEmails  []string `yaml:"allowed_emails"`
 	// IdPGroupsMaxAge bounds how stale a login-captured IdP-group snapshot may
 	// be before its `idp:<name>` access grants stop resolving (fail closed).
 	// `idp:` grants therefore require an interactive login at least this often.

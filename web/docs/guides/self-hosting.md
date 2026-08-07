@@ -43,7 +43,7 @@ The evaluation profile plus real auth and TLS:
 
 1. Bring up the evaluation profile and confirm it works (above).
 2. Pick an auth mode and configure it (next section). Set
-   `AUTH_ALLOWED_DOMAINS` (nobody is admitted until you do) and
+   `AUTH_ALLOWED_EMAILS` (nobody is admitted until you do) and
    `ARTI_ADMIN_EMAILS` (nobody is an admin until you do), remove
    `ARTI_AUTH_DISABLED`, and set a strong `JWT_SIGNING_KEY` (≥32 bytes).
 3. Put your TLS proxy (Caddy, Traefik, nginx) in front of `:8090`, set
@@ -90,10 +90,10 @@ independently — do them in order and run doctor between steps.
      (oauth2-proxy, Cloudflare Access, Pomerium, Authelia…) that injects
      `X-Auth-Request-Email`/`-Groups`. Hard requirement: arti must not be
      network-reachable except through that proxy.
-4. **Allow and administer**: `AUTH_ALLOWED_DOMAINS=yourdomain.com` (empty
+4. **Allow and administer**: `AUTH_ALLOWED_EMAILS=yourdomain.com` (empty
    admits nobody) and `ARTI_ADMIN_EMAILS=you@yourdomain.com`.
    Entries may be **full addresses** as well as domains, and on a consumer
-   IdP they must be: `AUTH_ALLOWED_DOMAINS=you@gmail.com` gates on you,
+   IdP they must be: `AUTH_ALLOWED_EMAILS=you@gmail.com` gates on you,
    whereas `gmail.com` admits every Google account on the internet. Mix
    them freely — `you@gmail.com,yourdomain.com`. Doctor's `access gate`
    check spells out what each entry admits.

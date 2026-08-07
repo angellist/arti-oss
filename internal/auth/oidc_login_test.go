@@ -479,8 +479,8 @@ func TestRequireAuthOrRedirect_ForbiddenProxyToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth.SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { auth.SetAllowedDomains([]string{"example.com", "example.org"}) })
+	auth.SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { auth.SetAllowedEmails([]string{"example.com", "example.org"}) })
 	token := f.signIDToken(t, map[string]any{
 		"iss":    f.srv.URL,
 		"aud":    "arti",

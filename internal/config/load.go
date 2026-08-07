@@ -42,7 +42,7 @@ func Defaults() *Config {
 			// No allowed domains by default: with auth enabled, an empty
 			// allowlist denies everyone (fail closed). Deployments must
 			// configure their own domains.
-			AllowedDomains:   nil,
+			AllowedEmails:    nil,
 			ServiceEmail:     "service@arti.invalid",
 			SigningKey:       "dev-key-not-for-prod", // kept in sync with auth.DevDefaultSigningKey
 			LocalEmail:       "local@example.com",
@@ -152,6 +152,25 @@ func LoadFrom(lookup LookupFn, reqs ...Requirement) (*Config, error) {
 		return nil, fmt.Errorf("ARTI_AUTH_MODE: unknown mode %q (want oidc, proxy, or disabled)", cfg.Auth.Mode)
 	}
 
+	// AUTH_ALLOWED_DOMAINS was renamed to AUTH_ALLOWED_EMAILS when the list
+	// stopped being domain-only. An unset environment variable is silently
+	// ignored, so a deployment carrying only the old name would boot happily
+	// with an EMPTY allowlist — which fails closed and locks every human out,
+	// presenting as the documented "empty admits nobody" behavior rather than
+	// as a misconfiguration. Refuse to start instead: a pod that will admit
+	// nobody is worth failing a rollout over.
+	//
+	// Keyed on the OUTCOME, not on which variables are present — the question
+	// is whether the rename cost us the allowlist. So this stays quiet when
+	// the list came from the YAML file or when auth is off entirely, and it
+	// still fires when the new variable is set to an empty value. (The YAML
+	// key needs no equivalent — KnownFields rejects `allowed_domains`.)
+	if !cfg.Auth.Disabled && len(cfg.Auth.AllowedEmails) == 0 {
+		if _, ok := lookup("AUTH_ALLOWED_DOMAINS"); ok {
+			return nil, fmt.Errorf("AUTH_ALLOWED_DOMAINS was renamed to AUTH_ALLOWED_EMAILS and the effective allowlist is empty, which would admit nobody — the list now accepts full addresses (you@example.com) as well as bare domains (example.com). Rename the variable; the value needs no change")
+		}
+	}
+
 	// AUTH_JWT_AUDIENCE is the `aud` claim demanded of raw ID-token bearer
 	// auth. Left unset it resolves from the mode rather than to a constant:
 	// every standard issuer (Google, Okta, Entra, Auth0…) sets `aud` to the
@@ -222,7 +241,7 @@ func bindings(c *Config) []binding {
 		csv("AUTH_OIDC_SCOPES", &c.Auth.Scopes),
 		str("AUTH_OIDC_GROUPS_CLAIM", &c.Auth.GroupsClaim),
 		csv("AUTH_REQUIRED_GROUPS", &c.Auth.RequiredGroups),
-		csv("AUTH_ALLOWED_DOMAINS", &c.Auth.AllowedDomains),
+		csv("AUTH_ALLOWED_EMAILS", &c.Auth.AllowedEmails),
 		str("ARTI_SERVICE_SECRET", &c.Auth.ServiceSecret),
 		str("ARTI_SERVICE_EMAIL", &c.Auth.ServiceEmail),
 		str("ARTI_LOGOUT_URL", &c.Auth.LogoutURL),

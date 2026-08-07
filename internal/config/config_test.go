@@ -84,8 +84,8 @@ func TestGenericDefaults(t *testing.T) {
 	}
 	// Generic, tenant-neutral defaults: nobody is allowed and nobody is an
 	// admin until a deployment says so.
-	if cfg.Auth.AllowedDomains != nil {
-		t.Errorf("Auth.AllowedDomains = %v, want nil (fail closed)", cfg.Auth.AllowedDomains)
+	if cfg.Auth.AllowedEmails != nil {
+		t.Errorf("Auth.AllowedEmails = %v, want nil (fail closed)", cfg.Auth.AllowedEmails)
 	}
 	if cfg.Admin.Emails != nil {
 		t.Errorf("Admin.Emails = %v, want nil (no default admins)", cfg.Admin.Emails)
@@ -118,7 +118,7 @@ server:
 storage:
   region: eu-west-1
 auth:
-  allowed_domains:
+  allowed_emails:
     - example.com
   required_groups:
     - engineers
@@ -138,8 +138,8 @@ admin:
 	if cfg.Storage.Region != "eu-west-1" {
 		t.Errorf("Storage.Region = %q", cfg.Storage.Region)
 	}
-	if got := strings.Join(cfg.Auth.AllowedDomains, ","); got != "example.com" {
-		t.Errorf("Auth.AllowedDomains = %q", got)
+	if got := strings.Join(cfg.Auth.AllowedEmails, ","); got != "example.com" {
+		t.Errorf("Auth.AllowedEmails = %q", got)
 	}
 	if got := strings.Join(cfg.Auth.RequiredGroups, ","); got != "engineers" {
 		t.Errorf("Auth.RequiredGroups = %q", got)
@@ -252,13 +252,13 @@ auth:
 
 func TestEnvOverridesYAML(t *testing.T) {
 	cfg, err := loadWith(t, required(map[string]string{
-		"S3_REGION":            "us-west-2",
-		"AUTH_ALLOWED_DOMAINS": "env.example.com, other.example.com",
+		"S3_REGION":           "us-west-2",
+		"AUTH_ALLOWED_EMAILS": "env.example.com, other.example.com",
 	}), `
 storage:
   region: eu-west-1
 auth:
-  allowed_domains:
+  allowed_emails:
     - yaml.example.com
 `)
 	if err != nil {
@@ -267,8 +267,8 @@ auth:
 	if cfg.Storage.Region != "us-west-2" {
 		t.Errorf("Storage.Region = %q, want env value us-west-2", cfg.Storage.Region)
 	}
-	if got := strings.Join(cfg.Auth.AllowedDomains, ","); got != "env.example.com,other.example.com" {
-		t.Errorf("Auth.AllowedDomains = %q, want split env value", got)
+	if got := strings.Join(cfg.Auth.AllowedEmails, ","); got != "env.example.com,other.example.com" {
+		t.Errorf("Auth.AllowedEmails = %q, want split env value", got)
 	}
 }
 
@@ -407,5 +407,82 @@ func TestAudienceResolvesFromAuthMode(t *testing.T) {
 	}
 	if cfg.Auth.Audience != "auth" {
 		t.Errorf("proxy mode: Auth.Audience = %q, want %q", cfg.Auth.Audience, "auth")
+	}
+}
+
+// A hard rename of an env var is only safe if the old name fails loudly.
+// AUTH_ALLOWED_DOMAINS carried the access gate; left unrecognized it would
+// resolve to an empty allowlist, which fails closed and looks exactly like
+// the documented "empty admits nobody" default — an outage that reads as
+// intended behavior. Refuse to start instead, and name the new variable.
+//
+// The trigger is the OUTCOME (an empty effective allowlist while the old
+// name is present), not the presence of one variable and absence of the
+// other — otherwise it both misses real breakage and blocks working setups.
+func TestRenamedAllowlistVariableFailsLoudly(t *testing.T) {
+	mustFail := func(t *testing.T, env map[string]string, yamlBody, why string) {
+		t.Helper()
+		_, err := loadWith(t, required(env), yamlBody)
+		if err == nil {
+			t.Fatalf("want an error: %s", why)
+		}
+		for _, want := range []string{"AUTH_ALLOWED_DOMAINS", "AUTH_ALLOWED_EMAILS"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %s", err, want)
+			}
+		}
+	}
+	mustLoad := func(t *testing.T, env map[string]string, yamlBody, why string) *Config {
+		t.Helper()
+		cfg, err := loadWith(t, required(env), yamlBody)
+		if err != nil {
+			t.Fatalf("%s: %v", why, err)
+		}
+		return cfg
+	}
+
+	mustFail(t, map[string]string{"AUTH_ALLOWED_DOMAINS": "example.com"}, "",
+		"only the OLD variable is set, so the allowlist is empty")
+
+	// An empty value for the new variable is not a migration — it is the
+	// same lockout with extra steps.
+	mustFail(t, map[string]string{
+		"AUTH_ALLOWED_DOMAINS": "example.com",
+		"AUTH_ALLOWED_EMAILS":  "",
+	}, "", "new variable present but empty")
+
+	// Both set: a mid-rename deploy must not be blocked, and the new
+	// variable wins.
+	cfg := mustLoad(t, map[string]string{
+		"AUTH_ALLOWED_DOMAINS": "stale.example",
+		"AUTH_ALLOWED_EMAILS":  "example.com,you@gmail.com",
+	}, "", "both variables set")
+	if got := strings.Join(cfg.Auth.AllowedEmails, ","); got != "example.com,you@gmail.com" {
+		t.Errorf("Auth.AllowedEmails = %q, want the NEW variable's value", got)
+	}
+
+	// Configured via the YAML file: the allowlist survived, so a stale env
+	// var is not breakage and must not block startup.
+	cfg = mustLoad(t, map[string]string{"AUTH_ALLOWED_DOMAINS": "stale.example"},
+		"auth:\n  allowed_emails: [example.com]\n", "allowlist configured in YAML")
+	if got := strings.Join(cfg.Auth.AllowedEmails, ","); got != "example.com" {
+		t.Errorf("Auth.AllowedEmails = %q, want the YAML value", got)
+	}
+
+	// Auth off: the allowlist gates nothing, so a stale variable is inert.
+	// This is the local-evaluation profile, which must not be bricked by a
+	// leftover line in someone's .env.
+	mustLoad(t, map[string]string{
+		"AUTH_ALLOWED_DOMAINS": "stale.example",
+		"ARTI_AUTH_DISABLED":   "true",
+	}, "", "auth disabled")
+	mustLoad(t, map[string]string{
+		"AUTH_ALLOWED_DOMAINS": "stale.example",
+		"ARTI_AUTH_MODE":       "disabled",
+	}, "", "auth mode disabled")
+
+	// The YAML key needs no tripwire — unknown keys already fail startup.
+	if _, err := loadWith(t, required(nil), "auth:\n  allowed_domains: [example.com]\n"); err == nil {
+		t.Error("want an error for the renamed YAML key")
 	}
 }

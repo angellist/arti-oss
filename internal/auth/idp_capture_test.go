@@ -27,8 +27,8 @@ func (f *fakeCapturer) UpsertIdPGroups(_ context.Context, email string, groups [
 // X-Auth-Request-Groups header at the shared finish() point, normalized the
 // same way the required-groups gate sees them.
 func TestIngressCapturesIdPGroups(t *testing.T) {
-	SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { SetAllowedDomains([]string{"example.com", "example.org"}) })
+	SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { SetAllowedEmails([]string{"example.com", "example.org"}) })
 
 	cap := &fakeCapturer{}
 	signer := NewJWTSigner([]byte("testkey"))
@@ -55,8 +55,8 @@ func TestIngressCapturesIdPGroups(t *testing.T) {
 
 // A capture failure must never break the login response (best-effort).
 func TestIngressCaptureErrorDoesNotBlockLogin(t *testing.T) {
-	SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { SetAllowedDomains([]string{"example.com", "example.org"}) })
+	SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { SetAllowedEmails([]string{"example.com", "example.org"}) })
 
 	cap := &fakeCapturer{err: errors.New("db down")}
 	signer := NewJWTSigner([]byte("testkey"))

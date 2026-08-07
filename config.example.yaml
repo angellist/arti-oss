@@ -35,7 +35,7 @@ auth:
   # that domain, full addresses admit exactly one person — on a consumer
   # IdP use addresses, since `gmail.com` is every Google account. Optional
   # group membership from the ID token narrows it further.
-  allowed_domains:
+  allowed_emails:
     - example.com
     - you@gmail.com
   required_groups: []
