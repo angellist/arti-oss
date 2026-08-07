@@ -48,8 +48,8 @@ func confirmationState(body string) string {
 // TestIngressApproveUserCode verifies that the initial GET only renders an
 // explicit confirmation page, and the POST performs the approval.
 func TestIngressApproveUserCode(t *testing.T) {
-	SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { SetAllowedDomains([]string{"example.com", "example.org"}) })
+	SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { SetAllowedEmails([]string{"example.com", "example.org"}) })
 
 	ds := newFakeStore()
 	seedGrant(ds, "ABCD-2345")
@@ -145,8 +145,8 @@ func TestConfirmLoginRejectsTamperedExpiredAndMismatchedState(t *testing.T) {
 // TestIngressApproveUserCodeDomainRejected verifies that a domain-failing email
 // returns 403 and does NOT approve the grant.
 func TestIngressApproveUserCodeDomainRejected(t *testing.T) {
-	SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { SetAllowedDomains([]string{"example.com", "example.org"}) })
+	SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { SetAllowedEmails([]string{"example.com", "example.org"}) })
 
 	ds := newFakeStore()
 	seedGrant(ds, "ABCD-2345")

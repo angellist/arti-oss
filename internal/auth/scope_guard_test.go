@@ -182,8 +182,8 @@ func TestEnforceUploadScope_BodyCappedOnPost(t *testing.T) {
 // correctly rejected with 403.
 func TestFamClaimPreservedThroughRequireAuth(t *testing.T) {
 	signer := NewJWTSigner([]byte("k"))
-	SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { SetAllowedDomains([]string{"example.com", "example.org"}) })
+	SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { SetAllowedEmails([]string{"example.com", "example.org"}) })
 
 	st := newFakeStore()
 

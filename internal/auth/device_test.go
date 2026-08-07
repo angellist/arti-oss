@@ -189,8 +189,8 @@ func TestDeviceFlowHappyPath(t *testing.T) {
 	st := newFakeStore()
 	cfg := DeviceConfig{Store: st, Signer: NewJWTSigner([]byte("k")), BaseURL: "https://arti.example",
 		AccessTTL: time.Hour, MaxRefreshTTL: 720 * time.Hour}
-	SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { SetAllowedDomains([]string{"example.com", "example.org"}) })
+	SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { SetAllowedEmails([]string{"example.com", "example.org"}) })
 
 	// 1. agent starts the grant (duration=long)
 	rr := httptest.NewRecorder()
@@ -254,8 +254,8 @@ func TestDeviceShortDurationNoRefresh(t *testing.T) {
 	st := newFakeStore()
 	cfg := DeviceConfig{Store: st, Signer: NewJWTSigner([]byte("k")), BaseURL: "https://arti.example",
 		AccessTTL: time.Hour, MaxRefreshTTL: 720 * time.Hour}
-	SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { SetAllowedDomains([]string{"example.com", "example.org"}) })
+	SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { SetAllowedEmails([]string{"example.com", "example.org"}) })
 
 	// 1. agent starts the grant (duration=short — the default)
 	rr := httptest.NewRecorder()
@@ -321,8 +321,8 @@ func TestDeviceRefreshRotatesAndRejectsStale(t *testing.T) {
 	st := newFakeStore()
 	cfg := DeviceConfig{Store: st, Signer: NewJWTSigner([]byte("k")), BaseURL: "https://arti.example",
 		AccessTTL: time.Hour, MaxRefreshTTL: 720 * time.Hour}
-	SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { SetAllowedDomains([]string{"example.com", "example.org"}) })
+	SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { SetAllowedEmails([]string{"example.com", "example.org"}) })
 
 	// 1. start a long-duration grant and approve it
 	rr := httptest.NewRecorder()
@@ -398,8 +398,8 @@ func TestDeviceExpiredPendingGrant(t *testing.T) {
 	st := newFakeStore()
 	cfg := DeviceConfig{Store: st, Signer: NewJWTSigner([]byte("k")), BaseURL: "https://arti.example",
 		AccessTTL: time.Hour, MaxRefreshTTL: 720 * time.Hour}
-	SetAllowedDomains([]string{"example.com"})
-	t.Cleanup(func() { SetAllowedDomains([]string{"example.com", "example.org"}) })
+	SetAllowedEmails([]string{"example.com"})
+	t.Cleanup(func() { SetAllowedEmails([]string{"example.com", "example.org"}) })
 
 	// Insert a device code that is already expired (ExpiresAt in the past).
 	dc := "test-expired-device-code"

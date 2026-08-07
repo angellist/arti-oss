@@ -7,6 +7,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger. A snapshot merge to main once landed with no run at all
+  # (zero check-runs, workflows active, Actions enabled), so the push event
+  # cannot be the only way to verify what is on main.
+  workflow_dispatch:
 
 jobs:
   build-test:
@@ -64,7 +68,7 @@ jobs:
           set -a && source .env.example && set +a
           export ARTI_AUTH_DISABLED=false
           export ARTI_TEST_MODE=true
-          export AUTH_ALLOWED_DOMAINS=example.com
+          export AUTH_ALLOWED_EMAILS=example.com
           export JWT_SIGNING_KEY="$(openssl rand -hex 32)"
           ./bin/arti-server serve &
           (cd web && PORT=3031 npm run dev > /tmp/web.log 2>&1 &)

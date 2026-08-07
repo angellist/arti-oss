@@ -29,18 +29,18 @@ const (
 	LocalEmailHeader = "X-Arti-Local-Email"
 )
 
-// allowedDomains is the email allowlist. There is deliberately no
+// allowedEmails is the email allowlist. There is deliberately no
 // baked-in default: with authentication enabled, an empty allowlist admits
 // nobody (fail closed), and deployments configure their own entries via
-// AUTH_ALLOWED_DOMAINS / auth.allowed_domains.
+// AUTH_ALLOWED_EMAILS / auth.allowed_emails.
 var (
-	allowedDomainsMu sync.RWMutex
-	allowedDomains   []string
+	allowedEmailsMu sync.RWMutex
+	allowedEmails   []string
 )
 
 // NormalizeAllowlist lower-cases and trims allowlist entries, drops empty
 // ones, and strips a leading "@" so both `example.com` and `@example.com`
-// mean the same domain. Shared by SetAllowedDomains and by anything that
+// mean the same domain. Shared by SetAllowedEmails and by anything that
 // needs to report on the configured gate (doctor), so there is exactly one
 // definition of what an entry means.
 func NormalizeAllowlist(entries []string) []string {
@@ -55,30 +55,30 @@ func NormalizeAllowlist(entries []string) []string {
 	return cleaned
 }
 
-// SetAllowedDomains replaces the email allowlist used by IsAllowed (and
+// SetAllowedEmails replaces the email allowlist used by IsAllowed (and
 // therefore by RequireAuth, the Dex verifier, and test-mode token
 // issuance). Entries are stored lower-cased and may be a bare domain
 // (`example.com`, admitting everyone there) or a full address
 // (`someone@example.com`, admitting exactly that person). An empty list
 // means no email is allowed. Safe to call before any handler is wired.
-func SetAllowedDomains(domains []string) {
-	cleaned := NormalizeAllowlist(domains)
-	allowedDomainsMu.Lock()
-	defer allowedDomainsMu.Unlock()
+func SetAllowedEmails(entries []string) {
+	cleaned := NormalizeAllowlist(entries)
+	allowedEmailsMu.Lock()
+	defer allowedEmailsMu.Unlock()
 	if len(cleaned) == 0 {
-		allowedDomains = nil
+		allowedEmails = nil
 		return
 	}
-	allowedDomains = cleaned
+	allowedEmails = cleaned
 }
 
-// AllowedDomains returns the active allowlist (lower-cased copy). Useful
+// AllowedEmails returns the active allowlist (lower-cased copy). Useful
 // for /healthz introspection and tests.
-func AllowedDomains() []string {
-	allowedDomainsMu.RLock()
-	defer allowedDomainsMu.RUnlock()
-	out := make([]string, len(allowedDomains))
-	copy(out, allowedDomains)
+func AllowedEmails() []string {
+	allowedEmailsMu.RLock()
+	defer allowedEmailsMu.RUnlock()
+	out := make([]string, len(allowedEmails))
+	copy(out, allowedEmails)
 	return out
 }
 
@@ -145,9 +145,9 @@ func IsAllowed(email string) bool {
 		return false
 	}
 	dom := email[at+1:]
-	allowedDomainsMu.RLock()
-	defer allowedDomainsMu.RUnlock()
-	for _, allowed := range allowedDomains {
+	allowedEmailsMu.RLock()
+	defer allowedEmailsMu.RUnlock()
+	for _, allowed := range allowedEmails {
 		if strings.EqualFold(dom, allowed) || strings.EqualFold(email, allowed) {
 			return true
 		}

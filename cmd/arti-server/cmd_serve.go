@@ -122,8 +122,8 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	// test-mode tokens, and the /auth/test issuer). Entries are bare
 	// domains or full addresses. Lives in process state so callers don't
 	// have to thread it through.
-	auth.SetAllowedDomains(cfg.Auth.AllowedDomains)
-	logger.Info("email allowlist", "entries", auth.AllowedDomains())
+	auth.SetAllowedEmails(cfg.Auth.AllowedEmails)
+	logger.Info("email allowlist", "entries", auth.AllowedEmails())
 
 	auth.SetAdminEmails(cfg.Admin.Emails)
 	logger.Info("admin allowlist", "emails", auth.AdminEmails())

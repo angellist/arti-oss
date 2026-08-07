@@ -11,6 +11,6 @@ import (
 // auth.IsAllowed per call, and the binary ships with an empty (deny-all)
 // allowlist, so the suite grants the reserved example domain.
 func TestMain(m *testing.M) {
-	auth.SetAllowedDomains([]string{"example.com"})
+	auth.SetAllowedEmails([]string{"example.com"})
 	os.Exit(m.Run())
 }

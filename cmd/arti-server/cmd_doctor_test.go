@@ -24,29 +24,29 @@ func TestCheckAccessGate(t *testing.T) {
 			name:     "empty admits nobody",
 			cfg:      config.Auth{},
 			wantAttn: true,
-			contains: []string{"AUTH_ALLOWED_DOMAINS", "no interactive login can succeed"},
+			contains: []string{"AUTH_ALLOWED_EMAILS", "no interactive login can succeed"},
 		},
 		{
 			name:     "a domain entry says it admits everyone there",
-			cfg:      config.Auth{AllowedDomains: []string{"gmail.com"}},
+			cfg:      config.Auth{AllowedEmails: []string{"gmail.com"}},
 			contains: []string{"1 domain(s)", "EVERY account", "gmail.com"},
 		},
 		{
 			// The same sentence has to land for a domain no curated list
 			// would ever contain — that is the whole point of not curating.
 			name:     "an obscure provider gets the identical treatment",
-			cfg:      config.Auth{AllowedDomains: []string{"seznam.cz"}},
+			cfg:      config.Auth{AllowedEmails: []string{"seznam.cz"}},
 			contains: []string{"EVERY account", "seznam.cz"},
 		},
 		{
 			name:     "addresses are reported as exactly those people",
-			cfg:      config.Auth{AllowedDomains: []string{"me@gmail.com"}},
+			cfg:      config.Auth{AllowedEmails: []string{"me@gmail.com"}},
 			contains: []string{"1 address(es)", "exactly me@gmail.com"},
 			absent:   "EVERY account", // no domain entry, so no blanket admission
 		},
 		{
 			name:     "mixed list reports both halves",
-			cfg:      config.Auth{AllowedDomains: []string{"example.com", "guest@partner.example"}},
+			cfg:      config.Auth{AllowedEmails: []string{"example.com", "guest@partner.example"}},
 			contains: []string{"1 address(es)", "guest@partner.example", "1 domain(s)", "example.com"},
 		},
 		{

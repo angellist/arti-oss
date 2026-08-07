@@ -11,6 +11,6 @@ import (
 // ships with none (empty = deny everyone, fail closed), so tests that mint
 // or verify identities use the reserved example domains configured here.
 func TestMain(m *testing.M) {
-	auth.SetAllowedDomains([]string{"example.com", "example.org"})
+	auth.SetAllowedEmails([]string{"example.com", "example.org"})
 	os.Exit(m.Run())
 }
