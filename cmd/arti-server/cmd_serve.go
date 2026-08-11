@@ -48,6 +48,11 @@ type ServeCmd struct{}
 
 func (*ServeCmd) Run(_ *kong.Context) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	// Route package-level slog calls (slog.Info etc., e.g. internal/apikeys)
+	// through the same JSON handler. Without this they fall back to Go's
+	// plain-text default, which Datadog can't parse — every such line gets
+	// its status guessed from the stream (stderr ⇒ error, even for INFO).
+	slog.SetDefault(logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -422,7 +427,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	// in-process arti-read short-circuit (so an APP can read other artifacts as
 	// the viewer with no OBO consent popup; see apps.Service.SetArtiReader).
 	mcpSrv := mcp.NewServer(svc, commentsSvc)
-	appsSvc := apps.New(pgstoreInst, signer, appServers, oboBroker, completer)
+	appsSvc := apps.New(pgstoreInst, signer, appServers, oboBroker, completer, logger)
 	appsSvc.SetArtiReader(mcpSrv)
 	svc.SetAppTokenFn(appsSvc.SignAppToken)
 	svc.SetAppTokenVerifyFn(appsSvc.VerifyEmbedToken)
@@ -554,6 +559,13 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 func reqLogger(l *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// kube-probe polls /healthz every few seconds per pod; logging each
+			// hit was ~2/3 of arti's entire log volume. Skip the access log for
+			// the probe only — every real route stays logged.
+			if r.URL.Path == "/healthz" {
+				next.ServeHTTP(w, r)
+				return
+			}
 			start := time.Now()
 			ww := chimid.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)

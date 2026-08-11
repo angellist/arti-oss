@@ -24,6 +24,9 @@ type ReindexCmd struct{}
 
 func (*ReindexCmd) Run(_ *kong.Context) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	// Same as serve: keep package-level slog calls on the JSON handler so
+	// Datadog parses their level instead of guessing from the stream.
+	slog.SetDefault(logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

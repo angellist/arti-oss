@@ -197,7 +197,11 @@ func (s *JWTSigner) Verify(tok string) (Claims, error) {
 		return Claims{}, fmt.Errorf("%w: body json: %v", ErrMalformed, err)
 	}
 	if c.EXP != 0 && time.Now().Unix() > c.EXP {
-		return Claims{}, ErrExpired
+		// The signature was already verified above, so the claims are
+		// authentic — just stale. Return them alongside the error so callers
+		// can attribute the rejection (log WHO is presenting an expired
+		// token). Callers MUST still treat the token as unauthenticated.
+		return c, ErrExpired
 	}
 	return c, nil
 }

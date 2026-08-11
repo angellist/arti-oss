@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"html"
 	"math/big"
 	"net/http"
 	"strings"
@@ -132,17 +131,21 @@ func DeviceConfirmHandler(cfg DeviceConfig) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>arti — approve device</title>
-<style>body{font-family:system-ui;text-align:center;margin-top:18vh;color:#333}
-.code{font:600 28px ui-monospace,monospace;letter-spacing:2px;margin:18px}
-button{font-size:16px;padding:10px 22px;border-radius:8px;border:1px solid #888;cursor:pointer}</style>
-<h1>Approve upload access?</h1>
-<p>You are about to grant ` + html.EscapeString(human) + `.</p>
-<div class="code">` + html.EscapeString(uc) + `</div>
-<form method="GET" action="/auth/login">
-<input type="hidden" name="user_code" value="` + html.EscapeString(uc) + `">
-<button type="submit">Sign in &amp; Approve</button></form>`))
+		brandPage{
+			Title:   "arti — approve device",
+			Heading: "Approve upload access?",
+			Intro:   "You are about to grant " + human + ".",
+			Label:   "device code",
+			Code:    uc,
+			Note:    "Check that this matches the code shown on the device.",
+			Action: &brandAction{
+				Method: "GET",
+				URL:    "/auth/login",
+				Hidden: []brandField{{Name: "user_code", Value: uc}},
+				Submit: "Sign in & approve",
+			},
+			Footer: "Approving signs you in and lets the device act as you.",
+		}.render(w)
 	}
 }
 

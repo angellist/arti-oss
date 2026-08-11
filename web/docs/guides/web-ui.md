@@ -214,6 +214,12 @@ the latest. The slug chip (`s/<slug> · v<version>`) links to a catalog view
 filtered to that slug, sorted newest-first, so you can open any prior version.
 The permalink chip (`a/<uuid>`) instead points at one specific version forever.
 
+When a URL pins an older version than the slug's latest, a thin amber strip at
+the top of the page says so and links to the latest — in the normal viewer, in
+full-page (`?v=full`), and inside a running APP at `/app/<slug>/<version>`. It's
+dismissible with the `×`. Embedded apps don't get it: the embedding surface pins
+its version deliberately and owns its own chrome.
+
 ## Full-page view
 
 The **Full Page** button (and a direct `?v=full` on the URL) renders the content

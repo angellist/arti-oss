@@ -30,8 +30,15 @@ func TestJWT_RoundTrip(t *testing.T) {
 func TestJWT_Expired(t *testing.T) {
 	s := auth.NewJWTSigner([]byte("k"))
 	tok, _ := s.Sign(auth.Claims{Email: "x@a.com", TTL: -time.Second})
-	if _, err := s.Verify(tok); !errors.Is(err, auth.ErrExpired) {
+	c, err := s.Verify(tok)
+	if !errors.Is(err, auth.ErrExpired) {
 		t.Fatalf("expected ErrExpired; got %v", err)
+	}
+	// Expired-but-authentic claims come back with the error so rejections can
+	// be attributed (the signature was verified before the expiry check).
+	// Callers must still treat the token as unauthenticated.
+	if c.Email != "x@a.com" {
+		t.Fatalf("expired token should return its claims for attribution; email=%q", c.Email)
 	}
 }
 

@@ -302,6 +302,16 @@ launch page.
 
 View it full-screen at `/app/<slug>` (or `/app/<uuid>`, or `/app/<slug>/<version>`).
 
+When that URL pins an older version than the slug's latest, arti overlays a thin
+dismissible amber strip at the top linking to the latest — the same notice the
+`/s` viewer shows. It's a fixed overlay (an uploaded app's layout is arti's to
+cover, not to reflow), and it publishes its height as the `--arti-top-strip` CSS
+custom property on `<html>`, so an app with its own top bar can inset itself:
+
+```css
+header { margin-top: var(--arti-top-strip, 0px); }
+```
+
 ## Embedding in another page
 
 By default an APP can be framed only by `'self'` (the

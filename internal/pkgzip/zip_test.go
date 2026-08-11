@@ -241,3 +241,70 @@ func TestReadEntry_RootIndex(t *testing.T) {
 		}
 	}
 }
+
+// Extensionless files are normal package content — Runlayer skill files carry
+// no `.md`, and LICENSE/Dockerfile never will. Typing them octet-stream turns
+// the viewer into a download button, so the bytes decide when the name can't.
+// A KNOWN extension must still win outright: that's what stops a `.txt` whose
+// first line is `# heading` from being retyped as markdown.
+func TestContentTypeOfBytes(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0}
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		// The bug: a Runlayer skill file, extensionless markdown.
+		{"course-of-action-playbooks", "# Playbooks\n\n- do the thing\n", "text/markdown"},
+		{"relationship-map", "See [the map](http://x/y) for detail.\n", "text/markdown"},
+		// Extensionless text with no markdown structure stays plain — still
+		// renders inline, just without markdown formatting.
+		{"LICENSE", "Copyright 2026 AngelList. All rights reserved.\n", "text/plain"},
+		// An `ls -l` dump must NOT read as a list (the `- ` trailing-space rule).
+		{"listing", "-rw-r--r-- 1 tian staff 12 file\n", "text/plain"},
+		// Unknown EXTENSION, not just a missing one — same fallback applies.
+		{"notes.skill", "# hi\n", "text/markdown"},
+		// Magic bytes beat the extensionless name: an unrecognized-name PNG is
+		// an image, not a download blob.
+		{"logo", string(png), "image/png"},
+		// Genuinely unrecognizable bytes stay octet-stream.
+		{"blob", "\x00\x01\x02\xff\xfe\x03binary\x00", "application/octet-stream"},
+		// A known extension always wins — the sniff never gets a vote.
+		{"notes.txt", "# heading\n- item\n", "text/plain"},
+		{"empty.md", "", "text/markdown"},
+	}
+	for _, c := range cases {
+		if got := pkgzip.ContentTypeOfBytes(c.name, []byte(c.body)); got != c.want {
+			t.Errorf("ContentTypeOfBytes(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The manifest is what the viewer reads to decide render-vs-download, so the
+// sniff has to land in the STORED entry types — not just on the serve path.
+func TestBuildManifest_ExtensionlessEntriesAreTyped(t *testing.T) {
+	z := makeZip(t, map[string]string{
+		"SKILL.md":                   "# skill\n",
+		"course-of-action-playbooks": "# Playbooks\n\n- step one\n",
+		"blob":                       "\x00\x01\x02\xff\xfe\x03binary\x00",
+	})
+	m, err := pkgzip.BuildManifest(z)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"SKILL.md":                   "text/markdown",
+		"course-of-action-playbooks": "text/markdown",
+		"blob":                       "application/octet-stream",
+	}
+	for _, e := range m.Entries {
+		if w := want[e.Path]; e.ContentType != w {
+			t.Errorf("%s: content_type=%q, want %q", e.Path, e.ContentType, w)
+		}
+	}
+	// And the same type comes back on the serve path, so the HTTP
+	// Content-Type header and the manifest can't disagree.
+	if _, ct, err := pkgzip.ReadEntry(z, "course-of-action-playbooks"); err != nil || ct != "text/markdown" {
+		t.Fatalf("ReadEntry ct=%q err=%v", ct, err)
+	}
+}

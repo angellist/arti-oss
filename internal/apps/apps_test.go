@@ -75,7 +75,7 @@ func newAppsStack(t *testing.T) (*pgstore.Store, *apps.Service, *recordingProvid
 		// in-process and never dial it.
 		"arti-self": {Name: "arti-self", Auth: "none", ResourceURL: "http://127.0.0.1:1/mcp"},
 	}
-	appsSvc := apps.New(st, signer, servers, prov, nil)
+	appsSvc := apps.New(st, signer, servers, prov, nil, nil)
 	appsSvc.SetArtiReader(mcp.NewServer(svc, nil))
 	return st, appsSvc, prov
 }

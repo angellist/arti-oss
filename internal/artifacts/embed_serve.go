@@ -45,7 +45,10 @@ func (s *Service) ServeForEmbed(w http.ResponseWriter, r *http.Request, surface,
 		// serveAppRow returns a non-nil error (writing nothing) if the entry can't
 		// be read; for the embed we ignore the class and fall through to the
 		// placeholder rather than surfacing a JSON error.
-		return s.serveAppRow(w, r, row, caller, frameAncestors, s.embedFilesBase(surface, caller, aid), "", nil) == nil
+		// nil stale notice: an embed pins a version deliberately (surface
+		// config), and its host owns the surrounding chrome — a "newer version"
+		// strip inside someone else's iframe is arti chrome in the wrong place.
+		return s.serveAppRow(w, r, row, caller, frameAncestors, s.embedFilesBase(surface, caller, aid), "", nil, nil) == nil
 	case pgstore.TypePackage:
 		return s.serveEmbedPackageEntry(w, r, row, caller, frameAncestors, s.embedFilesBase(surface, caller, aid))
 	}
@@ -71,7 +74,7 @@ func (s *Service) ServeForEmbedUser(w http.ResponseWriter, r *http.Request, surf
 
 	switch row.ArtifactType {
 	case pgstore.TypeApp:
-		return s.serveAppRow(w, r, row, "", frameAncestors, s.embedFilesBaseUser(surface, aid), surface, origins) == nil
+		return s.serveAppRow(w, r, row, "", frameAncestors, s.embedFilesBaseUser(surface, aid), surface, origins, nil) == nil
 	case pgstore.TypePackage:
 		return s.serveEmbedPackageEntry(w, r, row, "", frameAncestors, s.embedFilesBaseUser(surface, aid))
 	}

@@ -58,6 +58,19 @@ export interface OverlayOpts {
 
 const AV = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
 
+// One icon language for the card's top-right controls: paths drawn in a 24
+// box, 1.6 stroke, round joins — so edit / delete / link / minimize match in
+// weight and optical size instead of mixing emoji with text glyphs.
+const ICON_PATHS = {
+  edit: `<path d="M4.6 19.4h3.6L18.6 9a2.05 2.05 0 0 0-2.9-2.9L5.3 16.5v2.9Z"/><path d="M14.4 7.3l2.9 2.9"/>`,
+  del: `<path d="M4.6 6.6h14.8"/><path d="M9.6 6.6V4.9h4.8v1.7"/><path d="M6.9 6.6l.75 12.1a1.25 1.25 0 0 0 1.25 1.15h6.2a1.25 1.25 0 0 0 1.25-1.15L18.1 6.6"/>`,
+  link: `<path d="M10.3 13.7a3.75 3.75 0 0 0 5.3 0l2.4-2.4a3.75 3.75 0 0 0-5.3-5.3l-1.2 1.2"/><path d="M13.7 10.3a3.75 3.75 0 0 0-5.3 0L6 12.7a3.75 3.75 0 0 0 5.3 5.3l1.2-1.2"/>`,
+  min: `<path d="M5.6 12h12.8"/>`,
+  ok: `<path d="M5.4 12.6l4.3 4.3 8.9-9.5"/>`,
+};
+const icon = (k: keyof typeof ICON_PATHS) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICON_PATHS[k]}</svg>`;
+
 const CSS = `
 .ac-hl{background:rgba(250,204,21,.28);border-radius:2px;cursor:pointer;transition:background .12s}
 .ac-hl.ac-resolved{background:rgba(120,120,110,.16)}
@@ -73,15 +86,22 @@ const CSS = `
 .ac-pin.ac-active .ac-bub,.ac-pin.ac-draft .ac-bub{outline:3px solid #eff4ff}
 .ac-card{position:fixed;width:${CARD_WIDTH}px;pointer-events:auto;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);border-radius:13px;box-shadow:0 6px 24px -10px rgba(40,40,30,.24);padding:11px 12px;cursor:pointer}
 .ac-cmt{position:relative}
-.ac-del,.ac-edit,.ac-link{position:absolute;top:0;border:none;background:transparent;color:#c9c8c3;font-size:12px;cursor:pointer;padding:2px 4px;line-height:1;opacity:0}
-.ac-link{right:0}
-.ac-del{right:18px}
-.ac-edit{right:36px}
-.ac-cmt:hover .ac-del,.ac-cmt:hover .ac-edit,.ac-cmt:hover .ac-link{opacity:1}
-.ac-del:hover{color:#be123c}
-.ac-edit:hover{color:#2563eb}
-.ac-link:hover{color:#2563eb}
-.ac-link.ac-copied{color:#15803d;opacity:1}
+/* One control language for every card chrome button (edit / delete / link /
+   minimize): a 22px square hit target holding a 15px stroked icon, dim at
+   rest and lit on hover. No accent colors — the corner shouldn't compete
+   with the comment. */
+.ac-ico{display:grid;place-items:center;width:22px;height:22px;padding:0;border:none;border-radius:6px;background:transparent;color:#b9b8b3;cursor:pointer;transition:color .12s,background-color .12s,opacity .12s}
+.ac-ico svg{display:block;width:15px;height:15px}
+.ac-ico:hover{color:#33332e;background:rgba(40,40,30,.07)}
+.ac-ico:focus-visible{outline:2px solid rgba(40,40,30,.22);outline-offset:0}
+.ac-ico.ac-copied{color:#4f7a63}
+/* Per-comment actions sit as one row in the row's top-right corner, so they
+   line up with the card-level minimize button next to them. */
+.ac-cmt-acts{position:absolute;top:-2px;right:0;display:flex;align-items:center;gap:1px;opacity:0;transition:opacity .12s}
+.ac-cmt:hover .ac-cmt-acts,.ac-card:hover>.ac-cmt:first-of-type .ac-cmt-acts,.ac-cmt-acts:focus-within{opacity:1}
+/* Keep the cluster up while the "copied" tick is showing, even if the pointer
+   has already left (Safari doesn't focus a button on click). */
+.ac-cmt-acts:has(.ac-copied){opacity:1}
 .ac-cmt.ac-flash{border-radius:6px;animation:ac-flash 1.7s ease-out}
 @keyframes ac-flash{0%,25%{background:rgba(250,204,21,.45)}100%{background:transparent}}
 .ac-edit-input{font:inherit;font-size:12.5px;width:100%;border:1px solid #2563eb;border-radius:6px;padding:5px 8px;background:#fff;resize:none;min-height:32px}
@@ -144,16 +164,16 @@ const CSS = `
 .ac-min{position:fixed;pointer-events:auto;cursor:pointer;display:inline-flex;align-items:center;gap:3px;height:26px;padding:0 9px;border-radius:13px;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);box-shadow:0 4px 16px -8px rgba(40,40,30,.3);font-size:12px;line-height:1;color:#6b6b66;font-weight:600;white-space:nowrap}
 .ac-min:hover{border-color:#c9c8c3;color:#33332e;box-shadow:0 7px 20px -8px rgba(40,40,30,.42)}
 .ac-min .ac-min-n{font-size:11px;color:#9b9b95;font-weight:700}
-.ac-min-btn{position:absolute;top:6px;right:8px;z-index:2;border:none;background:transparent;color:#b8b7b1;font-size:18px;line-height:1;cursor:pointer;padding:0 3px}
-.ac-min-btn:hover{color:#33332e}
-/* The first comment's hover actions share the top-right corner with the
-   minimize "–". Shift THEM left — padding on the row can't, since the actions
-   are absolutely positioned off the padding-box edge, which padding doesn't
-   move — so both the actions and the "–" stay clickable. Only the first row
-   reaches that corner. */
-.ac-card.ac-active>.ac-cmt:first-of-type .ac-link{right:26px}
-.ac-card.ac-active>.ac-cmt:first-of-type .ac-del{right:44px}
-.ac-card.ac-active>.ac-cmt:first-of-type .ac-edit{right:62px}
+/* Card-level minimize. Its top (16px) = card padding-top (11px) + the first
+   .ac-cmt's margin-top (7px) + the cluster's own -2px nudge, so it sits on the
+   same baseline as that row's actions and the four controls read as one strip. */
+.ac-min-btn{position:absolute;top:16px;right:12px;z-index:2}
+/* The first comment's actions share that corner with the minimize button —
+   shift THEM left by one control. Padding on the row can't do it: the cluster
+   is absolutely positioned off the padding-box edge, which padding doesn't
+   move. Only the first row reaches the corner. */
+.ac-card.ac-hasmin>.ac-cmt:first-of-type .ac-cmt-acts{right:23px}
+.ac-card.ac-hasmin .ac-snip{padding-right:28px}
 /* Left-bias the document + toolbar content so the fixed comment column clears
    the text (see applyDocShift). The header BAR stays full-bleed; only its inner
    content shifts. --ac-shift is computed per doc/viewport. */
@@ -518,10 +538,11 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     }
     // You can only delete or edit your own comments — never anyone else's.
     // The permalink, by contrast, is available to anyone who can see the comment.
-    const del = own ? `<button class="ac-del" data-delc="${tid}|${c.id}" title="delete your comment">✕</button>` : "";
-    const edit = own ? `<button class="ac-edit" data-editc="${tid}|${c.id}" title="edit your comment">✎</button>` : "";
-    const link = `<button class="ac-link" data-permalink="${c.id}" title="copy link to this comment">🔗</button>`;
-    return `<div class="ac-cmt" data-cid="${c.id}">${avatar(c.author, c.author_name, c.author_picture)}<div><div><span class="ac-who">${AV(name)}</span>${edited}</div><div class="ac-text">${AV(c.body)}</div></div>${link}${edit}${del}</div>`;
+    const del = own ? `<button class="ac-ico ac-del" data-delc="${tid}|${c.id}" title="Delete your comment" aria-label="Delete comment">${icon("del")}</button>` : "";
+    const edit = own ? `<button class="ac-ico ac-edit" data-editc="${tid}|${c.id}" title="Edit your comment" aria-label="Edit comment">${icon("edit")}</button>` : "";
+    const link = `<button class="ac-ico ac-link" data-permalink="${c.id}" title="Copy link to this comment" aria-label="Copy link to comment">${icon("link")}</button>`;
+    const acts = `<div class="ac-cmt-acts">${edit}${del}${link}</div>`;
+    return `<div class="ac-cmt" data-cid="${c.id}">${avatar(c.author, c.author_name, c.author_picture)}<div><div><span class="ac-who">${AV(name)}</span>${edited}</div><div class="ac-text">${AV(c.body)}</div></div>${acts}</div>`;
   }
   function anchoredCard(t: ThreadDTO): string {
     const expanded = active === t.id;
@@ -530,23 +551,26 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // discussed, so the card stays compact in both the small (collapsed) and
     // large (open) states. All that remains is a small "–" minimize control in
     // the top-right corner. Pins keep a tiny label since they have no highlight.
-    const minBtn =
-      t.anchor.type === "text" && t.status !== "resolved"
-        ? `<button class="ac-min-btn" data-min="${t.id}" title="Minimize to margin" aria-label="Minimize comment">–</button>`
-        : "";
+    const canMin = t.anchor.type === "text" && t.status !== "resolved";
+    const minBtn = canMin
+      ? `<button class="ac-ico ac-min-btn" data-min="${t.id}" title="Minimize to margin" aria-label="Minimize comment">${icon("min")}</button>`
+      : "";
+    // ac-hasmin nudges the first row's action cluster left so it lands beside
+    // the minimize button rather than under it.
+    const hasMin = canMin ? " ac-hasmin" : "";
     const header = t.anchor.type === "pin" ? `<span class="ac-chip">📍 pin</span>` : "";
     if (!expanded) {
       const c = t.comments[0];
       const body = c ? `<div class="ac-cmt">${avatar(c.author, c.author_name, c.author_picture)}<div><div class="ac-snip">${AV(c.body)}</div></div></div>` : `<div class="ac-empty">No comments</div>`;
       const more = t.comments.length > 1 ? `<div class="ac-more">+${t.comments.length - 1} more</div>` : "";
-      return `<div class="ac-card${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${minBtn}${header}${body}${more}</div>`;
+      return `<div class="ac-card${hasMin}${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${minBtn}${header}${body}${more}</div>`;
     }
     const cmts = t.comments.map((c) => cmtHTML(c, t.id)).join("");
     const acts =
       t.status === "resolved"
         ? `<div class="ac-acts"><button class="ac-mini" data-reopen="${t.id}">↩ Reopen</button></div>`
         : `<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-reply="${t.id}"></textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-send="${t.id}">Reply</button><button class="ac-mini ac-done" data-resolve="${t.id}">✓ Resolve</button></div>`;
-    return `<div class="ac-card ac-active${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${minBtn}${header}${cmts}${acts}</div>`;
+    return `<div class="ac-card ac-active${hasMin}${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${minBtn}${header}${cmts}${acts}</div>`;
   }
   // Minimized text thread: a compact pill in the column; click restores the card.
   function minMarker(t: ThreadDTO): string {
@@ -1092,10 +1116,11 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   async function copyPermalink(cid: string, btn: HTMLElement) {
     try {
       await navigator.clipboard.writeText(permalinkFor(cid));
-      const prev = btn.textContent;
-      btn.textContent = "✓";
+      // Swap the icon's markup, not textContent — the button holds an <svg>.
+      const prev = btn.innerHTML;
+      btn.innerHTML = icon("ok");
       btn.classList.add("ac-copied");
-      setTimeout(() => { btn.textContent = prev; btn.classList.remove("ac-copied"); }, 1200);
+      setTimeout(() => { btn.innerHTML = prev; btn.classList.remove("ac-copied"); }, 1200);
     } catch {
       toast("Couldn’t copy link");
     }

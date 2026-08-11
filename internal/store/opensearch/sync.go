@@ -28,6 +28,45 @@ func (c *Client) Index(ctx context.Context, doc Doc) error {
 	return nil
 }
 
+// SetLatestFlag rewrites is_latest across every indexed version of a slug in
+// one update-by-query: true where _id == latestID, false elsewhere, noop when
+// already correct (so it generates no writes — and no conflicts for others —
+// on settled docs). latestID "" clears the flag on every version (all
+// archived). conflicts=proceed keeps one racing doc from aborting the rest;
+// the returned count is the response's version_conflicts, so the caller can
+// retry until the index settles.
+func (c *Client) SetLatestFlag(ctx context.Context, slug, latestID string) (versionConflicts int, err error) {
+	if c == nil {
+		return 0, nil
+	}
+	path := "/" + IndexName + "/_update_by_query?conflicts=proceed"
+	body := map[string]any{
+		"script": map[string]any{
+			"source": "boolean want = ctx._id == params.latest; if (ctx._source.is_latest == want) { ctx.op = 'noop' } else { ctx._source.is_latest = want }",
+			"lang":   "painless",
+			"params": map[string]any{"latest": latestID},
+		},
+		"query": map[string]any{
+			"term": map[string]any{"named_slug": slug},
+		},
+	}
+	resp, err := c.do(ctx, "POST", path, body)
+	if err != nil {
+		return 0, err
+	}
+	b, err := readBody(resp)
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		VersionConflicts int `json:"version_conflicts"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return 0, fmt.Errorf("opensearch: parse update_by_query response: %w", err)
+	}
+	return out.VersionConflicts, nil
+}
+
 // Delete removes a document by artifact_id. Returns nil on 404 (already gone).
 func (c *Client) Delete(ctx context.Context, artifactID string) error {
 	if c == nil {

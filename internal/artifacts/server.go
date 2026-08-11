@@ -2150,6 +2150,11 @@ func (s *Service) httpApp(w http.ResponseWriter, r *http.Request) {
 	} else {
 		ver = parseVersion(r)
 	}
+	// Whether this URL pins a version: an explicit ?version=/{version}, or a
+	// UUID ident (which addresses one immutable row). Everything else resolved
+	// to the slug's newest readable version by construction.
+	_, identErr := uuid.Parse(ident)
+	pinned := ver != nil || identErr == nil
 	row, err := s.resolveIdent(r.Context(), ident, ver, caller)
 	if writeMaybeNotFound(w, err) {
 		return
@@ -2158,8 +2163,74 @@ func (s *Service) httpApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not-found", "not an APP artifact (use /a or /s for other types)")
 		return
 	}
-	if err := s.serveAppRow(w, r, row, caller, "", "", "", nil); err != nil {
+	// The /s viewer shows a "newer version available" strip when the URL pins
+	// an older version; /app is chrome-less, so the same notice has to ride
+	// inside the app document. Only this top-level route gets it — an embed
+	// surface pins deliberately and its host owns that chrome.
+	//
+	// The probe is not one query: resolving the caller-scoped latest costs a
+	// MANAGE_ARTIFACTS check plus the latest-for-caller lookup (which resolves
+	// the caller's groups), and on the slug path the permission check repeats
+	// one resolveIdent just made. Cheap indexed single-row reads, but budget
+	// 2–3 round-trips per pinned load. Hence the gate: a bare /app/{slug}
+	// already resolved to the newest version this caller can read and so can
+	// never be stale — the common (unpinned) launch stays at exactly the query
+	// count it had before, and only a version-pinned open pays.
+	var stale *staleNotice
+	if pinned {
+		stale = s.staleAppNotice(r.Context(), row, caller)
+	}
+	if err := s.serveAppRow(w, r, row, caller, "", "", "", nil, stale); err != nil {
 		writeBadOrInternal(w, err)
+	}
+}
+
+// staleNotice describes an APP page pinned to an older version than its slug's
+// latest: the version being served, that latest version, and the unpinned URL
+// pointing at it.
+type staleNotice struct {
+	Current   int32
+	Latest    int32
+	LatestURL string
+}
+
+// staleAppNotice returns a notice when row is NOT the newest version of its
+// slug that caller can read, else nil. Deliberately best-effort and never
+// fatal: a failed lookup just means no strip, never a failed app load.
+//
+// Slugless artifacts (reached only as /app/{uuid}) have no "latest" to point
+// at, so they never produce one. The latest is resolved through the same
+// caller-scoped path the read API uses, so a viewer who can't read a newer
+// restricted version is not told it exists.
+func (s *Service) staleAppNotice(ctx context.Context, row sqlc.Artifact, caller string) *staleNotice {
+	// Guard before the lookup, not after: a slugless row has no "latest" to
+	// resolve, so it must not cost a query (nor touch a nil store).
+	if row.NamedSlug == nil || *row.NamedSlug == "" || row.Version == nil {
+		return nil
+	}
+	latest, err := s.resolveSlugForCaller(ctx, *row.NamedSlug, nil, caller)
+	if err != nil {
+		return nil
+	}
+	return staleNoticeFrom(row, latest)
+}
+
+// staleNoticeFrom decides what to render given the served row and its slug's
+// latest version: nil when row IS the latest (or newer, which a pinned read of
+// a since-archived head can produce), else the notice. Pure — the store lookup
+// stays in staleAppNotice — so the comparison itself is table-testable without
+// a store.
+func staleNoticeFrom(row, latest sqlc.Artifact) *staleNotice {
+	if row.NamedSlug == nil || *row.NamedSlug == "" || row.Version == nil {
+		return nil
+	}
+	if latest.Version == nil || *latest.Version <= *row.Version {
+		return nil
+	}
+	return &staleNotice{
+		Current:   *row.Version,
+		Latest:    *latest.Version,
+		LatestURL: "/app/" + url.PathEscape(*row.NamedSlug),
 	}
 }
 
@@ -2201,7 +2272,10 @@ func (s *Service) resolveIdent(ctx context.Context, ident string, ver *int32, ca
 // Connect handshake instead — see injectAppBridgeUser) and caller is expected
 // to be "". userOrigins is that surface's embedder-origin allowlist (nil
 // outside user mode), forwarded to the bridge for the token relay.
-func (s *Service) serveAppRow(w http.ResponseWriter, r *http.Request, row sqlc.Artifact, caller, frameAncestors, filesBase, userSurface string, userOrigins []string) error {
+//
+// stale, when non-nil, overlays the "a newer version is available" strip on
+// the page (see injectStaleAppBanner). Only /app/{ident} passes one.
+func (s *Service) serveAppRow(w http.ResponseWriter, r *http.Request, row sqlc.Artifact, caller, frameAncestors, filesBase, userSurface string, userOrigins []string, stale *staleNotice) error {
 	// Launch page precedence: arti-app.json `entry` is the source of truth for
 	// an APP (it's what the manifest documents), then the package entry_point,
 	// then index.html.
@@ -2250,6 +2324,7 @@ func (s *Service) serveAppRow(w http.ResponseWriter, r *http.Request, row sqlc.A
 	} else {
 		body = s.injectAppBridge(body, ct, aid, caller, params)
 	}
+	body = injectStaleAppBanner(body, ct, stale)
 	s.setContentSecurityAppFA(w, ct, frameAncestors)
 	_, _ = w.Write(body)
 	return nil
@@ -2805,6 +2880,123 @@ func (s *Service) injectAppBridgeUser(body []byte, ct, artifactID, surface strin
 		"baked in. Tool calls only work after the viewer clicks Connect, which mints a short-lived, " +
 		"consent-gated, per-viewer token via /auth/embed/app-token. -->"
 	snippet := []byte(userNote + "<script>window.__ARTI_APP__=" + string(cfg) + ";</script><script>" + appBridgeJS + "</script>")
+	if i := bytes.LastIndex(bytes.ToLower(body), []byte("</body>")); i >= 0 {
+		out := make([]byte, 0, len(body)+len(snippet))
+		out = append(out, body[:i]...)
+		out = append(out, snippet...)
+		return append(out, body[i:]...)
+	}
+	return append(body, snippet...)
+}
+
+// staleBannerJS builds the "you're on an older version" strip inside a served
+// APP page. It mirrors StaleVersionBanner (the React strip the /s viewer
+// shows): one amber line, a "View latest →" link, a × to dismiss.
+//
+// Two constraints shape it. (1) The page is an arbitrary uploaded app, so the
+// strip cannot reflow it — it's a fixed overlay, built in JS from the DOM (no
+// innerHTML, so nothing here can be an injection vector) and appended last, and
+// it's dismissible for exactly that reason. (2) The document is served under
+// CSP `sandbox` with an opaque origin: `allow-top-navigation-by-user-activation`
+// is granted, so the click-driven link navigates fine, but storage may throw —
+// dismissal is per page load, never persisted.
+//
+// It also publishes its height as --arti-top-strip on <html> (cleared on
+// dismiss), matching the FE contract, so an app that wants to inset itself can
+// read the var instead of being covered.
+const staleBannerJS = `(function(){
+  var cfg = window.__ARTI_STALE__;
+  if(!cfg || !cfg.href){ return; }
+  var ID = "arti-stale-strip", dismissed = false, queued = false, ro = null, mo = null, announced = false;
+  function mount(){
+    if(dismissed || !document.body || document.getElementById(ID)){ return; }
+    var bar = document.createElement("div");
+    bar.id = ID;
+    // Live region on the FIRST mount only: a re-mount after a body clobber is
+    // the same notice re-attached, and a chatty SPA would otherwise make a
+    // screen reader re-announce it on every render.
+    if(!announced){ bar.setAttribute("role", "status"); announced = true; }
+    bar.setAttribute("style", "position:fixed;top:0;left:0;right:0;z-index:2147483646;" +
+      "box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:2px 12px;" +
+      "font:12px/20px -apple-system,system-ui,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
+      "color:#78350f;background:rgba(255,251,235,.96);border-bottom:1px solid #fde68a;" +
+      "-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)");
+    var msg = document.createElement("span");
+    msg.setAttribute("style", "min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis");
+    msg.textContent = "Viewing version v" + cfg.cur + " — a newer version v" + cfg.latest + " is available.";
+    var link = document.createElement("a");
+    link.href = cfg.href;
+    link.textContent = "View latest →";
+    link.setAttribute("style", "flex:none;color:#92400e;font-weight:600;text-decoration:underline");
+    var close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "dismiss newer version banner");
+    // Longhands, not the "font" shorthand: the shorthand REQUIRES a family
+    // term, so "font:16px/1 inherit" is invalid and the whole declaration —
+    // size included — gets dropped.
+    close.setAttribute("style", "margin-left:auto;flex:none;padding:0 3px;border:0;border-radius:3px;" +
+      "background:transparent;color:#b45309;font-family:inherit;font-size:16px;line-height:1;cursor:pointer");
+    close.addEventListener("click", function(){ dismissed = true; bar.remove(); stopRO(); stopMO(); clearVar(); });
+    bar.appendChild(msg); bar.appendChild(link); bar.appendChild(close);
+    document.body.appendChild(bar);
+    publish(bar);
+  }
+  // Measured, not hardcoded, so a two-line wrap on a narrow viewport still
+  // clears — same reasoning as the React strip. The observer is torn down on
+  // dismiss and before each re-mount: left running, its height-0 callback fires
+  // AFTER clearVar and rewrites the var it just removed (and a re-mount would
+  // stack a fresh observer on every clobber).
+  function publish(bar){
+    var set = function(){
+      document.documentElement.style.setProperty("--arti-top-strip",
+        Math.round(bar.getBoundingClientRect().height) + "px");
+    };
+    set();
+    stopRO();
+    if(window.ResizeObserver){ ro = new ResizeObserver(set); ro.observe(bar); }
+  }
+  function stopRO(){ if(ro){ ro.disconnect(); ro = null; } }
+  function clearVar(){ document.documentElement.style.removeProperty("--arti-top-strip"); }
+  // An SPA that renders by clobbering document.body (React/Vue roots that mount
+  // over it, or an app that rewrites body's markup wholesale) would silently
+  // take the strip with it. Re-mount when that happens — coalesced to one check
+  // per frame so a busy app's mutations stay cheap, never after a dismiss.
+  function watch(){
+    if(!window.MutationObserver || !document.body){ return; }
+    mo = new MutationObserver(function(){
+      if(dismissed || queued || document.getElementById(ID)){ return; }
+      queued = true;
+      requestAnimationFrame(function(){ queued = false; mount(); });
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  }
+  // Disconnected on dismiss: nothing can re-mount after that, so leaving it
+  // subscribed would fire (and early-return) on every mutation of a busy SPA
+  // for the rest of the page's life.
+  function stopMO(){ if(mo){ mo.disconnect(); mo = null; } }
+  function boot(){ mount(); watch(); }
+  if(document.readyState === "loading"){ document.addEventListener("DOMContentLoaded", boot); }
+  else { boot(); }
+})();`
+
+// injectStaleAppBanner appends the stale-version strip to a served APP page.
+// No-ops for non-HTML and when there is nothing to warn about (stale == nil),
+// so a page on the newest version is byte-identical to before.
+func injectStaleAppBanner(body []byte, ct string, stale *staleNotice) []byte {
+	if stale == nil || !strings.HasPrefix(strings.ToLower(ct), "text/html") {
+		return body
+	}
+	// json.Marshal escapes <, >, & — a slug can't break out of the <script>.
+	cfg, err := json.Marshal(map[string]any{
+		"cur":    stale.Current,
+		"latest": stale.Latest,
+		"href":   stale.LatestURL,
+	})
+	if err != nil {
+		return body
+	}
+	snippet := []byte("<script>window.__ARTI_STALE__=" + string(cfg) + ";</script><script>" + staleBannerJS + "</script>")
 	if i := bytes.LastIndex(bytes.ToLower(body), []byte("</body>")); i >= 0 {
 		out := make([]byte, 0, len(body)+len(snippet))
 		out = append(out, body[:i]...)

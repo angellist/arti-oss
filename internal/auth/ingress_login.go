@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"html"
 	"log"
 	"net/http"
 	"strings"
@@ -179,18 +178,27 @@ func (f loginFinisher) renderConfirmation(w http.ResponseWriter, r *http.Request
 		Name: loginConfirmCookie, Value: identity, Path: "/auth", Secure: f.cookieSecure,
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 300,
 	})
-	label := "CLI sign-in"
+	heading, intro, footer := "Authorize CLI sign-in", "A terminal on this machine is requesting access to arti as", "Only confirm if you just ran arti login in your own terminal."
 	if flow == "device" {
-		label = "device sign-in"
+		heading = "Authorize device sign-in"
+		intro = "A device is requesting access to arti as"
+		footer = "Only confirm if you started this sign-in yourself."
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>arti confirmation</title>
-<style>body{font-family:system-ui;text-align:center;margin-top:18vh;color:#333}.code{font:600 20px ui-monospace,monospace}button{font-size:16px;padding:10px 22px}</style>
-<h1>Authorize ` + html.EscapeString(label) + ` as ` + html.EscapeString(email) + `?</h1>
-<p class="code">` + html.EscapeString(code) + `</p>
-<form method="POST" action="/auth/login/confirm">
-<input type="hidden" name="state" value="` + html.EscapeString(state) + `">
-<button type="submit">Confirm</button></form>`))
+	brandPage{
+		Title:   "arti — authorize sign-in",
+		Heading: heading,
+		Intro:   intro,
+		Email:   email,
+		Code:    code,
+		Note:    "Check that this matches the code shown where you started sign-in. Expires in 5 minutes.",
+		Action: &brandAction{
+			Method: "POST",
+			URL:    "/auth/login/confirm",
+			Hidden: []brandField{{Name: "state", Value: state}},
+			Submit: "Confirm sign-in",
+		},
+		Footer: footer,
+	}.render(w)
 }
 
 // ConfirmLoginHandler performs the explicit same-origin confirmation that
@@ -239,9 +247,12 @@ func ConfirmLoginHandler(signer *JWTSigner, pairs PairStore, deviceStore DeviceS
 				return
 			}
 			clearLoginIdentityCookie(w, cookieSecure)
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>arti</title>
-<h1>Approved &#10003;</h1><p>Return to your agent — it will receive its token shortly.</p>`))
+			brandPage{
+				Title:   "arti — approved",
+				Heading: "Approved",
+				Intro:   "Return to your agent — it will receive its token shortly.",
+				Done:    true,
+			}.render(w)
 			return
 		}
 		if pairs == nil {
@@ -250,9 +261,12 @@ func ConfirmLoginHandler(signer *JWTSigner, pairs PairStore, deviceStore DeviceS
 		}
 		pairs.Put(state.Code, state.Email)
 		clearLoginIdentityCookie(w, cookieSecure)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>arti</title>
-<h1>Signed in</h1><p>You can close this tab and return to the terminal.</p>`))
+		brandPage{
+			Title:   "arti — signed in",
+			Heading: "Signed in",
+			Intro:   "You can close this tab and return to the terminal.",
+			Done:    true,
+		}.render(w)
 	}
 }
 

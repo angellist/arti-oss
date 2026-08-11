@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
 	"github.com/angellist/arti-oss/internal/store/pgstore"
@@ -109,80 +110,62 @@ func (ix *Indexer) HardDelete(ctx context.Context, artifactID string) {
 	}
 }
 
+// latestFlagAttempts bounds the version-conflict retry loop in
+// UpdateLatestFlags; latestFlagBackoff is the first retry's delay (doubled
+// each attempt, so 4 attempts sleep at most 100+200+400 ms total).
+const (
+	latestFlagAttempts = 4
+	latestFlagBackoff  = 100 * time.Millisecond
+)
+
 // UpdateLatestFlags re-computes the is_latest flag for all versions under
 // a slug. Called after Put/Append to ensure only the highest non-deleted
 // version has is_latest=true (for the LatestPerSlug filter).
+//
+// Concurrent writers race this: every IndexArtifact bumps its doc's seqNo, so
+// the update-by-query can hit a version conflict (HTTP 409). The old
+// clear-then-set implementation aborted outright on that (conflicts defaults
+// to abort), leaving is_latest set on MORE than one version — a stale version
+// could be served as "latest" by LatestPerSlug search until the next write of
+// the slug. Observed in prod ~33×/day, mostly on high-churn slugs racing
+// themselves (mcp-feed-watermark). Now the flags are written in ONE
+// conflict-tolerant update-by-query, retried with backoff while conflicts
+// remain, re-reading the version list from Postgres each attempt so the last
+// write always reflects the freshest state.
 func (ix *Indexer) UpdateLatestFlags(ctx context.Context, slug string) {
 	if ix == nil || slug == "" {
 		return
 	}
-	versions, err := ix.store.Versions(ctx, slug)
-	if err != nil {
-		ix.logger.Warn("opensearch: fetch versions for latest flags", "slug", slug, "err", err)
-		return
-	}
-
-	if len(versions) == 0 {
-		// All versions are archived/deleted. Clear is_latest on every
-		// indexed document for this slug via a scripted update-by-query.
-		ubqPath := "/" + IndexName + "/_update_by_query"
-		ubqBody := map[string]any{
-			"script": map[string]any{
-				"source": "ctx._source.is_latest = false",
-				"lang":   "painless",
-			},
-			"query": map[string]any{
-				"term": map[string]any{"named_slug": slug},
-			},
+	for attempt := 0; ; attempt++ {
+		versions, err := ix.store.Versions(ctx, slug)
+		if err != nil {
+			ix.logger.Warn("opensearch: fetch versions for latest flags", "slug", slug, "err", err)
+			return
 		}
-		resp, uerr := ix.client.do(ctx, "POST", ubqPath, ubqBody)
-		if uerr != nil {
-			ix.logger.Warn("opensearch: update-by-query for archived slug", "slug", slug, "err", uerr)
-		} else if _, berr := readBody(resp); berr != nil {
-			ix.logger.Warn("opensearch: update-by-query for archived slug", "slug", slug, "err", berr)
+		// No live versions (all archived/deleted) ⇒ latestID "" matches no
+		// doc _id and the script clears is_latest everywhere for the slug.
+		latestID := ""
+		if len(versions) > 0 {
+			latestID = pgstore.UUIDFromPG(versions[0].ArtifactID).String()
 		}
-		return
-	}
-
-	// First, bulk-clear is_latest on ALL versions (including archived)
-	// so that stale flags on deleted versions are cleaned up.
-	ubqPath := "/" + IndexName + "/_update_by_query"
-	ubqBody := map[string]any{
-		"script": map[string]any{
-			"source": "ctx._source.is_latest = false",
-			"lang":   "painless",
-		},
-		"query": map[string]any{
-			"bool": map[string]any{
-				"filter": []any{
-					map[string]any{"term": map[string]any{"named_slug": slug}},
-					map[string]any{"term": map[string]any{"is_latest": true}},
-				},
-			},
-		},
-	}
-	resp, uerr := ix.client.do(ctx, "POST", ubqPath, ubqBody)
-	if uerr != nil {
-		ix.logger.Warn("opensearch: clear is_latest for slug", "slug", slug, "err", uerr)
-	} else if _, berr := readBody(resp); berr != nil {
-		ix.logger.Warn("opensearch: clear is_latest for slug", "slug", slug, "err", berr)
-	}
-
-	// Then set is_latest=true only on the highest live version.
-	latestID := pgstore.UUIDFromPG(versions[0].ArtifactID).String()
-	path := "/" + IndexName + "/_update/" + latestID
-	body := map[string]any{
-		"doc":           map[string]any{"is_latest": true},
-		"doc_as_upsert": false,
-	}
-	resp, uerr = ix.client.do(ctx, "POST", path, body)
-	if uerr != nil {
-		ix.logger.Warn("opensearch: set is_latest on latest version", "slug", slug, "id", latestID, "err", uerr)
-	} else if _, berr := readBody(resp); berr != nil {
-		// Check the HTTP status (not just transport error): a 4xx/5xx here
-		// would otherwise be silently swallowed, leaving the slug with no
-		// is_latest doc and hidden from LatestPerSlug search.
-		ix.logger.Warn("opensearch: set is_latest on latest version", "slug", slug, "id", latestID, "err", berr)
+		conflicts, err := ix.client.SetLatestFlag(ctx, slug, latestID)
+		if err != nil {
+			ix.logger.Warn("opensearch: update latest flags", "slug", slug, "err", err)
+			return
+		}
+		if conflicts == 0 {
+			return
+		}
+		if attempt == latestFlagAttempts-1 {
+			ix.logger.Warn("opensearch: update latest flags: version conflicts persisted",
+				"slug", slug, "attempts", latestFlagAttempts, "conflicts", conflicts)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(latestFlagBackoff << attempt):
+		}
 	}
 }
 

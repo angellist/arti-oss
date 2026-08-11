@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -53,7 +55,7 @@ func BuildManifest(zipBytes []byte) (Manifest, error) {
 			Path:        f.Name,
 			Size:        int64(len(body)),
 			SHA256:      hex.EncodeToString(sum[:]),
-			ContentType: ContentTypeOf(f.Name),
+			ContentType: ContentTypeOfBytes(f.Name, body),
 		})
 	}
 	out.EntryPoint = pickDefaultEntry(out.Entries)
@@ -161,7 +163,7 @@ func ReadEntry(zipBytes []byte, path string) ([]byte, string, error) {
 		if err != nil {
 			return nil, "", err
 		}
-		return body, ContentTypeOf(f.Name), nil
+		return body, ContentTypeOfBytes(f.Name, body), nil
 	}
 	return nil, "", fmt.Errorf("pkgzip: entry %q not found", path)
 }
@@ -198,8 +200,35 @@ func readFile(f *zip.File) ([]byte, error) {
 	return io.ReadAll(rc)
 }
 
+// ContentTypeOfBytes types a zip entry from its NAME first and its BYTES only
+// as a fallback. Extensionless files are normal inside real packages — Runlayer
+// skill files (`course-of-action-playbooks`), `LICENSE`, `Dockerfile` — and
+// name-only typing lands every one of them on `application/octet-stream`, which
+// the viewer can only offer as a download. So when the extension tells us
+// nothing, we look at the content: recognized magic bytes win (an extensionless
+// PNG is `image/png`), text becomes markdown-or-plain, and only genuinely
+// unrecognized bytes stay octet-stream.
+//
+// A known extension always beats the sniff — `.md` is markdown even if the file
+// is empty, and we never let a stray `<html` opening line retype a `.txt`.
+func ContentTypeOfBytes(name string, body []byte) string {
+	ct := ContentTypeOf(name)
+	if ct != octetStream {
+		return ct
+	}
+	// http.DetectContentType reads at most the first 512 bytes and returns
+	// octet-stream itself when nothing matches, so this can only ever improve
+	// on the name-based answer.
+	sniffed := http.DetectContentType(body)
+	if strings.HasPrefix(sniffed, "text/plain") {
+		return SniffTextContentType(body)
+	}
+	return sniffed
+}
+
 // ContentTypeOf guesses a MIME type from a filename's extension. Falls
 // back through stdlib `mime` and then to `application/octet-stream`.
+// Prefer ContentTypeOfBytes wherever the entry's bytes are at hand.
 func ContentTypeOf(name string) string {
 	ext := strings.ToLower(filepath.Ext(name))
 	switch ext {
@@ -225,7 +254,37 @@ func ContentTypeOf(name string) string {
 	if ct := mime.TypeByExtension(ext); ct != "" {
 		return ct
 	}
-	return "application/octet-stream"
+	return octetStream
+}
+
+const octetStream = "application/octet-stream"
+
+// markdownLine matches a line carrying a strong, unambiguous markdown signal:
+// an ATX heading, an unordered or ordered list item, or a blockquote. The
+// trailing space matters — it's what distinguishes `- item` from the
+// `-rw-r--r--` of an `ls -l` dump.
+var markdownLine = regexp.MustCompile(`(?m)^\s{0,3}(#{1,6} |[-*+] |\d+\. |> )`)
+
+// markdownInline matches a fenced code block or a `[text](url)` link. Bold
+// (`**`) is deliberately excluded — too common in plain console output.
+var markdownInline = regexp.MustCompile("```|\\[[^\\]]+\\]\\([^)]+\\)")
+
+// SniffTextContentType splits text bytes into markdown vs plain. Plain text is
+// the safe default — it still renders inline in the viewer, just in a <pre> —
+// so we upgrade to markdown only on a clear structural signal.
+//
+// cmd/arti's sniffStdinMIME answers the same question for piped stdin and
+// MIRRORS this rather than importing it, because cmd/arti deliberately depends
+// on no internal package. That mirror is not left to trust: cmd/arti's
+// TestSniffStdinMIME_MatchesPkgzip (a test-only import, so the CLI binary's
+// dependency graph is unaffected) fails if the two ever disagree. Exported for
+// exactly that assertion.
+func SniffTextContentType(body []byte) string {
+	s := string(body)
+	if markdownLine.MatchString(s) || markdownInline.MatchString(s) {
+		return "text/markdown"
+	}
+	return "text/plain"
 }
 
 // IsJunk reports whether a zip entry is macOS-only metadata that

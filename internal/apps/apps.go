@@ -16,8 +16,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -118,17 +120,22 @@ type Service struct {
 	tokens     TokenProvider // may be nil (no OBO wired)
 	completer  Completer     // may be nil (no llm wired)
 	artiReader ArtiReader    // may be nil (arti reads fall back to OBO)
+	logger     *slog.Logger
+	rejects    rejectSampler
 }
 
 // SetArtiReader wires the in-process arti read path (see ArtiReader). Optional;
 // when unset, arti read tools take the OBO path like any other server.
 func (s *Service) SetArtiReader(r ArtiReader) { s.artiReader = r }
 
-func New(art *pgstore.Store, signer *auth.JWTSigner, servers map[string]ServerConfig, tokens TokenProvider, completer Completer) *Service {
+func New(art *pgstore.Store, signer *auth.JWTSigner, servers map[string]ServerConfig, tokens TokenProvider, completer Completer, logger *slog.Logger) *Service {
 	if servers == nil {
 		servers = map[string]ServerConfig{}
 	}
-	return &Service{art: art, signer: signer, mcp: mcpclient.New(), servers: servers, tokens: tokens, completer: completer}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{art: art, signer: signer, mcp: mcpclient.New(), servers: servers, tokens: tokens, completer: completer, logger: logger}
 }
 
 // SignAppToken mints the scoped token injected into a served APP page. Wired to
@@ -254,12 +261,17 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	claims, err := s.signer.Verify(tok)
 	if err != nil {
+		// claims.Email is set when the token is expired-but-authentic (Verify
+		// checks the signature before expiry), turning an anonymous 401 stream
+		// into "this person's open tab needs a refresh". Empty otherwise.
+		s.logReject(r, http.StatusUnauthorized, "invalid app token: "+err.Error(), claims.Email)
 		writeErr(w, http.StatusUnauthorized, "invalid app token")
 		return
 	}
 	email := claims.Email
 	scopedApp := appOf(claims)
 	if email == "" || scopedApp == "" {
+		s.logReject(r, http.StatusUnauthorized, "app token missing scope", email)
 		writeErr(w, http.StatusUnauthorized, "app token missing scope")
 		return
 	}
@@ -267,6 +279,7 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 	// whose access was pulled must not keep driving OBO tool calls until the
 	// 12h token expires.
 	if !auth.IsAllowed(email) {
+		s.logReject(r, http.StatusForbidden, "email not in allowlist", email)
 		writeErr(w, http.StatusForbidden, "not permitted")
 		return
 	}
@@ -527,6 +540,57 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"detail": msg, "code": http.StatusText(code)})
+}
+
+// Rejection-log sampling: at most rejectLogBurst lines per rejectLogWindow,
+// so a brute force against the proxy cannot turn its own rejections into a
+// log flood. The observed benign case (a stale browser tab polling on a 60s
+// timer) is far below the cap and always logged.
+const (
+	rejectLogWindow = time.Minute
+	rejectLogBurst  = 10
+)
+
+type rejectSampler struct {
+	mu        sync.Mutex
+	windowEnd time.Time
+	n         int
+}
+
+// allow reports whether a rejection may be logged now. note is true exactly
+// once per window, on the first suppressed line, so the log records that
+// sampling kicked in without repeating itself.
+func (rs *rejectSampler) allow(now time.Time) (ok, note bool) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if now.After(rs.windowEnd) {
+		rs.windowEnd = now.Add(rejectLogWindow)
+		rs.n = 0
+	}
+	rs.n++
+	return rs.n <= rejectLogBurst, rs.n == rejectLogBurst+1
+}
+
+// logReject records an authentication rejection on the apps proxy. The access
+// log line for these requests carries no identity, IP, or user-agent, so
+// without this a stream of 401s is unattributable (observed in prod: 61/24h,
+// one per minute — an open tab whose 12h app token had expired, but nobody
+// could prove that). email may be empty when the token never carried one.
+// Never logs the token itself.
+func (s *Service) logReject(r *http.Request, status int, reason, email string) {
+	ok, note := s.rejects.allow(time.Now())
+	if note {
+		s.logger.Warn("apps proxy: rejection log rate exceeded, sampling", "window", rejectLogWindow.String())
+	}
+	if !ok {
+		return
+	}
+	// r.RemoteAddr is the client IP: the globally-registered chimid.RealIP
+	// middleware rewrites it from X-Forwarded-For / X-Real-IP before any
+	// route (same convention as embed/mint.go's audit line).
+	s.logger.Warn("apps proxy: rejected",
+		"s", status, "reason", reason, "email", email,
+		"ip", r.RemoteAddr, "ua", r.Header.Get("User-Agent"))
 }
 
 type badRequest struct{ msg string }
