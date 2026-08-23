@@ -37,6 +37,15 @@ type MCPOAuthConfig struct {
 	Signer     *JWTSigner
 	AccessTTL  time.Duration
 	RefreshTTL time.Duration
+
+	// TrustProxyHeader controls how MCPAuthorizeHandler learns the end-user
+	// identity. When true (proxy mode) the request is behind oauth2-proxy,
+	// which overwrites X-Auth-Request-Email, so that header is trustworthy.
+	// When false (oidc mode, or anything on the public ingress) the header
+	// is client-forgeable — see the C1 fix in middleware.go — so identity is
+	// taken from the arti-signed session cookie instead, exactly as every
+	// other route does. Fail closed: default false trusts no header.
+	TrustProxyHeader bool
 }
 
 // MCPRegisterHandler implements RFC 7591 Dynamic Client Registration.
@@ -182,11 +191,34 @@ func MCPAuthorizeHandler(cfg MCPOAuthConfig) http.HandlerFunc {
 			return
 		}
 
-		// Identity from the oauth2-proxy headers (validated by ingress).
-		email := strings.TrimSpace(r.Header.Get(IngressEmailHeader))
-		if email == "" {
-			writeOAuthErr(w, http.StatusUnauthorized, "access_denied", "no upstream identity — is oauth2-proxy in front?")
-			return
+		// Resolve the end-user identity. The client and redirect_uri were
+		// already validated above, so a login redirect below can't be driven
+		// by an unregistered client.
+		var email string
+		if cfg.TrustProxyHeader {
+			// Proxy mode: oauth2-proxy overwrites this header, so trust it.
+			email = strings.TrimSpace(r.Header.Get(IngressEmailHeader))
+			if email == "" {
+				writeOAuthErr(w, http.StatusUnauthorized, "access_denied", "no upstream identity — is oauth2-proxy in front?")
+				return
+			}
+		} else {
+			// oidc / public-ingress mode: X-Auth-Request-Email is forgeable
+			// here (no proxy strips it), so it is NOT consulted. Identity comes
+			// from the arti-signed session cookie; when it is absent or invalid
+			// we bounce the browser through login and return to this exact
+			// authorize request (cookie set) to mint the code. App/embed-scoped
+			// tokens are page credentials, never a session — reject them too.
+			ck, cerr := r.Cookie(CookieName)
+			if cerr == nil && ck.Value != "" && cfg.Signer != nil {
+				if c, verr := cfg.Signer.Verify(ck.Value); verr == nil && !c.IsEmbedScoped() && !c.IsAppScoped() {
+					email = strings.TrimSpace(c.Email)
+				}
+			}
+			if email == "" {
+				http.Redirect(w, r, "/auth/login?return_to="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+				return
+			}
 		}
 		if !IsAllowed(email) {
 			writeOAuthErr(w, http.StatusForbidden, "access_denied", "email domain not allowed")

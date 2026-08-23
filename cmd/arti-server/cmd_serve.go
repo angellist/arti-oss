@@ -192,6 +192,11 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		Signer:     signer,
 		AccessTTL:  7 * 24 * time.Hour,
 		RefreshTTL: 90 * 24 * time.Hour,
+		// Only trust X-Auth-Request-Email on /oauth/authorize when a real
+		// oauth2-proxy is in front (legacy "" / "proxy" modes). In oidc mode
+		// there is no proxy and the header is client-forgeable, so authorize
+		// derives identity from the signed arti_session cookie instead.
+		TrustProxyHeader: cfg.Auth.Mode == "" || cfg.Auth.Mode == "proxy",
 	}
 	// Rate-limited per client IP: public dynamic-client-registration, one DB INSERT each.
 	root.With(ipRateLimiter(cfg.Auth.OAuthRegisterRPM)).Post("/oauth/register", auth.MCPRegisterHandler(mcpOAuth))
