@@ -37,6 +37,7 @@ export default function FullPageView({
   entryPoint,
   me,
   textScale = 1,
+  commentsEnabled = true,
 }: {
   body: string;
   contentType: string;
@@ -48,11 +49,17 @@ export default function FullPageView({
   entries?: Array<{ path: string; content_type: string }>;
   entryPoint?: string | null;
   me?: Me | null;
-  // Text scale multiplier — honoured on text/markdown and text/plain views
-  // by setting --arti-text-scale on the container. Mirrors ArtifactViewer's
+  // Text scale multiplier — applied to text/markdown and text/plain views by
+  // setting --arti-text-scale on the container, and to HTML bodies as a `zoom`
+  // on the iframe element (see the html branch). Mirrors ArtifactViewer's
   // text-size control; the caller passes it from the ?ts= URL param so the
   // couch side-panel can sync it to the user's chat font-size preference.
   textScale?: number;
+  // The owner's per-doc comment switch. false → no overlay here, and none
+  // injected into the served HTML either (arti-server enforces the same flag),
+  // so the chrome-less view has no comment affordance at all. Defaults to true
+  // so a caller that doesn't know about the flag keeps today's behavior.
+  commentsEnabled?: boolean;
 }) {
   // The comments overlay mounts to <body>, so it floats above the
   // full-bleed content. For markdown it anchors into the rendered prose
@@ -60,7 +67,7 @@ export default function FullPageView({
   // arti-served iframe gets the overlay INJECTED in-page instead (full
   // text-select + pin), which the outer overlay can't do across the
   // sandbox boundary.
-  const comments = artifactID ? <CommentsLayer artifactId={artifactID} me={me} contentType={contentType} fullPage /> : null;
+  const comments = artifactID && commentsEnabled ? <CommentsLayer artifactId={artifactID} me={me} contentType={contentType} fullPage /> : null;
   const kind = fullPageKind(contentType);
   // Non-text kinds (image/pdf/binary) render from the raw same-origin bytes
   // URL — never by coercing `body` (which for these is raw bytes-as-string)
@@ -94,11 +101,8 @@ export default function FullPageView({
       <>
         {/* The iframe lives in FullPageHtmlFrame (a client component) so it can
           listen for the injected page's file-nav reports and keep ?file= in
-          sync. Dimensions: an absolutely-positioned replaced element with no
-          explicit size uses its intrinsic 300×150 (CSS 2.1 § 10.3.8), so it
-          needs `w-full` plus the explicit height in the
-          `iframe.arti-fullpage-layer` rule — it can't stretch to `bottom` the
-          way the <div> layers do. */}
+          sync. It sizes itself against a wrapper layer rather than the viewport
+          — see FullPageHtmlFrame for why that matters under zoom. */}
         <FullPageHtmlFrame
           src={src}
           srcDoc={src ? undefined : body}
@@ -106,6 +110,7 @@ export default function FullPageView({
           entries={entries}
           entryPoint={entryPoint}
           initialFile={filePath}
+          zoom={textScale}
         />
         {comments}
       </>
@@ -129,7 +134,12 @@ export default function FullPageView({
       >
         {comments}
         <article data-arti-doc className={PROSE_CLASSNAME}>
-          {frontmatter !== null ? <Frontmatter raw={frontmatter} /> : null}
+          {/* Keyed on the document, like MarkdownBody's docKey: the disclosure's
+              open/closed state lives in the DOM, so a client-side navigation to
+              another full-page doc must not inherit the previous one's. */}
+          {frontmatter !== null ? (
+            <Frontmatter key={`${artifactID ?? ""}:${filePath ?? ""}`} raw={frontmatter} />
+          ) : null}
           <div dangerouslySetInnerHTML={{ __html: html }} />
         </article>
         <MermaidRenderer />

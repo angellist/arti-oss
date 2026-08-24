@@ -108,12 +108,12 @@ func (s *Service) Aggregates(ctx context.Context, caller string) (AggregatesResp
 func (s *Service) httpAggregates(w http.ResponseWriter, r *http.Request) {
 	caller, err := s.callerForList(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeInternal(w, r, err)
 		return
 	}
 	res, err := s.Aggregates(r.Context(), caller)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeInternal(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -184,7 +184,7 @@ func (s *Service) httpBrowseAggregates(w http.ResponseWriter, r *http.Request) {
 
 	caller, err := s.callerForList(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeInternal(w, r, err)
 		return
 	}
 	// The "owner" facet shows counts across ALL artifacts regardless of who
@@ -205,7 +205,7 @@ func (s *Service) httpBrowseAggregates(w http.ResponseWriter, r *http.Request) {
 		CallerEmail: browseCallerEmail,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeInternal(w, r, err)
 		return
 	}
 	out := BrowseAggregatesResponse{Values: make([]BrowseValueCount, 0, len(res.Values)), Total: res.Total}

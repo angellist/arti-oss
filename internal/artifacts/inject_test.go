@@ -1,8 +1,14 @@
 package artifacts
 
 import (
+	"io"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/store/pgstore"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestInjectComments(t *testing.T) {
@@ -12,7 +18,7 @@ func TestInjectComments(t *testing.T) {
 	html := []byte("<html><body><h1>hi</h1></body></html>")
 
 	// injects into text/html, before </body>, with the bundle + config
-	out := string(s.injectComments(html, "text/html; charset=utf-8", "aaa", "me@x.com", "Me Test", "https://pic.example/me.jpg"))
+	out := string(s.injectComments(html, "text/html; charset=utf-8", "aaa", true, "me@x.com", "Me Test", "https://pic.example/me.jpg"))
 	if !strings.Contains(out, `src="/comments-embed.js"`) {
 		t.Fatalf("expected bundle script, got %q", out)
 	}
@@ -27,17 +33,82 @@ func TestInjectComments(t *testing.T) {
 	}
 
 	// no-ops for non-HTML
-	if got := string(s.injectComments([]byte("body"), "text/plain", "aaa", "me@x.com", "", "")); got != "body" {
+	if got := string(s.injectComments([]byte("body"), "text/plain", "aaa", true, "me@x.com", "", "")); got != "body" {
 		t.Fatalf("non-html should be untouched, got %q", got)
 	}
 	// no-ops for unauthenticated
-	if got := string(s.injectComments(html, "text/html", "aaa", "", "", "")); string(html) != got {
+	if got := string(s.injectComments(html, "text/html", "aaa", true, "", "", "")); string(html) != got {
 		t.Fatalf("no email should be untouched")
 	}
+	// no-ops when the document's owner turned commenting off — a served page
+	// must carry no comment controls at all, not merely a hidden overlay.
+	if got := string(s.injectComments(html, "text/html", "aaa", false, "me@x.com", "", "")); string(html) != got {
+		t.Fatalf("comments-disabled artifact should be untouched, got %q", got)
+	}
+
 	// no-ops when injection disabled
 	s2 := NewService(nil, "http://x", nil, nil)
-	if got := string(s2.injectComments(html, "text/html", "aaa", "me@x.com", "", "")); string(html) != got {
+	if got := string(s2.injectComments(html, "text/html", "aaa", true, "me@x.com", "", "")); string(html) != got {
 		t.Fatalf("nil embedToken should be untouched")
+	}
+}
+
+func TestInjectExternalLinkHandler(t *testing.T) {
+	html := []byte("<html><body><a href=\"https://example.com\">link</a></body></html>")
+	out := string(injectExternalLinkHandler(html, "text/html; charset=utf-8", "/api/artifacts/aaa/files/"))
+	if !strings.Contains(out, `source:"arti-open-external"`) {
+		t.Fatalf("expected external link handler, got %q", out)
+	}
+	if !strings.Contains(out, `window.open(u.href,"_blank")`) || !strings.Contains(out, "w.opener=null") {
+		t.Fatalf("expected opener-safe new-tab fallback, got %q", out)
+	}
+	if strings.Index(out, "arti-open-external") > strings.Index(out, "</body>") {
+		t.Fatalf("handler must be injected before </body>")
+	}
+
+	if got := string(injectExternalLinkHandler([]byte("body"), "text/plain", "/api/artifacts/aaa/files/")); got != "body" {
+		t.Fatalf("non-html should be untouched, got %q", got)
+	}
+}
+
+func TestInjectExternalLinkHandlerKeepsParentRelativePackageLinks(t *testing.T) {
+	html := []byte(`<html><head><base href="/nested/"></head><body></body></html>`)
+	for _, root := range []string{
+		"/api/artifacts/aaa/files/",
+		"/api/artifacts/aaa/files-token/tok/",
+		"/embed/demo/_files/tok/",
+	} {
+		t.Run(root, func(t *testing.T) {
+			out := string(injectExternalLinkHandler(html, "text/html", root))
+			if !strings.Contains(out, `var r="`+root+`"`) {
+				t.Fatalf("handler should carry content root %q, got %q", root, out)
+			}
+			if strings.Contains(out, `new URL(".",document.baseURI)`) {
+				t.Fatalf("handler must not infer content root from document.baseURI, got %q", out)
+			}
+		})
+	}
+}
+
+func TestInjectExternalLinkHandlerDoesNotMatchEmptyRoot(t *testing.T) {
+	out := string(injectExternalLinkHandler([]byte("<body></body>"), "text/html", ""))
+	if !strings.Contains(out, `if(r&&`) {
+		t.Fatalf("empty content root must not match every path, got %q", out)
+	}
+}
+
+func TestWriteServedContentInjectsExternalLinkHandler(t *testing.T) {
+	row := sqlc.Artifact{
+		ArtifactID:   pgtype.UUID{Valid: true},
+		ArtifactType: pgstore.TypeText,
+	}
+	rec := httptest.NewRecorder()
+	s := NewService(nil, "http://x", nil, nil)
+
+	s.writeServedContent(rec, io.NopCloser(strings.NewReader("<html><body>links</body></html>")), "text/html", row, "", "", "", true)
+
+	if !strings.Contains(rec.Body.String(), `source:"arti-open-external"`) {
+		t.Fatalf("served standalone HTML should carry external link handler, got %q", rec.Body.String())
 	}
 }
 

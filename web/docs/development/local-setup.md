@@ -79,7 +79,7 @@ cp .env.example .env
 | Key | Dev value | Notes |
 | --- | --- | --- |
 | `ARTI_ADDR` | `:8095` | Where the Go binary listens (`:8090` collides with couch on the dev box). |
-| `ARTI_BASE_URL` | `http://localhost:3031` | Canonical hostname stamped into emitted URLs, and the CLI's default endpoint. Points at the Next dev server, which rewrites `/api/*` + `/auth/*` back to `:8095`. |
+| `ARTI_BASE_URL` | `http://localhost:3031` | Canonical hostname stamped into emitted URLs, and the CLI's default endpoint. Points at the Next dev server, which forwards `/api/*` + `/auth/*` back to `:8095` (`web/middleware.ts`). |
 | `ARTI_DATABASE_URL` | `postgres://postgres:postgres@localhost:5436/arti_dev?sslmode=disable` | Dev Postgres. |
 | `S3_ENDPOINT` | `http://localhost:9210` | MinIO. Unset in prod to hit AWS S3. |
 | `S3_BUCKET` | `arti-dev` | Created by the compose `minio-init` sidecar. |
@@ -126,7 +126,7 @@ NEXT_PUBLIC_ARTI_AUTH_DISABLED=true PORT=3031 npm run dev
 
 `npm run dev` is `next dev` (Next 16). Setting `NEXT_PUBLIC_ARTI_AUTH_DISABLED=true`
 matches the server's `ARTI_AUTH_DISABLED=true` so the catalog page renders
-instead of redirecting to `/login`. `web/next.config.ts` rewrites `/api/*` and
+instead of redirecting to `/login`. `web/middleware.ts` forwards `/api/*` and
 `/auth/*` from the Next dev server back to `arti-server` on `:8095`, so visiting
 `http://localhost:3031/` gives you a working catalog + viewer talking to the Go
 API.

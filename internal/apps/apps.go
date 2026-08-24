@@ -27,6 +27,7 @@ import (
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
 	"github.com/angellist/arti-oss/internal/auth"
+	"github.com/angellist/arti-oss/internal/httperr"
 	"github.com/angellist/arti-oss/internal/mcpclient"
 	"github.com/angellist/arti-oss/internal/pkgzip"
 	"github.com/angellist/arti-oss/internal/rbac"
@@ -47,8 +48,29 @@ const (
 	// cannot authenticate — so it is marked, minted with a shorter TTL, and
 	// audit-logged, enabling monitoring and a targeted kill-switch without
 	// touching /app tokens.
-	embedUserScope    = "embed-user"
+	embedUserScope = "embed-user"
+	// embedViewerScope marks a token minted by the viewer-mode embed handshake
+	// for a DOCUMENT render. Deliberately distinct from embedUserScope so that
+	// VerifyEmbedViewerToken can reject an APP token: without it, any token
+	// carrying an app scope would authorize a viewer document render, which is the
+	// one direction that must not happen (a document render has no second gate).
+	//
+	// The reverse direction is INTENTIONALLY open. handleMCP accepts any authentic
+	// token with an email and an app scope, so a viewer token minted for an APP
+	// artifact does authorize tool calls on that same app. That is wanted: an APP
+	// embedded in viewer mode must keep working, and the token grants exactly what
+	// that viewer would get from a user-mode surface — same identity, same app,
+	// same consent click. Narrowing it here would break APP embeds. See
+	// TestEmbedViewerToken_ScopeSeparation, which pins both halves.
+	//
+	// Same TTL as embedUserScope.
+	embedViewerScope  = "embed-viewer"
 	embedUserTokenTTL = 8 * time.Hour
+	// embedViewerTokenTTL is deliberately much shorter than embedUserTokenTTL: a
+	// viewer token rides in a URL query parameter, so it can land in browser
+	// history, and it only has to survive the gate page's single self-reload,
+	// which happens within seconds of consent. An expired one simply re-prompts.
+	embedViewerTokenTTL = 5 * time.Minute
 	// embedFilesScopePrefix scopes a user-mode sibling-files token to one
 	// artifact (scope `app-files:<artifactID>`). It carries NO email: a
 	// user-mode surface serves static content gated on the surface secret, not
@@ -208,6 +230,94 @@ func (s *Service) MintEmbedUserToken(ctx context.Context, appID, email string) (
 		Scopes: []string{appScopePrefix + appID, embedUserScope},
 		TTL:    embedUserTokenTTL,
 	})
+}
+
+// EmbedViewerArtifact authorizes a viewer-mode embed request: it verifies email
+// can read the artifact named by ident (slug or UUID) and returns its title,
+// slug and UUID. Unlike EmbedUserApp it does NOT require an APP — viewer mode
+// gates the render of any artifact type. Denials come back as
+// pgstore.ErrNotFound so the caller can 404 without leaking existence.
+func (s *Service) EmbedViewerArtifact(ctx context.Context, ident string, ver *int32, email string) (title, slug, artifactID string, isApp bool, err error) {
+	var row sqlc.Artifact
+	if id, perr := uuid.Parse(ident); perr == nil {
+		var ok bool
+		row, ok, err = s.canRead(ctx, id, email)
+		if err != nil && !errors.Is(err, pgstore.ErrNotFound) {
+			return "", "", "", false, err
+		}
+		if err != nil || !ok {
+			return "", "", "", false, pgstore.ErrNotFound
+		}
+	} else if ver == nil {
+		// GetLatestBySlugForCaller applies the same read rule as canRead and
+		// returns ErrNotFound for both "absent" and "not yours".
+		row, err = s.art.GetLatestBySlugForCaller(ctx, ident, email)
+		if err != nil {
+			return "", "", "", false, pgstore.ErrNotFound
+		}
+	} else {
+		// A pinned version: fetch that exact row, then apply the same read rule.
+		// GetBySlug does not access-check, so canRead does it by UUID below.
+		vrow, verr := s.art.GetBySlug(ctx, ident, ver)
+		if verr != nil {
+			return "", "", "", false, pgstore.ErrNotFound
+		}
+		var ok bool
+		row, ok, err = s.canRead(ctx, pgstore.UUIDFromPG(vrow.ArtifactID), email)
+		if err != nil && !errors.Is(err, pgstore.ErrNotFound) {
+			return "", "", "", false, err
+		}
+		if err != nil || !ok {
+			return "", "", "", false, pgstore.ErrNotFound
+		}
+	}
+	if row.NamedSlug != nil {
+		slug = *row.NamedSlug
+	}
+	return row.Title, slug, pgstore.UUIDFromPG(row.ArtifactID).String(), row.ArtifactType == pgstore.TypeApp, nil
+}
+
+// MintEmbedViewerToken mints the short-TTL, embed-viewer-marked token the
+// viewer-mode gate page reloads itself with. Re-checks read access here; the
+// mint handler owns the human consent gate and the audit log around it.
+func (s *Service) MintEmbedViewerToken(ctx context.Context, artifactID, email string) (string, error) {
+	// artifactID is a UUID, so this resolve is already version-exact.
+	if _, _, _, _, err := s.EmbedViewerArtifact(ctx, artifactID, nil, email); err != nil {
+		return "", err
+	}
+	return s.signer.Sign(auth.Claims{
+		Email:  email,
+		Scopes: []string{appScopePrefix + artifactID, embedViewerScope},
+		TTL:    embedViewerTokenTTL,
+	})
+}
+
+// VerifyEmbedViewerToken verifies a token minted by MintEmbedViewerToken and
+// returns the viewer email + artifact id it is scoped to. It REQUIRES the
+// embed-viewer scope, so an APP token (embed-user, or a plain SignAppToken
+// token) is rejected here even though it carries the same app scope shape.
+func (s *Service) VerifyEmbedViewerToken(tok string) (email, artifactID string, err error) {
+	claims, verr := s.signer.Verify(tok)
+	if verr != nil {
+		return "", "", verr
+	}
+	if !hasScope(claims, embedViewerScope) {
+		return "", "", errors.New("token missing embed-viewer scope")
+	}
+	app := appOf(claims)
+	if claims.Email == "" || app == "" {
+		return "", "", errors.New("token missing app scope")
+	}
+	return claims.Email, app, nil
+}
+
+func hasScope(c auth.Claims, want string) bool {
+	for _, sc := range c.Scopes {
+		if sc == want {
+			return true
+		}
+	}
+	return false
 }
 
 // SignEmbedFilesToken mints the sibling-files credential for a user-mode embed
@@ -433,7 +543,7 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if callErr != nil {
-		writeErr(w, http.StatusBadGateway, "upstream: "+callErr.Error())
+		s.writeUpstreamErr(w, r, req.Server, req.Tool, callErr)
 		return
 	}
 	if len(result) == 0 {
@@ -540,6 +650,26 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"detail": msg, "code": http.StatusText(code)})
+}
+
+// writeUpstreamErr answers a failed tools/call. The detail goes in the response
+// body, which nothing stores, so the failure is also logged with the server and
+// tool that produced it: 82 of these landed in one prod day with nothing
+// recorded but a duration, and no way to tell which upstream was at fault.
+//
+// A cancelled request means the viewer closed the app mid-call, which is
+// neither an upstream nor a server fault, so it answers 499 and logs nothing. A
+// deadline is a real fault and stays logged: chi's 60s Timeout produced a
+// quarter of that prod day's failures, and those name the slowest upstreams.
+// httperr.ClientGone draws that line.
+func (s *Service) writeUpstreamErr(w http.ResponseWriter, r *http.Request, server, tool string, err error) {
+	if httperr.ClientGone(r, err) {
+		w.WriteHeader(httperr.StatusClientClosedRequest)
+		return
+	}
+	s.logger.Error("apps proxy: upstream failed",
+		"server", server, "tool", tool, "err", err)
+	writeErr(w, http.StatusBadGateway, "upstream: "+err.Error())
 }
 
 // Rejection-log sampling: at most rejectLogBurst lines per rejectLogWindow,

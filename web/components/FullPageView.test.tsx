@@ -80,6 +80,32 @@ describe("FullPageView", () => {
     expect(html).not.toContain("allow-same-origin");
   });
 
+  // An HTML body renders in a sandboxed opaque-origin iframe, so --arti-text-scale
+  // can't reach it: the scale is `zoom` on the frame ELEMENT. Keeping it out
+  // here (rather than on the URL or injected into the bytes) is what makes it
+  // survive an in-content navigation to a sibling package file.
+  it("scales an HTML body by zooming the frame element, leaving its URL alone", () => {
+    const html = renderToStaticMarkup(
+      <FullPageView body="<h1>hi</h1>" contentType="text/html" title="dash" artifactID={ID} textScale={0.85} />,
+    );
+    expect(html).toContain("zoom:0.85");
+    // Unitless, not "0.85px" — React must treat zoom as a unitless property.
+    expect(html).not.toContain("zoom:0.85px");
+    // The served URL is untouched, so the CSP hint is the only query it carries.
+    expect(html).toContain(`/api/artifacts/${ID}?ctx=fullpage"`);
+    // The frame fills a wrapper layer; a viewport-unit height would be scaled
+    // by the zoom and leave a strip of background along the bottom.
+    expect(html).toContain('class="arti-fullpage-layer bg-white"');
+    expect(html).toContain("h-full w-full");
+  });
+
+  it("emits no zoom at the default scale", () => {
+    const html = renderToStaticMarkup(
+      <FullPageView body="<h1>hi</h1>" contentType="text/html" title="dash" artifactID={ID} textScale={1} />,
+    );
+    expect(html).not.toContain("zoom");
+  });
+
   it("renders a package image from its per-file URL, never the zip", () => {
     const html = renderToStaticMarkup(
       <FullPageView body="" contentType="image/png" title="chart" artifactID={ID} filePath="assets/chart.png" />,

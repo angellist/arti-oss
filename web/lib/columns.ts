@@ -328,13 +328,43 @@ export function widthOf(prefs: ColumnPrefs, key: ColumnKey): number {
   return prefs.widths[key] ?? BY_KEY.get(key)?.width ?? 160;
 }
 
-/** The columns to render, in order. */
-export function visibleColumns(prefs: ColumnPrefs): ColumnDef[] {
+/**
+ * Columns the single-slug drill-in shows whatever the stored prefs say.
+ *
+ * That view is one document's version history, and "which version did the
+ * discussion happen on?" is a question it exists to answer — a count only
+ * visible to people who went hunting in the column menu answers it for nobody.
+ * Pinning is per-view and never writes to prefs: a user who keeps `comments`
+ * off in the catalog still gets it here, and still has it off on the way back.
+ */
+export const SLUG_VIEW_PINNED: readonly ColumnKey[] = ["comments"];
+
+/**
+ * The columns to render, in order.
+ *
+ * `pinned` forces columns visible for one view without touching the user's
+ * stored prefs (see SLUG_VIEW_PINNED). A pinned column keeps its place in the
+ * user's order and its user width — it is unhidden, not relocated.
+ */
+export function visibleColumns(
+  prefs: ColumnPrefs,
+  pinned: readonly ColumnKey[] = [],
+): ColumnDef[] {
   const hidden = new Set(prefs.hidden);
-  return prefs.order
+  for (const k of pinned) hidden.delete(k);
+  const out = prefs.order
     .filter((k) => !hidden.has(k))
     .map((k) => BY_KEY.get(k))
     .filter((c): c is ColumnDef => !!c);
+  // Normalized prefs always list every known column, so this only fires for a
+  // hand-built prefs object. Still worth it: a pin that silently renders
+  // nothing is worse than one appended out of position.
+  for (const k of pinned) {
+    if (out.some((c) => c.key === k)) continue;
+    const def = BY_KEY.get(k);
+    if (def) out.push(def);
+  }
+  return out;
 }
 
 export function isVisible(prefs: ColumnPrefs, key: ColumnKey): boolean {

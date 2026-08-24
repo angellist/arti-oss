@@ -24,27 +24,28 @@ type ApiKey struct {
 }
 
 type Artifact struct {
-	ArtifactID    pgtype.UUID
-	ArtifactType  string
-	NamedSlug     *string
-	Version       *int32
-	Title         string
-	Description   *string
-	ContentType   string
-	InlineContent []byte
-	BlobRef       *string
-	SHA256        *string
-	SizeBytes     *int64
-	Creator       string
-	Scope         *string
-	Labels        []string
-	Metadata      json.RawMessage
-	CreatedAt     pgtype.Timestamptz
-	ModifiedAt    pgtype.Timestamptz
-	DeletedAt     pgtype.Timestamptz
-	AllowedAccess []string
-	Scopes        []string
-	AllowedWrite  []string
+	ArtifactID      pgtype.UUID
+	ArtifactType    string
+	NamedSlug       *string
+	Version         *int32
+	Title           string
+	Description     *string
+	ContentType     string
+	InlineContent   []byte
+	BlobRef         *string
+	SHA256          *string
+	SizeBytes       *int64
+	Creator         string
+	Scope           *string
+	Labels          []string
+	Metadata        json.RawMessage
+	CreatedAt       pgtype.Timestamptz
+	ModifiedAt      pgtype.Timestamptz
+	DeletedAt       pgtype.Timestamptz
+	AllowedAccess   []string
+	Scopes          []string
+	AllowedWrite    []string
+	CommentsEnabled bool
 }
 
 type Comment struct {
@@ -179,6 +180,40 @@ type RoleAssignment struct {
 	CreatedAt     pgtype.Timestamptz
 }
 
+type ShareLink struct {
+	ID           pgtype.UUID
+	TokenHash    []byte
+	TokenPrefix  string
+	ArtifactID   pgtype.UUID
+	Slug         *string
+	CreatedBy    string
+	Note         string
+	CreatedAt    pgtype.Timestamptz
+	ExpiresAt    pgtype.Timestamptz
+	RevokedAt    pgtype.Timestamptz
+	RevokedBy    *string
+	LastOpenedAt pgtype.Timestamptz
+	OpenCount    int64
+	AnchorOwner  string
+}
+
+type ShareLinkOpen struct {
+	ID        pgtype.UUID
+	LinkID    pgtype.UUID
+	At        pgtype.Timestamptz
+	Ip        string
+	PeerAddr  string
+	UserAgent string
+}
+
+type User struct {
+	Email   string
+	Kind    string
+	Note    string
+	AddedBy string
+	AddedAt pgtype.Timestamptz
+}
+
 type UserGroup struct {
 	Name        string
 	DisplayName string
@@ -186,4 +221,10 @@ type UserGroup struct {
 	CreatedBy   string
 	CreatedAt   pgtype.Timestamptz
 	ModifiedAt  pgtype.Timestamptz
+}
+
+type UserIdpGroup struct {
+	Email      string
+	Groups     []string
+	CapturedAt pgtype.Timestamptz
 }

@@ -35,6 +35,13 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/node_modules ./node_modules
 EXPOSE 3030
 ENV PORT=3030
+# `npm run start` prints npm's own "New major version of npm available!" block
+# on stderr a few seconds after boot. It is plain text, so Datadog assigns its
+# status from the stream and every line becomes an ERROR event: 300 of the 564
+# ERROR events arti produced in a week, none of them a fault, four per pod
+# start. The notifier's registry check is async, which is why only a long-lived
+# process like `next start` lives long enough to print it.
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:3030/login || exit 1
 CMD ["npm", "run", "start"]

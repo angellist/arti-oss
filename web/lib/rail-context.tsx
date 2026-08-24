@@ -21,13 +21,47 @@ export type RailMode =
 const ModeCtx = createContext<RailMode>({ kind: "search" });
 const SetModeCtx = createContext<(m: RailMode) => void>(() => {});
 
+// Whether the catalog's reveal-on-demand search bar is open. The bar itself
+// lives in CatalogTable, but the rail's SEARCH item opens it too, and the rail
+// is a sibling of the page — so the flag has to live in the shell that spans
+// both. It is deliberately NOT derived from the URL: `find=1` is UI-only (the
+// server query ignores it, see lib/catalog.ts), so routing through
+// router.push() just to show a text input made every `/` keypress wait on a
+// full force-dynamic re-render of the catalog — the listArtifacts + getMe round
+// trip — before the box appeared. The URL is still kept in sync, but shallowly
+// (window.history.replaceState, the same native-history route
+// PackageRailProvider uses below), which updates useSearchParams without
+// re-running the server component.
+//
+// Living in the shell means the flag survives a doc visit and back, which
+// matches how `find=1` behaved and how the rail's sticky type/q filter behaves.
+const SearchBarOpenCtx = createContext(false);
+const SetSearchBarOpenCtx = createContext<(open: boolean) => void>(() => {});
+
 export function RailModeShell({ children }: { children: React.ReactNode }) {
   const [mode, setMode] = useState<RailMode>({ kind: "search" });
+  const [searchBarOpen, setSearchBarOpen] = useState(false);
   return (
     <SetModeCtx.Provider value={setMode}>
-      <ModeCtx.Provider value={mode}>{children}</ModeCtx.Provider>
+      <ModeCtx.Provider value={mode}>
+        <SetSearchBarOpenCtx.Provider value={setSearchBarOpen}>
+          <SearchBarOpenCtx.Provider value={searchBarOpen}>
+            {children}
+          </SearchBarOpenCtx.Provider>
+        </SetSearchBarOpenCtx.Provider>
+      </ModeCtx.Provider>
     </SetModeCtx.Provider>
   );
+}
+
+/** Is the catalog's search bar open? (CatalogTable) */
+export function useSearchBarOpen(): boolean {
+  return useContext(SearchBarOpenCtx);
+}
+
+/** Open/close the catalog's search bar. Stable across renders. */
+export function useSetSearchBarOpen(): (open: boolean) => void {
+  return useContext(SetSearchBarOpenCtx);
 }
 
 export function useRailMode(): RailMode {

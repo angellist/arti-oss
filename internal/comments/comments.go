@@ -183,32 +183,41 @@ func (s *Service) embedAuth(next http.Handler) http.Handler {
 
 // canRead mirrors the artifact read rule: admins always; otherwise the
 // caller must pass the artifact's access patterns (and archived versions
-// are visible only to their creator).
-func (s *Service) canRead(ctx context.Context, artifactID uuid.UUID, caller string) (bool, error) {
+// are visible only to their creator). Returns the row too, so callers can
+// consult the per-doc comment switch without a second fetch.
+func (s *Service) canRead(ctx context.Context, artifactID uuid.UUID, caller string) (sqlc.Artifact, bool, error) {
 	row, err := s.art.GetByID(ctx, artifactID)
 	if err != nil {
-		return false, err
+		return sqlc.Artifact{}, false, err
 	}
 	if ok, err := s.art.HasPermission(ctx, caller, rbac.ManageArtifacts); err != nil {
-		return false, err
+		return sqlc.Artifact{}, false, err
 	} else if ok {
-		return true, nil
+		return row, true, nil
 	}
 	if row.DeletedAt.Valid && !strings.EqualFold(row.Creator, caller) {
-		return false, nil
+		return row, false, nil
 	}
 	groups, err := s.art.CallerGroups(ctx, caller)
 	if err != nil {
-		return false, err
+		return sqlc.Artifact{}, false, err
 	}
-	return pgstore.CanAccess(row, caller, groups), nil
+	return row, pgstore.CanAccess(row, caller, groups), nil
 }
 
 // ─── handlers ────────────────────────────────────────────────────────
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := s.gateArtifact(w, r, chi.URLParam(r, "id"))
+	id, row, _, ok := s.gateArtifact(w, r, chi.URLParam(r, "id"))
 	if !ok {
+		return
+	}
+	// Comments off → report none. The threads are still in the table (turning
+	// the switch back on restores them), they are simply not part of the
+	// document while it's closed — so nothing renders and no reply affordance
+	// appears anywhere, including in already-loaded pages that re-poll.
+	if !row.CommentsEnabled {
+		writeJSON(w, http.StatusOK, ListResponse{Threads: []Thread{}})
 		return
 	}
 	out, err := s.fetchThreads(r.Context(), id, true)
@@ -254,19 +263,27 @@ func (s *Service) fetchThreads(ctx context.Context, artifactID uuid.UUID, includ
 // pgstore.ErrNotFound when the caller can't read the artifact. Read-only — used
 // by the MCP surface.
 func (s *Service) ListForCaller(ctx context.Context, artifactID uuid.UUID, caller string, includeResolved bool) (ListResponse, error) {
-	ok, err := s.canRead(ctx, artifactID, caller)
+	row, ok, err := s.canRead(ctx, artifactID, caller)
 	if err != nil {
 		return ListResponse{}, err
 	}
 	if !ok {
 		return ListResponse{}, pgstore.ErrNotFound
 	}
+	// Same rule the HTTP list path applies: a document with commenting turned
+	// off has no threads, so the MCP surface can't read around the switch.
+	if !row.CommentsEnabled {
+		return ListResponse{Threads: []Thread{}}, nil
+	}
 	return s.fetchThreads(ctx, artifactID, includeResolved)
 }
 
 func (s *Service) create(w http.ResponseWriter, r *http.Request) {
-	id, caller, ok := s.gateArtifact(w, r, chi.URLParam(r, "id"))
+	id, row, caller, ok := s.gateArtifact(w, r, chi.URLParam(r, "id"))
 	if !ok {
+		return
+	}
+	if commentsOff(w, row) {
 		return
 	}
 	var req createReq
@@ -617,27 +634,42 @@ func (s *Service) deleteComment(w http.ResponseWriter, r *http.Request) {
 
 // ─── gating helpers ──────────────────────────────────────────────────
 
-// gateArtifact parses the artifact id, resolves the caller, and enforces
-// read access. Returns ok=false (and writes the response) on any failure.
-func (s *Service) gateArtifact(w http.ResponseWriter, r *http.Request, idStr string) (uuid.UUID, string, bool) {
+// gateArtifact parses the artifact id, resolves the caller, and enforces read
+// access, returning the artifact row so the handler can also consult the
+// per-doc comment switch. Returns ok=false (and writes the response) on any
+// failure.
+func (s *Service) gateArtifact(w http.ResponseWriter, r *http.Request, idStr string) (uuid.UUID, sqlc.Artifact, string, bool) {
 	id, err := uuid.Parse(idStr)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad artifact id")
-		return uuid.UUID{}, "", false
+		return uuid.UUID{}, sqlc.Artifact{}, "", false
 	}
 	if ea, ok := r.Context().Value(embedArtifactKey{}).(string); ok && ea != id.String() {
 		// embed token is scoped to a single artifact — refuse others
 		writeErr(w, http.StatusNotFound, "not found")
-		return uuid.UUID{}, "", false
+		return uuid.UUID{}, sqlc.Artifact{}, "", false
 	}
 	caller := auth.EmailFromContext(r.Context())
-	allowed, err := s.canRead(r.Context(), id, caller)
+	row, allowed, err := s.canRead(r.Context(), id, caller)
 	if err != nil || !allowed {
 		// 404 (not 403) so callers can't probe restricted artifacts.
 		writeErr(w, http.StatusNotFound, "not found")
-		return uuid.UUID{}, "", false
+		return uuid.UUID{}, sqlc.Artifact{}, "", false
 	}
-	return id, caller, true
+	return id, row, caller, true
+}
+
+// commentsOff writes a 403 and reports true when the document's owner has
+// turned commenting off. Every mutating handler runs this after its read gate,
+// so a stale page (or a direct API call) can't write to a closed document.
+// 403 — not 404 — because the artifact itself is readable; only commenting is
+// closed, and saying so is what lets the client explain it.
+func commentsOff(w http.ResponseWriter, row sqlc.Artifact) bool {
+	if row.CommentsEnabled {
+		return false
+	}
+	writeErr(w, http.StatusForbidden, "commenting is turned off for this document")
+	return true
 }
 
 func (s *Service) gateThread(w http.ResponseWriter, r *http.Request) (sqlc.CommentThread, string, bool) {
@@ -656,9 +688,16 @@ func (s *Service) gateThread(w http.ResponseWriter, r *http.Request) (sqlc.Comme
 		return sqlc.CommentThread{}, "", false
 	}
 	caller := auth.EmailFromContext(r.Context())
-	allowed, err := s.canRead(r.Context(), uuidFrom(t.ArtifactID), caller)
+	row, allowed, err := s.canRead(r.Context(), uuidFrom(t.ArtifactID), caller)
 	if err != nil || !allowed {
 		writeErr(w, http.StatusNotFound, "not found")
+		return sqlc.CommentThread{}, "", false
+	}
+	// Every gateThread caller mutates (reply / resolve / reopen / edit /
+	// delete), so the comment switch is enforced here rather than five times
+	// over. Reads go through list() / ListForCaller, which report no threads
+	// at all when the switch is off.
+	if commentsOff(w, row) {
 		return sqlc.CommentThread{}, "", false
 	}
 	return t, caller, true

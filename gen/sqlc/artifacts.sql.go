@@ -13,7 +13,7 @@ import (
 )
 
 const getArtifact = `-- name: GetArtifact :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts WHERE artifact_id = $1
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write, comments_enabled FROM artifacts WHERE artifact_id = $1
 `
 
 func (q *Queries) GetArtifact(ctx context.Context, artifactID pgtype.UUID) (Artifact, error) {
@@ -41,12 +41,13 @@ func (q *Queries) GetArtifact(ctx context.Context, artifactID pgtype.UUID) (Arti
 		&i.AllowedAccess,
 		&i.Scopes,
 		&i.AllowedWrite,
+		&i.CommentsEnabled,
 	)
 	return i, err
 }
 
 const getArtifactBySHA = `-- name: GetArtifactBySHA :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts WHERE sha256 = $1 AND deleted_at IS NULL LIMIT 1
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write, comments_enabled FROM artifacts WHERE sha256 = $1 AND deleted_at IS NULL LIMIT 1
 `
 
 func (q *Queries) GetArtifactBySHA(ctx context.Context, sha256 *string) (Artifact, error) {
@@ -74,12 +75,13 @@ func (q *Queries) GetArtifactBySHA(ctx context.Context, sha256 *string) (Artifac
 		&i.AllowedAccess,
 		&i.Scopes,
 		&i.AllowedWrite,
+		&i.CommentsEnabled,
 	)
 	return i, err
 }
 
 const getArtifactBySlugVersion = `-- name: GetArtifactBySlugVersion :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write, comments_enabled FROM artifacts
 WHERE named_slug = $1 AND version = $2 AND deleted_at IS NULL
 `
 
@@ -113,12 +115,13 @@ func (q *Queries) GetArtifactBySlugVersion(ctx context.Context, arg GetArtifactB
 		&i.AllowedAccess,
 		&i.Scopes,
 		&i.AllowedWrite,
+		&i.CommentsEnabled,
 	)
 	return i, err
 }
 
 const getArtifactsByIDs = `-- name: GetArtifactsByIDs :many
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts WHERE artifact_id = ANY($1::uuid[])
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write, comments_enabled FROM artifacts WHERE artifact_id = ANY($1::uuid[])
 `
 
 // GetArtifactsByIDs — batch fetch by a set of IDs, used by the OpenSearch
@@ -157,6 +160,7 @@ func (q *Queries) GetArtifactsByIDs(ctx context.Context, ids []pgtype.UUID) ([]A
 			&i.AllowedAccess,
 			&i.Scopes,
 			&i.AllowedWrite,
+			&i.CommentsEnabled,
 		); err != nil {
 			return nil, err
 		}
@@ -169,7 +173,7 @@ func (q *Queries) GetArtifactsByIDs(ctx context.Context, ids []pgtype.UUID) ([]A
 }
 
 const getLatestArtifactBySlug = `-- name: GetLatestArtifactBySlug :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write, comments_enabled FROM artifacts
 WHERE named_slug = $1 AND deleted_at IS NULL
 ORDER BY version DESC
 LIMIT 1
@@ -200,12 +204,57 @@ func (q *Queries) GetLatestArtifactBySlug(ctx context.Context, namedSlug *string
 		&i.AllowedAccess,
 		&i.Scopes,
 		&i.AllowedWrite,
+		&i.CommentsEnabled,
+	)
+	return i, err
+}
+
+const getLatestArtifactBySlugAnyState = `-- name: GetLatestArtifactBySlugAnyState :one
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write, comments_enabled FROM artifacts
+WHERE named_slug = $1
+ORDER BY version DESC
+LIMIT 1
+`
+
+// GetLatestArtifactBySlugAnyState — the newest version of a slug REGARDLESS of
+// archival. Every other slug lookup filters `deleted_at IS NULL`, which is
+// right for reads: an archived doc is gone from the catalog. But version
+// numbering doesn't filter (see NextVersionForSlug), so a slug whose versions
+// are ALL archived can still be re-versioned — and the new version has to
+// inherit the document's settings from somewhere. Used only for that:
+// carrying comments_enabled forward. NOT an access-control read.
+func (q *Queries) GetLatestArtifactBySlugAnyState(ctx context.Context, namedSlug *string) (Artifact, error) {
+	row := q.db.QueryRow(ctx, getLatestArtifactBySlugAnyState, namedSlug)
+	var i Artifact
+	err := row.Scan(
+		&i.ArtifactID,
+		&i.ArtifactType,
+		&i.NamedSlug,
+		&i.Version,
+		&i.Title,
+		&i.Description,
+		&i.ContentType,
+		&i.InlineContent,
+		&i.BlobRef,
+		&i.SHA256,
+		&i.SizeBytes,
+		&i.Creator,
+		&i.Scope,
+		&i.Labels,
+		&i.Metadata,
+		&i.CreatedAt,
+		&i.ModifiedAt,
+		&i.DeletedAt,
+		&i.AllowedAccess,
+		&i.Scopes,
+		&i.AllowedWrite,
+		&i.CommentsEnabled,
 	)
 	return i, err
 }
 
 const getLatestArtifactBySlugForCaller = `-- name: GetLatestArtifactBySlugForCaller :one
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write, comments_enabled FROM artifacts
 WHERE named_slug = $1
   AND deleted_at IS NULL
   AND (
@@ -260,6 +309,7 @@ func (q *Queries) GetLatestArtifactBySlugForCaller(ctx context.Context, arg GetL
 		&i.AllowedAccess,
 		&i.Scopes,
 		&i.AllowedWrite,
+		&i.CommentsEnabled,
 	)
 	return i, err
 }
@@ -281,32 +331,34 @@ INSERT INTO artifacts (
     artifact_id, artifact_type, named_slug, version,
     title, description, content_type,
     inline_content, blob_ref, sha256, size_bytes,
-    creator, scope, scopes, labels, metadata, allowed_access, allowed_write
+    creator, scope, scopes, labels, metadata, allowed_access, allowed_write,
+    comments_enabled
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
 )
-RETURNING artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write
+RETURNING artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write, comments_enabled
 `
 
 type InsertArtifactParams struct {
-	ArtifactID    pgtype.UUID
-	ArtifactType  string
-	NamedSlug     *string
-	Version       *int32
-	Title         string
-	Description   *string
-	ContentType   string
-	InlineContent []byte
-	BlobRef       *string
-	SHA256        *string
-	SizeBytes     *int64
-	Creator       string
-	Scope         *string
-	Scopes        []string
-	Labels        []string
-	Metadata      json.RawMessage
-	AllowedAccess []string
-	AllowedWrite  []string
+	ArtifactID      pgtype.UUID
+	ArtifactType    string
+	NamedSlug       *string
+	Version         *int32
+	Title           string
+	Description     *string
+	ContentType     string
+	InlineContent   []byte
+	BlobRef         *string
+	SHA256          *string
+	SizeBytes       *int64
+	Creator         string
+	Scope           *string
+	Scopes          []string
+	Labels          []string
+	Metadata        json.RawMessage
+	AllowedAccess   []string
+	AllowedWrite    []string
+	CommentsEnabled bool
 }
 
 func (q *Queries) InsertArtifact(ctx context.Context, arg InsertArtifactParams) (Artifact, error) {
@@ -329,6 +381,7 @@ func (q *Queries) InsertArtifact(ctx context.Context, arg InsertArtifactParams) 
 		arg.Metadata,
 		arg.AllowedAccess,
 		arg.AllowedWrite,
+		arg.CommentsEnabled,
 	)
 	var i Artifact
 	err := row.Scan(
@@ -353,13 +406,14 @@ func (q *Queries) InsertArtifact(ctx context.Context, arg InsertArtifactParams) 
 		&i.AllowedAccess,
 		&i.Scopes,
 		&i.AllowedWrite,
+		&i.CommentsEnabled,
 	)
 	return i, err
 }
 
 const listArtifactVersions = `-- name: ListArtifactVersions :many
 
-SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write FROM artifacts
+SELECT artifact_id, artifact_type, named_slug, version, title, description, content_type, inline_content, blob_ref, sha256, size_bytes, creator, scope, labels, metadata, created_at, modified_at, deleted_at, allowed_access, scopes, allowed_write, comments_enabled FROM artifacts
 WHERE named_slug = $1 AND deleted_at IS NULL
 ORDER BY version DESC
 `
@@ -400,6 +454,7 @@ func (q *Queries) ListArtifactVersions(ctx context.Context, namedSlug *string) (
 			&i.AllowedAccess,
 			&i.Scopes,
 			&i.AllowedWrite,
+			&i.CommentsEnabled,
 		); err != nil {
 			return nil, err
 		}
@@ -421,6 +476,29 @@ func (q *Queries) NextVersionForSlug(ctx context.Context, namedSlug *string) (in
 	var next_version int32
 	err := row.Scan(&next_version)
 	return next_version, err
+}
+
+const slugLiveCreator = `-- name: SlugLiveCreator :one
+SELECT creator FROM artifacts
+WHERE named_slug = $1 AND deleted_at IS NULL
+ORDER BY version ASC
+LIMIT 1
+`
+
+// SlugLiveCreator returns the creator of a slug's earliest NON-ARCHIVED
+// version — who owns the slug's live lineage right now.
+//
+// This is not the same as SlugCreator, which ignores deleted_at so that
+// archiving v1 cannot transfer ownership. That is right for a continuous
+// lineage and wrong across a reuse: an all-archived slug is free for anyone to
+// claim, and after someone does, SlugCreator still names the person who walked
+// away. Share links need the live answer, because acting on the slug now means
+// acting on whatever document currently occupies it.
+func (q *Queries) SlugLiveCreator(ctx context.Context, namedSlug *string) (string, error) {
+	row := q.db.QueryRow(ctx, slugLiveCreator, namedSlug)
+	var creator string
+	err := row.Scan(&creator)
+	return creator, err
 }
 
 const softDeleteArtifact = `-- name: SoftDeleteArtifact :execrows
@@ -475,6 +553,78 @@ type UpdateArtifactAccessParams struct {
 
 func (q *Queries) UpdateArtifactAccess(ctx context.Context, arg UpdateArtifactAccessParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateArtifactAccess, arg.ArtifactID, arg.AllowedAccess, arg.AllowedWrite)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateArtifactAccessBySlug = `-- name: UpdateArtifactAccessBySlug :execrows
+UPDATE artifacts SET allowed_access = $2, allowed_write = $3
+WHERE named_slug = $1
+  AND artifact_type <> 'ATTACHMENT'
+  AND (allowed_access IS DISTINCT FROM $2 OR allowed_write IS DISTINCT FROM $3)
+`
+
+type UpdateArtifactAccessBySlugParams struct {
+	NamedSlug     *string
+	AllowedAccess []string
+	AllowedWrite  []string
+}
+
+// UpdateArtifactAccessBySlug — the slug-wide ACL chokepoint (DD-0055). Access
+// is a property of the DOCUMENT, so every version — archived included — gets
+// the same pair; excluding archived rows would let an unarchive resurrect a
+// stale ACL. The change predicate makes an identical resend report zero rows,
+// so callers can skip the N-version reindex in the steady state. Attachments
+// are structurally slugless (applyAttachmentInvariants); the type guard is
+// defensive only. modified_at is deliberately NOT bumped — this is a per-doc
+// setting, not an edit, and bumping N rows would reorder the catalog (same
+// rule as UpdateArtifactCommentsEnabledBySlug above).
+func (q *Queries) UpdateArtifactAccessBySlug(ctx context.Context, arg UpdateArtifactAccessBySlugParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateArtifactAccessBySlug, arg.NamedSlug, arg.AllowedAccess, arg.AllowedWrite)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateArtifactCommentsEnabled = `-- name: UpdateArtifactCommentsEnabled :execrows
+UPDATE artifacts SET comments_enabled = $2
+WHERE artifact_id = $1
+`
+
+type UpdateArtifactCommentsEnabledParams struct {
+	ArtifactID      pgtype.UUID
+	CommentsEnabled bool
+}
+
+// UpdateArtifactCommentsEnabled / …BySlug — the per-doc comment switch. The
+// by-slug form is what the API normally calls (including soft-deleted
+// versions, so an unarchive doesn't resurrect commenting the owner turned
+// off); the by-id form covers slugless artifacts, which have no lineage.
+// modified_at is deliberately NOT bumped: this is a per-doc setting, not an
+// edit to the document, and touching it would reorder the catalog.
+func (q *Queries) UpdateArtifactCommentsEnabled(ctx context.Context, arg UpdateArtifactCommentsEnabledParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateArtifactCommentsEnabled, arg.ArtifactID, arg.CommentsEnabled)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateArtifactCommentsEnabledBySlug = `-- name: UpdateArtifactCommentsEnabledBySlug :execrows
+UPDATE artifacts SET comments_enabled = $2
+WHERE named_slug = $1
+`
+
+type UpdateArtifactCommentsEnabledBySlugParams struct {
+	NamedSlug       *string
+	CommentsEnabled bool
+}
+
+func (q *Queries) UpdateArtifactCommentsEnabledBySlug(ctx context.Context, arg UpdateArtifactCommentsEnabledBySlugParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateArtifactCommentsEnabledBySlug, arg.NamedSlug, arg.CommentsEnabled)
 	if err != nil {
 		return 0, err
 	}

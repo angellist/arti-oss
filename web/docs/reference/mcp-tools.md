@@ -118,6 +118,7 @@ only; editing a `kind:skill` artifact also requires `MANAGE_SKILLS`.
 | `labels` | string[] | no | replaces the set; `[]` clears |
 | `allowed_access` | string[] | no | glob-on-email; `[]` → creator-only |
 | `allowed_write` | string[] | no | subset of readers allowed to write; omit → writers follow readers, `[]` → creator-only writes (unioned into `allowed_access`) |
+| `comments_enabled` | bool | no | per-DOCUMENT comment switch — applies to every version of the slug, and only the artifact's OWNER (earliest version's creator) or an admin may set it |
 
 **Returns:** the refreshed `ArtifactInfo`.
 
@@ -269,7 +270,8 @@ discovery documents (`internal/auth/wellknown.go`):
 | Step | Endpoint | Notes |
 |---|---|---|
 | 1. Register | `POST /oauth/register` | Body `{ client_name?, redirect_uris, … }`. Redirect URIs must be `https://` or `http://localhost`. Returns `client_id` (+ `client_secret` unless auth method `none`). |
-| 2. Authorize | `GET /oauth/authorize` | Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge` (S256), `code_challenge_method=S256`, `state`. The caller's identity comes from the upstream oauth2-proxy headers and is checked against the email-domain allowlist. Redirects back with a single-use `code` (10-min TTL). |
+| 2. Authorize | `GET /oauth/authorize` | Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge` (S256), `code_challenge_method=S256`, `state`. The caller's identity comes from the signed `arti_session` cookie, or from the upstream proxy headers where `ARTI_AUTH_MODE=proxy` declares a proxy overwrites them; an unidentified caller is redirected to `/auth/login` and returned here. Identity is checked against the email-domain allowlist, and against the required-groups list on the proxy path. Renders a consent page naming the client and the redirect URI; issues nothing by itself. |
+| 2b. Approve | `POST /oauth/authorize/confirm` | The consent page's submit. Carries the page's signed `consent` blob and its `SameSite=Strict` identity cookie, so only the user who was shown the page can approve it. Redirects back with a single-use `code` (10-min TTL). |
 | 3. Token | `POST /oauth/token` | `grant_type=authorization_code` with `code`, `redirect_uri`, `code_verifier`, client auth; or `grant_type=refresh_token`. Returns `{ access_token, refresh_token, token_type: "Bearer", expires_in, scope }`. |
 
 Token lifetimes (`cmd/arti-server/cmd_serve.go:227`): access **7 days**, refresh

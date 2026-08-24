@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { EmailSuggest } from "@/components/EmailSuggest";
 import type { Group } from "@/lib/types";
 import { createGroup, deleteGroup, listGroups, updateGroup } from "@/lib/arti";
 
@@ -271,18 +272,15 @@ function MembersEditor({
   return (
     <div className="rounded-md border border-neutral-200">
       <div className="flex items-center gap-2 border-b border-neutral-100 p-2">
-        <input
+        {/* Suggestions only — globs and not-yet-signed-in addresses stay
+            typeable, since membership grants to an address, not an account. */}
+        <EmailSuggest
           value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              add();
-            }
-          }}
-          placeholder="add an email or *@domain — press Enter"
+          onChange={setInput}
+          onSubmit={add}
+          exclude={members}
           disabled={busy}
-          className="min-w-0 flex-1 rounded-md border border-neutral-200 bg-white px-2 py-1 text-[13px] focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-200"
+          placeholder="add an email or *@domain — press Enter"
         />
         <button
           type="button"
@@ -302,7 +300,10 @@ function MembersEditor({
               key={m}
               className="flex items-center justify-between gap-2 px-3 py-1.5 text-[13px] text-neutral-800"
             >
-              <span className="truncate font-mono">{m}</span>
+              {/* Members are emails/globs, i.e. prose-shaped identifiers — they
+                  read better in the UI sans than in mono, which is reserved for
+                  slugs and code. */}
+              <span className="truncate font-sans">{m}</span>
               <button
                 type="button"
                 onClick={() => remove(m)}

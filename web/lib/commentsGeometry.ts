@@ -24,6 +24,64 @@ export const SHIFT_GAP = 20;
 // Keep at least this much left margin (≈ px-6).
 export const SHIFT_LMIN = 24;
 
+// The comment rail (the segmented capsule pinned to the right edge) as CSS
+// sees it, so anything else living in the right gutter can keep clear of it.
+export const RAIL_RIGHT = 8;
+export const RAIL_WIDTH = 26;
+// Gap the rail wants around itself. RAIL_FOOTPRINT is the total keep-out strip
+// measured from the viewport's right edge.
+export const RAIL_GAP = 8;
+export const RAIL_FOOTPRINT = RAIL_RIGHT + RAIL_WIDTH + RAIL_GAP;
+
+/**
+ * Left edge (px) of a collapsed-thread marker ("comment chip").
+ *
+ * The chip hugs the text — it parks just past the document's right edge, which
+ * is the LEFT side of the comment gutter, so it reads as belonging to the
+ * paragraph it annotates. On a wide document (a full-width served page) that
+ * position runs off the viewport and lands under the rail, which is bug-shaped:
+ * the chip was clamped only to `viewportWidth - width - 8`, i.e. exactly the
+ * strip the rail occupies. So the hug is capped at the CARD column's right edge
+ * instead: chips and cards share one stack, and sharing a right edge both keeps
+ * them visually aligned and leaves the rail's footprint free (CARD_RIGHT=78 >
+ * RAIL_FOOTPRINT=42).
+ */
+export function minMarkerLeft(m: {
+  /** container.getBoundingClientRect().right, after the doc shift */
+  containerRight: number;
+  viewportWidth: number;
+  markerWidth: number;
+  /** gap between the doc's right edge and the chip */
+  gap?: number;
+}): number {
+  const hug = m.containerRight + (m.gap ?? 8);
+  const rightLimit = m.viewportWidth - CARD_RIGHT - m.markerWidth;
+  return Math.round(Math.max(8, Math.min(hug, rightLimit)));
+}
+
+/**
+ * Top (px) of the rail for a remembered vertical position.
+ *
+ * `fraction` is the rail's CENTER as a share of viewport height (0–1), which is
+ * what survives a resize or a move to another screen — a raw px top would drift
+ * off-screen. The result is clamped so the whole capsule stays between the
+ * sticky header (`minTop`) and the bottom edge, and `minTop` wins when the
+ * viewport is too short for both.
+ */
+export function railTop(m: {
+  viewportHeight: number;
+  railHeight: number;
+  minTop: number;
+  fraction: number;
+  /** gap kept at the bottom edge */
+  gap?: number;
+}): number {
+  const gap = m.gap ?? 8;
+  const maxTop = m.viewportHeight - m.railHeight - gap;
+  const want = m.fraction * m.viewportHeight - m.railHeight / 2;
+  return Math.round(Math.max(m.minTop, Math.min(want, Math.max(m.minTop, maxTop))));
+}
+
 export interface ShiftInput {
   /** window.innerWidth */
   viewportWidth: number;

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getAggregates, getMe } from "@/lib/arti";
 import { SEARCH_OPEN_KEY } from "@/lib/catalog";
+import { useSetSearchBarOpen } from "@/lib/rail-context";
 import type { AggregatesResponse, Me } from "@/lib/types";
 import UploadButton from "./UploadButton";
 import NewMenu from "./NewMenu";
@@ -289,10 +290,29 @@ export default function SideNavSearch() {
   };
 
   // The search box itself no longer lives in the rail — it's a reveal-on-demand
-  // bar at the top of the listing (see CatalogTable). This just flips the bar
-  // open by setting the UI-only `find` param; navigate() preserves the current
-  // filter/sort so opening search doesn't discard an active view.
+  // bar at the top of the listing (see CatalogTable).
+  //
+  // On the catalog listing the bar is already mounted a flag away, so flip that
+  // flag directly: the UI-only `find` param never affected the row set, and
+  // routing through it made the box wait on a full re-render of a
+  // force-dynamic page. `page` is left in the URL because a shallow update
+  // swaps no rows (see revealSearch in CatalogTable).
+  //
+  // A slug drill-in is excluded even though its pathname is also `/`:
+  // CatalogTable hides the bar while `slug` is set, so flipping the flag there
+  // would look like SEARCH doing nothing. That case needs navigate(), which
+  // drops `slug` and lands on the catalog with the bar open. Off the catalog
+  // entirely, likewise — there is no bar to flip yet, and navigate() preserves
+  // the sticky filter so arriving via SEARCH doesn't discard the active view.
+  const setBarOpen = useSetSearchBarOpen();
   const openSearch = () => {
+    if (onCatalog && !sp.get("slug")) {
+      setBarOpen(true);
+      const params = new URLSearchParams(window.location.search);
+      params.set(SEARCH_OPEN_KEY, "1");
+      window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+      return;
+    }
     navigate({ [SEARCH_OPEN_KEY]: "1" });
   };
 
@@ -341,8 +361,11 @@ export default function SideNavSearch() {
     <div className="space-y-5 text-sm">
       {/* Search / Browse All / Upload / New diagram are one group of rail
           links — same type scale, leading icon, and a row rhythm tighter than
-          the section gap but still breathing. */}
-      <nav className="space-y-2.5">
+          the section gap but still breathing.
+          The pl-2 puts each row's 12px icon on the same vertical centerline as
+          the 28px arti logo above it (rail padding 16 + 8 + 6 = 30 = 16 + 14),
+          so the rail reads as one column of glyphs the way couch's does. */}
+      <nav className="space-y-2.5 pl-2">
         {/* SEARCH reveals the full-width search bar at the top of the listing
             (CatalogTable) rather than living in the rail. */}
         <button

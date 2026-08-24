@@ -70,6 +70,24 @@ title:"release notes" label:weekly -label:archived
 slug:pr-review-knowledge* creator:alice@example.com
 ```
 
+## Excluding an artifact's body from search
+
+An artifact labelled **`index:skip-fulltext`** is indexed by metadata only. It
+stays findable by `title:`, `description:`, `label:`, slug and creator, and it
+still appears in the catalog — but its **body never enters the free-text index**,
+so a plain word or `content:` query can't match on its contents.
+
+This is for machine-state artifacts: bodies that are large, rewritten on a
+schedule, and meaningless as a search hit. The skill publisher's state doc is the
+motivating case — a few hundred KB of sha256 hashes and UUIDs, a new version
+every day, where searching a bare hash used to return the state file.
+
+The label is read at **index time**, so it applies from the next time the
+artifact is indexed: editing labels re-indexes that version immediately, and
+`arti-server reindex` re-applies it across every stored version. Labels are
+per-version, so a slug with history needs the label on each version you want
+purged. Removing the label puts the body back on the next index.
+
 ## Version and archived toggles
 
 Two checkboxes sit under the search box and apply to whatever is listed —

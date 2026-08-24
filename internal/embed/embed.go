@@ -39,12 +39,19 @@ type ArtServer interface {
 	// app bridge so it can postMessage a freshly minted token ONLY to a
 	// declared embedding host (the zero-click relay contract).
 	ServeForEmbedUser(w http.ResponseWriter, r *http.Request, surface, ident string, ver *int32, frameAncestors string, origins []string) bool
+	// ServeForEmbedPinned renders the artifact as the real signed-in viewer
+	// (viewer mode), refusing when the resolved artifact is not the one the
+	// viewer's token was minted for.
+	// Returns (served, pinMismatch); pinMismatch distinguishes "the token names a
+	// different artifact than this request resolves to" from an access denial, so
+	// the caller can re-prompt instead of showing a dead placeholder.
+	ServeForEmbedPinned(w http.ResponseWriter, r *http.Request, surface, ident string, ver *int32, viewer, frameAncestors, pinnedArtifactID string) (served, pinMismatch bool)
 	// ServeEmbedFile serves one file from a packaged artifact as `caller`.
-	ServeEmbedFile(w http.ResponseWriter, r *http.Request, artifactID, filePath, caller, frameAncestors string) bool
+	ServeEmbedFile(w http.ResponseWriter, r *http.Request, artifactID, filePath, caller, frameAncestors, filesRoot string) bool
 	// ServeEmbedFilePublic serves one file from a packaged artifact with no
 	// caller check — for user-mode surfaces, where the verified files token
 	// (scoped to exactly this artifact) is the credential.
-	ServeEmbedFilePublic(w http.ResponseWriter, r *http.Request, artifactID, filePath, frameAncestors string) bool
+	ServeEmbedFilePublic(w http.ResponseWriter, r *http.Request, artifactID, filePath, frameAncestors, filesRoot string) bool
 }
 
 // TokenVerifier verifies the scoped token in the sibling-files path → what it
@@ -56,6 +63,16 @@ type TokenVerifier interface {
 	// VerifyEmbedFilesToken → the artifact id a user-mode (email-less) files
 	// token authorizes.
 	VerifyEmbedFilesToken(tok string) (artifactID string, err error)
+}
+
+// ViewerTokenVerifier verifies the viewer-mode document token. Kept separate
+// from TokenVerifier so the viewer feature is additive: a TokenVerifier that
+// does not implement it simply never authenticates a viewer, and the gate page
+// is served instead of the document.
+type ViewerTokenVerifier interface {
+	// VerifyEmbedViewerToken → the viewer email + artifact id an embed-viewer
+	// token authorizes. It MUST reject a token lacking the embed-viewer scope.
+	VerifyEmbedViewerToken(tok string) (email, artifactID string, err error)
 }
 
 // Surface is one configured embedder.
@@ -71,14 +88,19 @@ type Surface struct {
 	// Identity picks who artifacts are served as: "service" (default) resolves
 	// everything as the fixed Email below; "user" serves the static content on
 	// the secret alone and defers identity to the per-user popup handshake
-	// (/auth/embed/app-token), so tool calls run as the real viewer.
+	// (/auth/embed/app-token), so tool calls run as the real viewer; "viewer"
+	// gates the DOCUMENT RENDER itself on the real viewer's own ACL — nothing is
+	// served until the viewer completes the same popup handshake, and then
+	// checkAccess decides. "viewer" is the only mode in which the URL is not a
+	// credential, and therefore the only mode in which Secret may be empty.
 	Identity string `json:"identity"`
 	// Email is the identity artifacts resolve as — the real read-scope gate.
 	// Required in service mode; rejected in user mode (it would never be used,
 	// and a configured-but-unused service identity is a confusion in waiting).
 	Email string `json:"email"`
 	// SlugAllow lists patterns (exact or "*" glob) the requested slug must match.
-	// ["*"] = any artifact the Email can read.
+	// ["*"] = any artifact the Email can read (service mode) or any artifact the
+	// signed-in viewer can read (viewer mode).
 	SlugAllow []string `json:"slug_allow"`
 	// Shell, when set, serves a client adapter at /embed/{surface}/shell. "" =
 	// none (the embedder builds the ?slug= URL itself). "front" = Front SDK loader.
@@ -118,9 +140,13 @@ func ParseSurfaces(jsonStr string) (map[string]Surface, error) {
 		return nil, fmt.Errorf("parse ARTI_EMBED_SURFACES: %w", err)
 	}
 	for name, s := range m {
-		switch {
-		case s.Secret == "":
+		// In viewer mode nothing is served until the viewer authenticates, so the
+		// secret protects nothing and is optional. It stays REQUIRED for service
+		// and user mode, where it is the entire access gate.
+		if s.Secret == "" && s.Identity != "viewer" {
 			return nil, fmt.Errorf("embed surface %q: secret required", name)
+		}
+		switch {
 		case len(s.Origin) == 0:
 			return nil, fmt.Errorf("embed surface %q: origin required", name)
 		case len(s.SlugAllow) == 0:
@@ -142,8 +168,18 @@ func ParseSurfaces(jsonStr string) (map[string]Surface, error) {
 			if s.Email != "" {
 				return nil, fmt.Errorf("embed surface %q: email must be empty with identity \"user\" (tool calls run as the real viewer)", name)
 			}
+		case "viewer":
+			if s.Email != "" {
+				return nil, fmt.Errorf("embed surface %q: email must be empty with identity \"viewer\" (the document is served as the real viewer)", name)
+			}
+			// A shell resolves a slug client-side and re-fetches the doc route; the
+			// viewer gate page does its own reload with a token. Combining them has
+			// no defined meaning, so reject it rather than serve something odd.
+			if s.Shell != "" {
+				return nil, fmt.Errorf("embed surface %q: shell is not supported with identity \"viewer\"", name)
+			}
 		default:
-			return nil, fmt.Errorf("embed surface %q: unknown identity %q (want \"service\" or \"user\")", name, s.Identity)
+			return nil, fmt.Errorf("embed surface %q: unknown identity %q (want \"service\", \"user\" or \"viewer\")", name, s.Identity)
 		}
 		if s.Shell != "" && s.Shell != "front" {
 			return nil, fmt.Errorf("embed surface %q: unknown shell %q", name, s.Shell)
@@ -224,7 +260,7 @@ func (s *Service) handleDoc(w http.ResponseWriter, r *http.Request) {
 		s.serveShell(w, chi.URLParam(r, "surface"), surf)
 		return
 	}
-	if !secretOK(surf.Secret, r) {
+	if !secretOK(surf, r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -241,7 +277,31 @@ func (s *Service) handleDoc(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	fa := frameAncestors(surf.Origin)
 	served := false
-	if surf.Identity == "user" {
+	if surf.Identity == "viewer" {
+		// Viewer mode: the render is gated on the REAL viewer's ACL. With no
+		// token we serve only the gate page, which runs the consent handshake and
+		// reloads itself with ?t=. Nothing about the artifact — not its title, not
+		// whether it exists — reaches an unauthenticated caller.
+		email, artifactID, ok := s.viewerFromToken(r)
+		if !ok {
+			s.writeGatePage(w, chi.URLParam(r, "surface"), surf, slug, fa)
+			return
+		}
+		// The token pins one artifact. Serving as `email` re-runs checkAccess, and
+		// the pin stops a token for artifact A serving artifact B.
+		//
+		// A pin MISMATCH re-serves the gate rather than the placeholder: the common
+		// cause is a new version published between consent and reload, and one more
+		// prompt mints a token for the current row and self-heals. An ACL denial
+		// still falls through to the placeholder, so the two are not conflated.
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		var mismatch bool
+		served, mismatch = s.art.ServeForEmbedPinned(w, r, chi.URLParam(r, "surface"), slug, parseVersion(r), email, fa, artifactID)
+		if mismatch {
+			s.writeGatePage(w, chi.URLParam(r, "surface"), surf, slug, fa)
+			return
+		}
+	} else if surf.Identity == "user" {
 		// User mode: the secret + slug_allow checks above are the whole gate for
 		// the static content (any secret-holder can read the page's HTML/JS —
 		// see the package doc); the viewer's identity only enters via the
@@ -272,7 +332,7 @@ func (s *Service) handleFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		if !s.art.ServeEmbedFilePublic(w, r, aid, chi.URLParam(r, "*"), frameAncestors(surf.Origin)) {
+		if !s.art.ServeEmbedFilePublic(w, r, aid, chi.URLParam(r, "*"), frameAncestors(surf.Origin), "/embed/"+chi.URLParam(r, "surface")+"/_files/"+tok+"/") {
 			http.NotFound(w, r)
 		}
 		return
@@ -282,7 +342,7 @@ func (s *Service) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if !s.art.ServeEmbedFile(w, r, aid, chi.URLParam(r, "*"), email, frameAncestors(surf.Origin)) {
+	if !s.art.ServeEmbedFile(w, r, aid, chi.URLParam(r, "*"), email, frameAncestors(surf.Origin), "/embed/"+chi.URLParam(r, "surface")+"/_files/"+tok+"/") {
 		http.NotFound(w, r)
 	}
 }
@@ -309,10 +369,50 @@ func (s *Service) serveShell(w http.ResponseWriter, surface string, surf Surface
 	}
 }
 
+// viewerFromToken verifies the ?t= embed-viewer token and returns the viewer
+// email + the artifact UUID the token is pinned to. ok=false whenever the token
+// is absent, malformed, expired, or not an embed-viewer token — every one of
+// those falls through to the gate page rather than to an error, so a stale
+// token simply re-prompts.
+func (s *Service) viewerFromToken(r *http.Request) (email, artifactID string, ok bool) {
+	tok := strings.TrimSpace(r.URL.Query().Get("t"))
+	if tok == "" || s.tokens == nil {
+		return "", "", false
+	}
+	vv, isViewer := s.tokens.(ViewerTokenVerifier)
+	if !isViewer {
+		return "", "", false
+	}
+	email, artifactID, err := vv.VerifyEmbedViewerToken(tok)
+	if err != nil || email == "" || artifactID == "" {
+		return "", "", false
+	}
+	return email, artifactID, true
+}
+
 // secretOK constant-time compares the surface secret against ?auth_secret=.
-func secretOK(secret string, r *http.Request) bool {
-	got := r.URL.Query().Get("auth_secret")
-	return subtle.ConstantTimeCompare([]byte(got), []byte(secret)) == 1
+func secretOK(surf Surface, r *http.Request) bool {
+	return secretMatches(surf, r.URL.Query().Get("auth_secret"))
+}
+
+// secretMatches reports whether a presented secret satisfies the surface.
+//
+// THE INVARIANT: in viewer mode the comparison never executes. The render is
+// gated on the viewer's own ACL, so the secret protects nothing there, and any
+// comparison at all creates a failure mode — a surface migrated off service mode
+// breaks either its old `?auth_secret=` URLs (if it dropped the secret) or its
+// clean ones (if it kept it). Skipping the comparison outright is the only rule
+// under which both keep working.
+//
+// Every gate on the surface must route through here rather than compare inline:
+// the doc route and the three handshake routes (mint, complete, poll) all see the
+// same forwarded value, and one of them disagreeing 403s the Sign in button on
+// URLs the doc route accepts.
+func secretMatches(surf Surface, presented string) bool {
+	if surf.Identity == "viewer" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(surf.Secret)) == 1
 }
 
 // slugAllowed reports whether slug matches any allowlist pattern (exact or "*"
@@ -351,6 +451,100 @@ func parseVersion(r *http.Request) *int32 {
 
 // writePlaceholder renders the "nothing here yet" panel when an artifact doesn't
 // resolve, so the embed is never broken during rollout. Framable by the surface.
+// gatePageHTML is the viewer-mode sign-in gate. It is deliberately STATIC —
+// every value it needs (surface, slug, version, stale auth_secret) already sits
+// in its own URL, so nothing about the requested artifact is interpolated into
+// the body. That is what keeps the gate from becoming an existence oracle: the
+// bytes are identical for a readable slug, an unreadable slug and a slug that
+// was never created.
+//
+// The handshake it drives is the one built for user-mode APP surfaces: open the
+// mint route in a top-level popup (first-party on arti's origin, so the session
+// cookie flows and /auth/login can redirect), poll the public token endpoint,
+// then reload THIS url with ?t=<token>. It uses fetch + a popup and never a form
+// submit, because the effective sandbox inside a Notion embed omits allow-forms.
+const gatePageHTML = `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{margin:0;font:14px/1.6 -apple-system,system-ui,sans-serif;color:#333;
+      display:flex;align-items:center;justify-content:center;height:100vh}
+ .c{text-align:center;max-width:22rem;padding:20px}
+ button{font:inherit;padding:8px 18px;border:1px solid #c8c8c8;border-radius:6px;
+        background:#fafafa;cursor:pointer}
+ button:hover{background:#f0f0f0}
+ p{color:#777;margin:10px 0 18px}
+ .e{color:#b04141;min-height:1.4em;font-size:13px;margin-top:14px}
+ .f{font-size:13px;margin-top:12px}
+ .f a{color:#2563eb}
+</style></head><body><div class="c">
+ <p>Sign in to view this document.</p>
+ <button id="b">Sign in</button>
+ <div class="f" id="f"></div>
+ <div class="e" id="e"></div>
+</div><script>
+(function(){
+ var q=new URLSearchParams(location.search);
+ var surface=location.pathname.replace(/^.*\/embed\//,"").split("/")[0];
+ var secret=q.get("auth_secret")||"";
+ var state=Math.random().toString(36).slice(2)+Date.now().toString(36);
+ var btn=document.getElementById("b"),err=document.getElementById("e"),
+     fb=document.getElementById("f"),timer=null;
+ function qs(o){var p=new URLSearchParams();for(var k in o){if(o[k])p.set(k,o[k]);}return p.toString();}
+ function stop(m){if(timer){clearInterval(timer);timer=null;}btn.disabled=false;err.textContent=m||"";}
+ function done(tok){
+   if(timer){clearInterval(timer);timer=null;}
+   var u=new URL(location.href);u.searchParams.set("t",tok);location.replace(u.toString());
+ }
+ btn.onclick=function(){
+   err.textContent="";fb.innerHTML="";btn.disabled=true;
+   var mint="/auth/embed/app-token?"+qs({surface:surface,slug:q.get("slug"),
+     version:q.get("version"),state:state,auth_secret:secret});
+   var w=null;
+   try{ w=window.open(mint,"_blank","width=520,height=680"); }catch(e){}
+   // A null return does NOT mean nothing opened. An Electron host (the Notion
+   // desktop app) intercepts window.open, hands the URL to the OS browser, and
+   // returns null to this page. The consent flow then completes out there and the
+   // token lands in the pending store under our own state nonce — so we must keep
+   // polling regardless, or the desktop app can never finish a sign-in that has
+   // already succeeded. Only surface a manual link, never an error.
+   if(!w){ fb.innerHTML=""; var a=document.createElement("a");
+           a.href=mint; a.target="_blank"; a.rel="noopener";
+           a.textContent="If no sign-in window opened, continue here";
+           fb.appendChild(a); }
+   var tries=0;
+   timer=setInterval(function(){
+     if(++tries>150){stop("Sign-in did not complete. Try again.");return;}
+     fetch("/embed/"+encodeURIComponent(surface)+"/token?"+qs({state:state,auth_secret:secret}),
+           {cache:"no-store"})
+       .then(function(r){return r.ok?r.json():null;})
+       .then(function(j){if(j&&j.token){done(j.token);}})
+       .catch(function(){});
+   },2000);
+ };
+})();
+</script></body></html>`
+
+// writeGatePage serves the viewer-mode sign-in gate with the app-grade sandbox,
+// which is what permits the consent popup, and the surface's frame-ancestors.
+// slug is accepted for symmetry with the other writers but deliberately unused:
+// see gatePageHTML.
+func (s *Service) writeGatePage(w http.ResponseWriter, surface string, surf Surface, slug, fa string) {
+	_ = surface
+	_ = surf
+	_ = slug
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy",
+		"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox "+
+			"allow-top-navigation-by-user-activation allow-downloads; frame-ancestors "+fa)
+	w.Header().Del("X-Frame-Options")
+	w.Header().Set("Cache-Control", "no-store")
+	// The reload this page performs puts a token in the URL, so keep the URL out
+	// of any outbound Referer. The browser default already trims to origin
+	// cross-site; this makes it explicit on the one page that mints the URL.
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	_, _ = w.Write([]byte(gatePageHTML))
+}
+
 func writePlaceholder(w http.ResponseWriter, origins OriginList, slug string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors "+frameAncestors(origins))

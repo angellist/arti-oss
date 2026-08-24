@@ -33,7 +33,7 @@ If your agent has the **arti** MCP connector, call its tools directly. Major met
 | `list_artifacts` / `list_artifact_versions` | enumerate the catalog / a slug's versions |
 | `list_package_files` / `read_package_file` | entries of / one file inside a PACKAGE |
 | `get_artifact` | cheap metadata + `size_bytes` (poll before reading a big one) |
-| `update_artifact` | edit **metadata only** (title/description/labels/access) — NOT content (content change = `add_artifact` with the same slug) |
+| `update_artifact` | edit **metadata only** (title/description/labels/access) — NOT content (content change = `add_artifact` with the same slug). Access edits (`allowed_access`, `allowed_write`) are per-DOCUMENT: they apply to every version of the slug, owner/admin only |
 | `archive_artifact` | soft-delete |
 
 **Key limit — never push large/binary content through MCP.** `add_artifact` takes

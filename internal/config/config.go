@@ -30,6 +30,7 @@ type Config struct {
 	Search        Search        `yaml:"search"`
 	Apps          Apps          `yaml:"apps"`
 	Embedding     Embedding     `yaml:"embedding"`
+	Share         Share         `yaml:"share"`
 	Notifications Notifications `yaml:"notifications"`
 	LLM           LLM           `yaml:"llm"`
 }
@@ -142,6 +143,16 @@ type Device struct {
 // APIKeys configures self-serve API keys.
 type APIKeys struct {
 	MaxTTL  Duration `yaml:"max_ttl"`
+	MintRPM int      `yaml:"mint_rpm"`
+}
+
+// Share configures external timed share links: time-limited URLs that let a
+// person with no arti account read one document. Disabled by default — the
+// flag is the feature's backout, so nothing is exposed until it is set.
+type Share struct {
+	Enabled bool     `yaml:"enabled"`
+	MaxTTL  Duration `yaml:"max_ttl"`
+	OpenRPM int      `yaml:"open_rpm"`
 	MintRPM int      `yaml:"mint_rpm"`
 }
 

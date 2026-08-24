@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { fileParamSearch, resolvePackageEntry } from "@/lib/viewer";
+import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
 
 // The full-page HTML iframe, plus the listener that keeps the browser URL
 // (?file=<path>) in sync as the reader follows in-content links from one
@@ -23,6 +24,7 @@ export default function FullPageHtmlFrame({
   entries,
   entryPoint,
   initialFile,
+  zoom = 1,
 }: {
   src?: string;
   srcDoc?: string;
@@ -32,12 +34,16 @@ export default function FullPageHtmlFrame({
   entries?: Array<{ path: string; content_type: string }>;
   entryPoint?: string | null;
   initialFile?: string;
+  // Text-scale multiplier for the framed document (the viewer's text-size
+  // control / the `?ts=` param an embedder sends). See the render comment.
+  zoom?: number;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   // The file currently reflected in the URL. Seeded from what the server
   // resolved for this load, so the entry document's own on-load report is a
   // no-op and chained navigations don't rewrite the URL redundantly.
   const currentFile = useRef<string | null>(initialFile ?? null);
+  useExternalLinkMessage(iframeRef);
 
   useEffect(() => {
     // No sibling files (single HTML artifact / srcDoc fallback) ⇒ nothing to
@@ -66,13 +72,33 @@ export default function FullPageHtmlFrame({
     return () => window.removeEventListener("message", onMessage);
   }, [entries, entryPoint]);
 
+  // Text scale for an HTML body is `zoom` on the FRAME ELEMENT, not something
+  // injected into the document — the document is CSP-sandboxed into an opaque
+  // origin, so neither the inherited `--arti-text-scale` var nor any stylesheet
+  // of ours reaches it. Zooming from out here also means the scale SURVIVES
+  // in-content navigation: a package link that walks to a sibling file (or any
+  // in-page location change) re-uses this same element, whereas anything keyed
+  // to the URL or injected into the served bytes would be lost on the first
+  // click. `zoom` (not `transform: scale`) so the content reflows into the
+  // wider layout viewport instead of being drawn small in the old one.
+  //
+  // Dimensions: the fixed `.arti-fullpage-layer` moves to a WRAPPER and the
+  // frame fills it with h-full/w-full. Percentage lengths resolve inside the
+  // zoomed coordinate space (so the rendered box still exactly covers the
+  // layer), while the viewport-unit height this used to carry would not — a
+  // `calc(100dvh …)` height gets multiplied by the zoom and leaves a strip of
+  // background along the bottom. Browsers without `zoom` (Firefox < 126) simply
+  // render at 1× — the sizing is unaffected either way.
   return (
-    <iframe
-      ref={iframeRef}
-      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads"
-      {...(src ? { src } : { srcDoc })}
-      title={title}
-      className="arti-fullpage-layer block w-full border-0 bg-white"
-    />
+    <div className="arti-fullpage-layer bg-white">
+      <iframe
+        ref={iframeRef}
+        sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads"
+        {...(src ? { src } : { srcDoc })}
+        title={title}
+        className="block h-full w-full border-0 bg-white"
+        style={zoom === 1 ? undefined : { zoom }}
+      />
+    </div>
   );
 }

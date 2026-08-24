@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
   computeShift,
+  minMarkerLeft,
+  railTop,
   CARD_FOOTPRINT,
+  CARD_RIGHT,
+  RAIL_FOOTPRINT,
   SHIFT_GAP,
   SHIFT_LMIN,
   type ShiftInput,
@@ -106,5 +110,54 @@ describe("computeShift", () => {
     const m = base({ docLeft: 500, docRight: 1400 });
     const { doc } = computeShift(m);
     expect(m.docLeft - doc - m.mainLeft).toBeGreaterThanOrEqual(SHIFT_LMIN);
+  });
+});
+
+describe("minMarkerLeft", () => {
+  const chip = { viewportWidth: 1440, markerWidth: 44 };
+
+  it("hugs the document's right edge when there is room", () => {
+    expect(minMarkerLeft({ ...chip, containerRight: 900 })).toBe(908);
+  });
+
+  it("never pushes a chip under the rail on a full-width document", () => {
+    // The doc runs the whole viewport (a served page): hugging it would put the
+    // chip at 1448 — off-screen, and through the rail on the way out.
+    const left = minMarkerLeft({ ...chip, containerRight: 1440 });
+    expect(left + chip.markerWidth).toBeLessThanOrEqual(chip.viewportWidth - RAIL_FOOTPRINT);
+  });
+
+  it("caps the chip at the card column's right edge, so both share one edge", () => {
+    const left = minMarkerLeft({ ...chip, containerRight: 1440 });
+    expect(left + chip.markerWidth).toBe(chip.viewportWidth - CARD_RIGHT);
+  });
+
+  it("clears the rail on a narrow window too", () => {
+    const left = minMarkerLeft({ containerRight: 390, viewportWidth: 400, markerWidth: 44 });
+    expect(left + 44).toBeLessThanOrEqual(400 - RAIL_FOOTPRINT);
+  });
+
+  it("never goes negative on a viewport narrower than the gutter itself", () => {
+    expect(minMarkerLeft({ containerRight: 100, viewportWidth: 100, markerWidth: 44 })).toBe(8);
+  });
+});
+
+describe("railTop", () => {
+  const rail = { viewportHeight: 900, railHeight: 100, minTop: 60 };
+
+  it("centers the capsule on the remembered fraction", () => {
+    expect(railTop({ ...rail, fraction: 0.5 })).toBe(400); // 450 - 50
+  });
+
+  it("keeps the capsule below the sticky header", () => {
+    expect(railTop({ ...rail, fraction: 0.01 })).toBe(60);
+  });
+
+  it("keeps the capsule inside the bottom edge", () => {
+    expect(railTop({ ...rail, fraction: 0.99 })).toBe(792); // 900 - 100 - 8
+  });
+
+  it("prefers the header over the bottom edge when the viewport is too short", () => {
+    expect(railTop({ viewportHeight: 140, railHeight: 100, minTop: 60, fraction: 0.9 })).toBe(60);
   });
 });

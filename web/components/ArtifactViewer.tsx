@@ -11,16 +11,20 @@ import { isEditableArtifact } from "@/lib/edit";
 import { isComparableArtifact } from "@/lib/diff";
 import MarkdownBody from "./MarkdownBody";
 import { LabelEditor, ScopeEditor } from "./ChipEditors";
-import { archiveArtifact, encodeFilePath, fetchPackageFile, hasPerm, latestVersionForSlug, sameEmail, unarchiveArtifact, updateArtifactTitle } from "@/lib/arti";
+import { archiveArtifact, encodeFilePath, fetchPackageFile, hasPerm, latestVersionForSlug, listShares, sameEmail, unarchiveArtifact, updateArtifactCommentsEnabled, updateArtifactTitle } from "@/lib/arti";
 import ViewerToolbar, { RawToggle, TEXT_SCALE, WIDTH_CLASS, useViewerPrefs, type Width } from "./ViewerToolbar";
 import AccessModal from "./AccessModal";
 import CommentsLayer from "./CommentsLayer";
+import CommentsMenuItem from "./CommentsMenuItem";
+import { MENU_ROW, MENU_SVG, MenuIcon } from "./MenuRow";
+import { ShareModal } from "./ShareModal";
 import CreatorName from "./CreatorName";
 import ArtifactEditor from "./ArtifactEditor";
 import ArtifactCompare from "./ArtifactCompare";
 import DiagramView from "./DiagramView";
 import DiagramArtifactEditor from "./DiagramArtifactEditor";
 import { isDiagramContentType } from "@/lib/diagram";
+import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
 
 // BackButton — small left-chevron that pops one step in browser history
 // if there is one, falling back to the catalog root. Lives at the very
@@ -96,7 +100,7 @@ function safeBaseName(info: ArtifactInfo): string {
 // the artifact's owner or an admin. Enter saves, Escape reverts. While
 // saving the input is disabled; on error we revert and surface the
 // message inline so the next click can retry.
-function EditableTitle({
+export function EditableTitle({
   initial,
   canEdit,
   isPackage,
@@ -115,8 +119,6 @@ function EditableTitle({
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string>("");
   const inputRef = useRef<HTMLInputElement>(null);
-  // Timer ref to distinguish single-click (collapse) from double-click (edit).
-  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (editing) inputRef.current?.select();
   }, [editing]);
@@ -136,13 +138,6 @@ function EditableTitle({
     setTitle(initial);
     setDraft(initial);
   }
-  // Clear the pending click timer on unmount to avoid state-after-unmount.
-  useEffect(() => {
-    return () => {
-      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-    };
-  }, []);
-
   const startEdit = () => {
     if (!canEdit) return;
     setErr("");
@@ -174,26 +169,25 @@ function EditableTitle({
   };
 
   // Single click → collapse; double-click → edit (if canEdit).
-  // 400 ms matches typical OS double-click timing (300–500 ms) so slow
-  // double-clicks still trigger rename rather than firing two collapses.
-  // If canEdit is false the second click also collapses (no-op startEdit
-  // would otherwise silently swallow it and leave the header un-toggled).
+  //
+  // Collapse fires on the click itself, with no disambiguation delay. The
+  // previous version armed a 400 ms timer on the first click so a second one
+  // could still mean "rename", which made every collapse via the title feel
+  // broken next to the identical toggle on the triangle — 400 ms is well past
+  // the ~100 ms where a click stops reading as instant, and the delay was paid
+  // by every viewer, including the read-only ones who can't rename at all.
+  //
+  // No timer is needed because collapse is a *toggle* and the browser fires
+  // click, click, dblclick: the two clicks of a double-click cancel out, so the
+  // header is back where it started by the time startEdit runs. The transient
+  // flip is a couple of frames and is then covered by the edit input.
   const handleClick = () => {
     if (editing) return;
-    if (clickTimerRef.current) {
-      clearTimeout(clickTimerRef.current);
-      clickTimerRef.current = null;
-      if (canEdit) {
-        startEdit();
-      } else {
-        onCollapse();
-      }
-    } else {
-      clickTimerRef.current = setTimeout(() => {
-        clickTimerRef.current = null;
-        onCollapse();
-      }, 400);
-    }
+    onCollapse();
+  };
+  const handleDoubleClick = () => {
+    if (editing || !canEdit) return;
+    startEdit();
   };
 
   if (editing) {
@@ -227,6 +221,7 @@ function EditableTitle({
     <h1
       className="flex select-none items-center gap-2 rounded -mx-1 px-1 text-base font-semibold text-neutral-900 cursor-pointer transition hover:bg-neutral-100"
       onClick={handleClick}
+      onDoubleClick={handleDoubleClick}
       title={canEdit ? "click to collapse · double-click to rename" : "click to collapse"}
     >
       {title}
@@ -372,6 +367,7 @@ function AccessButton({
   write,
   hasOtherVersions,
   canEdit,
+  canShare,
   onSaved,
 }: {
   artifactID: string;
@@ -379,9 +375,44 @@ function AccessButton({
   write?: string[] | null;
   hasOtherVersions: boolean;
   canEdit: boolean;
+  // The server's `can_share`. Gates the live-link count, which is owner-only
+  // information and is not worth a request otherwise.
+  canShare: boolean;
   onSaved: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Live external links on this document, counted only when the modal opens:
+  // it is owner-only information and nobody pays for it on page load.
+  const [liveShares, setLiveShares] = useState(0);
+
+  // Reset on a document switch. Without this the count survives: the effect
+  // below returns early when the new document is not shareable, so a previous
+  // document's non-zero count would keep rendering AccessModal's amber "N live
+  // external links" warning against a document that has none.
+  const [countedFor, setCountedFor] = useState(artifactID);
+  if (artifactID !== countedFor) {
+    setCountedFor(artifactID);
+    setLiveShares(0);
+  }
+
+  useEffect(() => {
+    if (!open || !canShare) return;
+    let cancelled = false;
+    void listShares(artifactID)
+      .then((rows) => {
+        if (cancelled) return;
+        const now = Date.now();
+        setLiveShares(
+          rows.filter((l) => !l.revoked_at && new Date(l.expires_at).getTime() > now).length,
+        );
+      })
+      // A failed count must not break the access editor; the notice is an
+      // extra warning, not a precondition for editing.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [open, canShare, artifactID]);
 
   const tier = accessTier(access);
   const dot =
@@ -410,6 +441,7 @@ function AccessButton({
           write={write}
           hasOtherVersions={hasOtherVersions}
           canEdit={canEdit}
+          liveShareLinks={liveShares}
           onClose={() => setOpen(false)}
           onSaved={onSaved}
         />
@@ -418,9 +450,10 @@ function AccessButton({
   );
 }
 
-// ThreeDotsMenu — contextual overflow menu combining Edit, Compare, Download
-// and Archive into a single three-dot button to the right of Edit Access. (Raw
-// Source is the RawToggle sitting just left of the access button in the same row.)
+// ThreeDotsMenu — contextual overflow menu combining Edit, Compare, Download,
+// the comment switch and Archive into a single three-dot button to the right of
+// Edit Access. (Raw Source is the RawToggle sitting just left of the access
+// button in the same row.)
 function ThreeDotsMenu({
   downloadHref,
   downloadName,
@@ -435,6 +468,11 @@ function ThreeDotsMenu({
   onEdit,
   editTitle,
   onCompare,
+  commentsOn,
+  canManageComments,
+  commentsBusy,
+  onToggleComments,
+  onShare,
 }: {
   downloadHref?: string;
   downloadName?: string;
@@ -451,6 +489,16 @@ function ThreeDotsMenu({
   // not the raw source, and the tooltip should not claim otherwise.
   editTitle?: string;
   onCompare?: () => void;
+  // Comments row: shown to everyone who can see the menu (the dot is the
+  // answer to "why is there nowhere to comment?"), but only the owner —
+  // canManageComments, the server's own verdict — can click it. Omitted
+  // entirely when onToggleComments is undefined, i.e. on artifacts that never
+  // support comments (attachments, binaries) where a state dot would be noise.
+  commentsOn?: boolean;
+  canManageComments?: boolean;
+  commentsBusy?: boolean;
+  onToggleComments?: () => void;
+  onShare: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -496,27 +544,33 @@ function ThreeDotsMenu({
           ref={menuRef}
           className="absolute right-0 top-full z-30 mt-1 min-w-[160px] rounded-md border border-neutral-200 bg-white py-1 shadow-lg"
         >
+          <button
+            type="button"
+            onClick={() => { onShare(); setOpen(false); }}
+            className={`${MENU_ROW} hover:bg-neutral-50`}
+            title="copy this page's link, or create a time-limited external link"
+          >
+            <MenuIcon>
+              <svg {...MENU_SVG}>
+                <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
+                <polyline points="16 6 12 2 8 6" />
+                <line x1="12" y1="2" x2="12" y2="15" />
+              </svg>
+            </MenuIcon>
+            Share
+          </button>
           {onEdit ? (
             <button
               type="button"
               onClick={() => { onEdit(); setOpen(false); }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-neutral-700 hover:bg-neutral-50"
+              className={`${MENU_ROW} hover:bg-neutral-50`}
               title={editTitle ?? "edit the raw source — saving creates a new version"}
             >
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-                className="text-neutral-400"
-              >
-                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-              </svg>
+              <MenuIcon>
+                <svg {...MENU_SVG}>
+                  <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                </svg>
+              </MenuIcon>
               Edit
             </button>
           ) : null}
@@ -524,24 +578,15 @@ function ThreeDotsMenu({
             <button
               type="button"
               onClick={() => { onCompare(); setOpen(false); }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-neutral-700 hover:bg-neutral-50"
+              className={`${MENU_ROW} hover:bg-neutral-50`}
               title="compare two versions side by side"
             >
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-                className="text-neutral-400"
-              >
-                <rect x="3" y="4" width="18" height="16" rx="2" />
-                <line x1="12" y1="4" x2="12" y2="20" />
-              </svg>
+              <MenuIcon>
+                <svg {...MENU_SVG}>
+                  <rect x="3" y="4" width="18" height="16" rx="2" />
+                  <line x1="12" y1="4" x2="12" y2="20" />
+                </svg>
+              </MenuIcon>
               Compare versions
             </button>
           ) : null}
@@ -549,31 +594,60 @@ function ThreeDotsMenu({
             <a
               href={downloadHref + (downloadHref.includes("?") ? "&" : "?") + "download=1"}
               download={downloadName || ""}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-neutral-700 hover:bg-neutral-50"
+              className={`${MENU_ROW} hover:bg-neutral-50`}
               onClick={() => setOpen(false)}
             >
-              {downloadLabel ?? "\u2193 Download"}
+              <MenuIcon>
+                <svg {...MENU_SVG}>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+              </MenuIcon>
+              {downloadLabel ?? "Download"}
             </a>
           ) : null}
           {zipHref ? (
             <a
               href={zipHref + (zipHref.includes("?") ? "&" : "?") + "download=1"}
               download={zipName || ""}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-neutral-700 hover:bg-neutral-50"
+              className={`${MENU_ROW} hover:bg-neutral-50`}
               title="download the full package as a .zip"
               onClick={() => setOpen(false)}
             >
-              {"\u2193"} zip
+              <MenuIcon>
+                <svg {...MENU_SVG}>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+              </MenuIcon>
+              Download zip
             </a>
+          ) : null}
+          {onToggleComments ? (
+            <CommentsMenuItem
+              on={!!commentsOn}
+              canManage={!!canManageComments}
+              busy={commentsBusy}
+              onToggle={() => onToggleComments()}
+            />
           ) : null}
           {canEdit ? (
             <button
               type="button"
               onClick={() => { onArchive(); setOpen(false); }}
               disabled={archiving}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-neutral-700 hover:bg-neutral-50 hover:text-rose-700 disabled:opacity-50"
+              className={`${MENU_ROW} hover:bg-neutral-50 hover:text-rose-700 disabled:opacity-50`}
               title={archiveTitle}
             >
+              <MenuIcon>
+                <svg {...MENU_SVG}>
+                  <rect x="3" y="4" width="18" height="4" rx="1" />
+                  <path d="M5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8" />
+                  <line x1="10" y1="13" x2="14" y2="13" />
+                </svg>
+              </MenuIcon>
               {archiving
                 ? (isArchived ? "unarchiving\u2026" : "archiving\u2026")
                 : (isArchived ? "Unarchive" : "Archive")}
@@ -585,8 +659,12 @@ function ThreeDotsMenu({
   );
 }
 
-// CollapseToggle — small triangle used to collapse/expand sections.
-function CollapseToggle({
+// CollapseToggle — the triangle that collapses/expands the viewer header.
+// 14px glyph in a p-1.5 button: at the previous 10px/p-0.5 it was a ~14px
+// target, under the 24px minimum for a comfortable pointer hit and small
+// enough to read as decoration rather than a control. -mr-1 pulls the extra
+// padding back out of the row so the glyph keeps its old right edge.
+export function CollapseToggle({
   collapsed,
   onClick,
   label,
@@ -601,11 +679,11 @@ function CollapseToggle({
       onClick={onClick}
       aria-label={label}
       aria-expanded={!collapsed}
-      className="inline-flex items-center rounded p-0.5 text-neutral-400 transition hover:text-neutral-700"
+      className="-mr-1 inline-flex items-center rounded p-1.5 text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-700"
     >
       <svg
-        width="10"
-        height="10"
+        width="14"
+        height="14"
         viewBox="0 0 10 10"
         fill="currentColor"
         aria-hidden="true"
@@ -617,8 +695,10 @@ function CollapseToggle({
   );
 }
 
-function RenderedBody({ body, ct, src, allowPopups }: { body: string; ct: string; src?: string; allowPopups?: boolean }) {
-  if (isMarkdown(ct)) return <MarkdownBody body={body} />;
+function RenderedBody({ body, ct, src, allowPopups, docKey }: { body: string; ct: string; src?: string; allowPopups?: boolean; docKey?: string }) {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  useExternalLinkMessage(iframeRef);
+  if (isMarkdown(ct)) return <MarkdownBody body={body} docKey={docKey} />;
   if (isHTML(ct)) {
     // When `src` is provided (a single HTML file inside a PACKAGE, or a
     // standalone HTML artifact), the iframe loads from arti's origin so
@@ -642,9 +722,9 @@ function RenderedBody({ body, ct, src, allowPopups }: { body: string; ct: string
       ? "allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
       : "allow-scripts allow-downloads";
     return src ? (
-      <iframe {...common} src={src} sandbox={sandbox} />
+      <iframe {...common} ref={iframeRef} src={src} sandbox={sandbox} />
     ) : (
-      <iframe {...common} srcDoc={body} sandbox={sandbox} />
+      <iframe {...common} ref={iframeRef} srcDoc={body} sandbox={sandbox} />
     );
   }
   if (isPlainCode(ct)) {
@@ -788,6 +868,7 @@ export default function ArtifactViewer({
   //
   // Keying the whole viewer on artifact_id would also work, but it would remount
   // the comments overlay and the width machinery — far more than this needs.
+  const [sharing, setSharing] = useState(false);
   const [renderedArtifactId, setRenderedArtifactId] = useState(info.artifact_id);
   if (info.artifact_id !== renderedArtifactId) {
     setRenderedArtifactId(info.artifact_id);
@@ -795,6 +876,10 @@ export default function ArtifactViewer({
     setEditing(false);
     setComparing(false);
     setEditorSplit(false);
+    // Sharing too: a modal left open across an in-place document switch would
+    // keep showing the previous document's minted URL and link list while
+    // artifactID underneath it points at the new one.
+    setSharing(false);
   }
   const mode = useRailMode();
   const router = useRouter();
@@ -804,12 +889,15 @@ export default function ArtifactViewer({
   // content, or a PACKAGE (its HTML files get the in-page overlay). Never for
   // ATTACHMENT uploads or non-text content (pdf, image, binary) — there's no
   // prose to anchor to, so the controls are turned off entirely.
+  const commentable =
+    info.artifact_type === "PACKAGE" ||
+    (info.artifact_type === "TEXT" && isTextualContentType(info.content_type));
+  // The owner's per-doc switch, layered on top of that. Absent (an older or
+  // cached payload) reads as ON — the pre-existing behavior — so a missing
+  // field can never silently strip comments off every artifact.
+  const commentsAllowed = info.comments_enabled !== false;
   const commentsEnabled =
-    !isArchived &&
-    !editing &&
-    !comparing &&
-    (info.artifact_type === "PACKAGE" ||
-      (info.artifact_type === "TEXT" && isTextualContentType(info.content_type)));
+    !isArchived && !editing && !comparing && commentable && commentsAllowed;
 
   // Edit publishes a new version, which the server gates on WRITE access
   // (checkWriteAccess), no longer read == write. Prefer the server's
@@ -826,7 +914,25 @@ export default function ArtifactViewer({
   const comparable = isComparableArtifact(info);
   const [headerCollapsed, setHeaderCollapsed] = useState(false);
   const [archiving, setArchiving] = useState(false);
-  const [archiveErr, setArchiveErr] = useState<string>("");
+  const [actionErr, setActionErr] = useState<string>("");
+  const [commentsBusy, setCommentsBusy] = useState(false);
+  // Flip the per-doc comment switch. router.refresh() re-fetches the server
+  // payload, which is what actually mounts/unmounts the overlay — we don't
+  // mirror the flag in local state, so the menu can never disagree with what
+  // the server will enforce.
+  const toggleComments = async () => {
+    if (!info.can_manage_comments || commentsBusy) return;
+    setCommentsBusy(true);
+    setActionErr("");
+    try {
+      await updateArtifactCommentsEnabled(info.artifact_id, !commentsAllowed);
+      router.refresh();
+    } catch (e) {
+      setActionErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCommentsBusy(false);
+    }
+  };
   const doArchive = async () => {
     if (!canEdit) return;
     const ok = window.confirm(
@@ -836,7 +942,7 @@ export default function ArtifactViewer({
     );
     if (!ok) return;
     setArchiving(true);
-    setArchiveErr("");
+    setActionErr("");
     try {
       if (isArchived) {
         await unarchiveArtifact(info.artifact_id);
@@ -849,7 +955,7 @@ export default function ArtifactViewer({
       setArchiving(false);
       router.refresh();
     } catch (e) {
-      setArchiveErr(e instanceof Error ? e.message : String(e));
+      setActionErr(e instanceof Error ? e.message : String(e));
       setArchiving(false);
     }
   };
@@ -926,14 +1032,14 @@ export default function ArtifactViewer({
   if (isPackage && selectedInPkg) {
     downloadHref = `/api/artifacts/${info.artifact_id}/files/${encodeFilePath(selectedInPkg)}`;
     downloadName = selectedInPkg.split("/").pop() || selectedInPkg;
-    downloadLabel = "↓ file";
+    downloadLabel = "Download file";
     zipHref = `/api/artifacts/${info.artifact_id}`;
     zipName = `${safeBaseName(info)}.zip`;
   } else if (isPackage) {
     // Package overview (no file selected): the single button IS the zip.
     downloadHref = `/api/artifacts/${info.artifact_id}`;
     downloadName = `${safeBaseName(info)}.zip`;
-    downloadLabel = "↓ zip";
+    downloadLabel = "Download zip";
   } else {
     downloadHref = `/api/artifacts/${info.artifact_id}`;
     const base = safeBaseName(info);
@@ -1046,6 +1152,7 @@ export default function ArtifactViewer({
                   write={info.allowed_write}
                   hasOtherVersions={!!info.named_slug}
                   canEdit={canEdit}
+                  canShare={!!info.can_share}
                   onSaved={() => router.refresh()}
                 />
                 <ThreeDotsMenu
@@ -1070,12 +1177,35 @@ export default function ArtifactViewer({
                       : undefined
                   }
                   onCompare={comparable ? () => { setEditing(false); setCompareWidth("wide"); setComparing(true); } : undefined}
+                  // Only offered where comments are possible at all — an
+                  // attachment or a binary has nothing to anchor a comment to,
+                  // so a switch there would promise something that can't happen.
+                  commentsOn={commentsAllowed}
+                  canManageComments={info.can_manage_comments}
+                  commentsBusy={commentsBusy}
+                  onToggleComments={commentable ? toggleComments : undefined}
+                  onShare={() => setSharing(true)}
                 />
+                {sharing ? (
+                  <ShareModal
+                    artifactID={info.artifact_id}
+                    // The page's own URL, resolved in the browser so it carries
+                    // the real host rather than a guess at it.
+                    pageURL={typeof window === "undefined" ? "" : window.location.href}
+                    version={info.version}
+                    hasSlug={!!info.named_slug}
+                    // The server's own verdict. canEdit is a client-side
+                    // re-derivation off `creator`, which versioning reassigns —
+                    // a delegated writer would see a control the server 403s.
+                    canShare={!!info.can_share}
+                    onClose={() => setSharing(false)}
+                  />
+                ) : null}
               </div>
             </>
           ) : null}
-          {archiveErr ? (
-            <div className="mt-1 text-[11px] text-rose-600">error: {archiveErr}</div>
+          {actionErr ? (
+            <div className="mt-1 text-[11px] text-rose-600">error: {actionErr}</div>
           ) : null}
         </div>
       </div>
@@ -1165,6 +1295,7 @@ export default function ArtifactViewer({
               // overlay is injected in-page, same as a PACKAGE file. Non-HTML
               // ignores src and renders from `body`.
               src={isHTML(info.content_type) ? `/api/artifacts/${info.artifact_id}` : undefined}
+              docKey={info.artifact_id}
             />
           )}
         </section>
@@ -1292,7 +1423,7 @@ function PackageBody({
           fileName={selected.split("/").pop() || "diagram"}
         />
       ) : (
-        <RenderedBody body={fileBody} ct={fileCT} src={fileSrc} allowPopups={info.artifact_type === "APP"} />
+        <RenderedBody body={fileBody} ct={fileCT} src={fileSrc} allowPopups={info.artifact_type === "APP"} docKey={`${info.artifact_id}:${selected}`} />
       )}
     </section>
   );

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CatalogTable, { headerShadow } from "./CatalogTable";
 import { COLUMN_COOKIE, defaultColumnPrefs, parseColumnPrefs, toggleColumn } from "@/lib/columns";
 import type { ArtifactInfo } from "@/lib/types";
+import { RailModeShell } from "@/lib/rail-context";
 
 // Mutable so a test can put the component in a different view (e.g. the
 // single-slug drill-in, which renders an extra `actions` header cell).
@@ -52,6 +53,7 @@ describe("CatalogTable columns", () => {
 
   beforeEach(() => {
     document.cookie = `${COLUMN_COOKIE}=; path=/; max-age=0`;
+    nav.search = "";
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -60,6 +62,7 @@ describe("CatalogTable columns", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    nav.search = "";
   });
 
   const render = (initialColumns = defaultColumnPrefs(), rows = [row()]) => {
@@ -137,6 +140,35 @@ describe("CatalogTable columns", () => {
     ]);
     const cells = Array.from(container.querySelectorAll("tbody td")).map((td) => td.textContent);
     expect(cells).toContain("—");
+  });
+
+  // The drill-in is one document's version history, where "which version was
+  // the discussion on?" is the point — so it pins `comments` on even though
+  // the catalog keeps it opt-in.
+  it("pins the comments column in the single-slug drill-in", () => {
+    nav.search = "slug=weekly-report";
+    render(); // default prefs: comments is hidden everywhere else
+    expect(headers()).toContain("comments");
+    const cells = Array.from(container.querySelectorAll("tbody td")).map((td) => td.textContent);
+    expect(cells.join("|")).toContain("4");
+  });
+
+  it("leaves the stored pref alone while a column is pinned", () => {
+    nav.search = "slug=weekly-report";
+    render();
+    const thead = container.querySelector("thead") as HTMLElement;
+    act(() => {
+      thead.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 40 }));
+    });
+    const item = menuItems().find((b) => b.title.startsWith("comments on this version"));
+    // Reads as on, and as locked — an enabled checkbox here would appear to do
+    // nothing, since the view shows the column either way.
+    expect(item!.getAttribute("aria-checked")).toBe("true");
+    expect(item!.disabled, "a pinned column's menu row must not be clickable").toBe(true);
+
+    // Pinning is a view decision, not a preference: no cookie is written, so
+    // navigating back to the catalog still finds comments hidden.
+    expect(document.cookie).not.toContain(COLUMN_COOKIE);
   });
 
   it("gives every column a resize grip and a <col> to size", () => {
@@ -546,5 +578,109 @@ describe("CatalogTable reorder drag vs the sort click", () => {
     expect(restored.order.indexOf("type"), "and the reorder itself must still commit").toBeLessThan(
       restored.order.indexOf(firstCol as never),
     );
+  });
+});
+
+// Revealing the search bar is a client-only concern: `find=1` is UI-only, so
+// routing through it made every `/` wait on a full re-render of a
+// force-dynamic page before the box appeared. These pin the box to the
+// keypress and pin the no-navigation contract that makes it instant.
+describe("CatalogTable search bar", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    nav.search = "";
+    nav.pushed.length = 0;
+    window.history.replaceState(null, "", "/");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  // The open flag is shared with the rail's SEARCH item, so it lives in the
+  // shell that spans both — the bar only opens under that provider.
+  const render = () => {
+    act(() => {
+      root.render(
+        <RailModeShell>
+          <CatalogTable rows={[row()]} total={1} page={1} me={null} initialColumns={defaultColumnPrefs()} />
+        </RailModeShell>,
+      );
+    });
+  };
+
+  const searchBox = () => container.querySelector('input[name="q"]') as HTMLInputElement | null;
+
+  const pressSlash = () =>
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true }));
+    });
+
+  it("reveals and focuses the box on / without a router navigation", () => {
+    render();
+    expect(searchBox(), "the bar is hidden until asked for").toBeNull();
+
+    pressSlash();
+
+    expect(searchBox(), "/ must reveal the box in the same commit").not.toBeNull();
+    expect(document.activeElement, "and put the caret in it").toBe(searchBox());
+    expect(nav.pushed, "no navigation: find=1 never changed the row set").toEqual([]);
+    expect(window.location.search, "the URL still records it, shallowly").toBe("?find=1");
+  });
+
+  it("closes an empty bar without a router navigation", () => {
+    render();
+    pressSlash();
+    nav.pushed.length = 0;
+
+    const close = Array.from(container.querySelectorAll("button")).find((b) =>
+      (b.textContent ?? "").includes("close"),
+    )!;
+    act(() => close.click());
+
+    expect(searchBox(), "the bar goes away").toBeNull();
+    expect(nav.pushed, "nothing the server queried on changed").toEqual([]);
+    expect(window.location.search, "and find=1 is dropped from the URL").toBe("");
+  });
+
+  it("still navigates when closing drops an active query", () => {
+    nav.search = "q=budget";
+    render();
+    expect(searchBox(), "an active query keeps the bar visible on its own").not.toBeNull();
+
+    const close = Array.from(container.querySelectorAll("button")).find((b) =>
+      (b.textContent ?? "").includes("close"),
+    )!;
+    act(() => close.click());
+
+    expect(nav.pushed, "clearing q changes the row set, so the server must re-query").toHaveLength(1);
+    expect(nav.pushed[0]).not.toContain("q=budget");
+  });
+
+  // `page` survives a shallow open/close. The navigating paths all drop it
+  // because they change the row set; these do not, so dropping it would leave
+  // page 2's rows under a page-1 URL.
+  it("leaves the page number alone when opening and closing shallowly", () => {
+    nav.search = "page=2";
+    window.history.replaceState(null, "", "/?page=2");
+    render();
+
+    pressSlash();
+    expect(window.location.search, "opening keeps you on the page you were reading").toBe(
+      "?page=2&find=1",
+    );
+
+    const close = Array.from(container.querySelectorAll("button")).find((b) =>
+      (b.textContent ?? "").includes("close"),
+    )!;
+    act(() => close.click());
+    expect(window.location.search, "and so does closing").toBe("?page=2");
+    expect(nav.pushed, "neither touched the server").toEqual([]);
   });
 });

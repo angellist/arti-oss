@@ -23,6 +23,21 @@ export interface ArtifactInfo {
   // artifact — the server's effective checkWriteAccess result. Present only on
   // single-artifact viewer responses (Get/GetBySlug); absent on list/search.
   can_write?: boolean;
+  // comments_enabled: the per-DOCUMENT comment switch. false means the owner
+  // turned commenting off — no comment controls anywhere, and the API reports
+  // no threads and refuses new ones. Optional in this type only because
+  // fixtures and older cached payloads may predate the field; treat
+  // `undefined` as ON (`!== false`), never as OFF, or every artifact rendered
+  // from a stale payload would silently lose its comments.
+  comments_enabled?: boolean;
+  // can_manage_comments: whether the requesting caller may flip
+  // comments_enabled — the slug's owner (earliest version's creator) or an
+  // admin. Present only on single-artifact viewer responses.
+  can_manage_comments?: boolean;
+  // Whether the caller may mint an external share link. Server-computed from
+  // the slug's immutable owner; never re-derive it from `creator`, which
+  // versioning reassigns to whoever pushed the latest version.
+  can_share?: boolean;
   metadata: Record<string, unknown>;
   created_at: string;
   modified_at: string;
@@ -125,6 +140,45 @@ export interface Me {
   picture?: string;
   is_admin: boolean;
   permissions?: string[];
+  // Whether the server has external share links switched on
+  // (ARTI_SHARE_ENABLED). When false the Share dialog offers only the
+  // copy-this-URL half, because the mint endpoint is not mounted at all.
+  share_links_enabled?: boolean;
+}
+
+// ShareLink is one external timed link as its owner sees it. There is
+// deliberately no token field: the plaintext is returned exactly once, at
+// mint, and the prefix identifies a row without opening it.
+export interface ShareLink {
+  id: string;
+  token_prefix: string;
+  scope: "version" | "slug";
+  note: string;
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+  revoked_at?: string;
+  open_count: number;
+  last_opened_at?: string;
+}
+
+// MintedShare is the one and only sighting of a share URL.
+export interface MintedShare {
+  id: string;
+  url: string;
+  token_prefix: string;
+  expires_at: string;
+}
+
+// ShareOpen is one recorded read of a shared document. `ip` is
+// header-derived and therefore forgeable; `peer_addr` is the socket address.
+// A disagreement between them means the forwarded header was set by the
+// client, which is why both are shown.
+export interface ShareOpen {
+  at: string;
+  ip: string;
+  peer_addr: string;
+  user_agent: string;
 }
 
 // Role is a named set of opaque permission keys. Served by GET /api/roles.
@@ -179,4 +233,44 @@ export interface UserAccess {
   email: string;
   roles: HeldRole[];
   effective_permissions: string[];
+}
+
+// ─── users roster ──────────────────────────────────────────────────────
+//
+// One row of the Users page. arti has no account provisioning, so most of a
+// roster row is DERIVED from wherever an email was recorded — see
+// pgstore/people.go's knownPrincipalsCTE, which this shares with the
+// access-editor typeahead. `registered` marks the exception: a principal
+// somebody recorded deliberately.
+
+export interface RosterRole {
+  name: string;
+  // "baseline" (the implicit USER role) | "direct" | "group:<name>"
+  source: string;
+}
+
+export interface RosterUser {
+  email: string;
+  kind: "human" | "service";
+  note: string;
+  roles: RosterRole[];
+  groups: string[];
+  idp_groups: string[];
+  // The IdP snapshot has aged past ARTI_IDP_GROUPS_MAX_AGE (or the bound is
+  // disabled), so idp_groups currently grant nothing. Never render a stale
+  // group as live access.
+  idp_stale: boolean;
+  // null = no login recorded, which is NOT "never signed in": logins were only
+  // recorded from migration 0020 (2026-07-27) onward.
+  last_seen_at: string | null;
+  registered: boolean;
+  added_by: string;
+  added_at: string | null;
+}
+
+export interface RosterResponse {
+  users: RosterUser[];
+  // The tables the roster read, so a missing principal class is diagnosable
+  // from the response rather than from the source.
+  sources: string[];
 }

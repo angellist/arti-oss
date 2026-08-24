@@ -69,6 +69,29 @@ func TestRenderMarkdownDoc_DoubleTildeStrikethrough(t *testing.T) {
 	}
 }
 
+// Emphasis delimiters are often the only separator between two words (an email
+// subject quoted verbatim: "***PAST DUE***Document Request"). goldmark consumes
+// them, so the renderer injects the optical gap — but only at a tight boundary,
+// never before punctuation or an existing space. Twin of the web test in
+// web/lib/markdown.test.ts.
+func TestRenderMarkdownDoc_TightEmphasisGap(t *testing.T) {
+	out := string(renderMarkdownDoc([]byte("Re: ***PAST DUE***Document Request\n"), "x"))
+	if !strings.Contains(out, `</em><span class="arti-emph-gap"></span>Document`) {
+		t.Errorf("tight emphasis boundary did not get a gap:\n%s", out)
+	}
+	if !strings.Contains(out, ".arti-emph-gap{") {
+		t.Errorf("stylesheet is missing the .arti-emph-gap rule:\n%s", out)
+	}
+	// Scripts without inter-word spaces (CJK, Thai…) write emphasis flush
+	// against the next character by design — a gap there invents a word break.
+	for _, src := range []string{"a *word*, b\n", "a *word*. b\n", "a *word* b\n", "(*word*)\n",
+		"**粗体**文字\n", "**太字**です\n", "**볼드**텍스트\n", "**หนา**ตัวอักษร\n"} {
+		if got := string(renderMarkdownDoc([]byte(src), "x")); strings.Contains(got, `<span class="arti-emph-gap">`) {
+			t.Errorf("%q got a gap it does not need:\n%s", src, got)
+		}
+	}
+}
+
 func TestSetContentSecurityEmbed_HTML(t *testing.T) {
 	w := httptest.NewRecorder()
 	w.Header().Set("X-Frame-Options", "SAMEORIGIN") // simulate the global middleware

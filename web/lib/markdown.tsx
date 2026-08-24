@@ -67,16 +67,40 @@ export function splitFrontmatter(src: string): SplitMarkdown {
 // Renders a frontmatter header verbatim (React escapes the text child, so
 // any `<style>`/`<tag>` shows literally and never parses) in a shade
 // distinct from normal code blocks, marking it as metadata rather than body.
+//
+// Collapsed by default: frontmatter is bookkeeping (id/owner/status), not the
+// document, and an 8-line YAML block above the fold pushes the actual prose off
+// screen. Built on native <details>/<summary> rather than useState so it works
+// unchanged in server components (the /help viewer) and keeps the raw text in
+// the DOM for in-page find/copy — only the disclosure triangle is ours.
+//
+// Open/closed lives in the DOM, so callers must remount this on a change of
+// DOCUMENT (see MarkdownBody's `docKey`) — the app router keeps the viewer
+// mounted across artifact→artifact and package-file→file navigation, and a
+// reused <details> node would carry an expanded block onto the next doc.
+// Keying on document identity rather than on `raw` is deliberate: `raw` changes
+// on every keystroke in the editor's live preview, which would slam the block
+// shut while you're editing the very lines it shows.
 export function Frontmatter({ raw }: { raw: string }): ReactElement {
   return (
-    <div className="not-prose mb-4">
-      <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-amber-700/80">
+    <details className="group not-prose mb-4">
+      <summary className="inline-flex cursor-pointer list-none items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-amber-700/80 transition hover:text-amber-800 [&::-webkit-details-marker]:hidden">
+        <svg
+          width="8"
+          height="8"
+          viewBox="0 0 10 10"
+          fill="currentColor"
+          aria-hidden="true"
+          className="shrink-0 transition-transform group-open:rotate-90"
+        >
+          <polygon points="2,1 8,5 2,9" />
+        </svg>
         metadata
-      </div>
-      <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-amber-200 bg-amber-50/70 px-3 py-2 font-mono text-[11.5px] leading-relaxed text-amber-900">
+      </summary>
+      <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-amber-200 bg-amber-50/70 px-3 py-2 font-mono text-[11.5px] leading-relaxed text-amber-900">
         {raw}
       </pre>
-    </div>
+    </details>
   );
 }
 
@@ -118,6 +142,53 @@ function addHeadingIds(html: string): string {
   });
 }
 
+// Emphasis delimiters are the only separator between two words surprisingly
+// often — an email subject carried into a doc verbatim ("Re: ***PAST
+// DUE***Document Request") is the canonical case. The parser consumes the
+// asterisks, so the render collides: "PAST DUEDocument". Nothing is wrong with
+// the markdown, and the source is usually not ours to edit (it's someone
+// else's subject line), so the renderer supplies the optical gap the
+// delimiters used to provide: a zero-content marker element carrying a small
+// inline padding (see .arti-emph-gap in globals.css, and the Go twin in
+// internal/artifacts/embed_serve.go).
+//
+// Only a TIGHT boundary qualifies — emphasis directly against a letter or
+// digit. `*word*.`, `(*word*)` and `*word* text` are untouched: punctuation
+// needs no gap and a real space is already there.
+//
+// Covers the three delimiter-consuming inline marks (em/strong/del). Inline
+// `code` is deliberately excluded: its chip padding and background already
+// separate it from what follows.
+//
+// The marker carries no text, so nothing downstream shifts — the comments
+// overlay anchors text threads by an offset into the concatenated text nodes
+// and pins by top-level block index (see lib/commentsOverlay.ts), and an empty
+// inline span changes neither. Selection, copy/paste and find-in-page likewise
+// still see one continuous string.
+// "Tight" only means something in a script that separates words with spaces.
+// Chinese, Japanese, Korean and the Southeast Asian scripts below run words
+// together by design, so `**粗体**文字` is ordinary continuous text — a gap
+// there would insert a word break the author never wrote. The abutting rune
+// decides, and these scripts opt out. (The Go twin makes the same call in
+// code, since RE2 has no lookaround.)
+const NO_SPACE_SCRIPTS = String.raw`\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}\p{sc=Thai}\p{sc=Lao}\p{sc=Khmer}\p{sc=Myanmar}\p{sc=Tibetan}`;
+const EMPH_GAP = '<span class="arti-emph-gap"></span>';
+
+const TIGHT_CLOSE = new RegExp(
+  String.raw`</(em|strong|del)>(?=[\p{L}\p{N}])(?![${NO_SPACE_SCRIPTS}])`,
+  "gu",
+);
+const TIGHT_OPEN = new RegExp(
+  String.raw`(?<=[\p{L}\p{N}])(?<![${NO_SPACE_SCRIPTS}])<(em|strong|del)>`,
+  "gu",
+);
+
+export function spaceTightEmphasis(html: string): string {
+  return html
+    .replace(TIGHT_CLOSE, `</$1>${EMPH_GAP}`)
+    .replace(TIGHT_OPEN, `${EMPH_GAP}<$1>`);
+}
+
 // Markdown → sanitized HTML. Single source of truth used by FullPageView
 // and the /help docs viewer. `marked` may emit raw <script>/event-handler
 // attrs from the source; DOMPurify strips them. Frontmatter is split off
@@ -126,7 +197,7 @@ function addHeadingIds(html: string): string {
 export function renderMarkdown(src: string): { frontmatter: string | null; html: string } {
   const { frontmatter, body } = splitFrontmatter(src);
   const parsed = md.parse(body, { async: false }) as string;
-  const html = DOMPurify.sanitize(addHeadingIds(parsed));
+  const html = DOMPurify.sanitize(spaceTightEmphasis(addHeadingIds(parsed)));
   return { frontmatter, html };
 }
 

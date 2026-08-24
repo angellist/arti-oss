@@ -103,6 +103,51 @@ paths:
       - { in: path, name: slug, required: true, schema: { type: string } }
       - { in: path, name: path, required: true, schema: { type: string } }
     get: { summary: Single file in PACKAGE by slug, responses: { "200": { description: ok } } }
+  # External timed share links. Present only when ARTI_SHARE_ENABLED is set;
+  # the routes are unmounted otherwise, so they 404 rather than 403.
+  /api/artifacts/{id}/shares:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Mint an external timed share link (owner or admin only)
+      description: >-
+        Returns the share URL exactly once; it is stored only as sha256 and is
+        never recoverable afterwards. scope is "version" (pinned) or "slug"
+        (tracks the newest version). ttl is one of 1h, 8h, 24h, 7d, 30d,
+        capped by ARTI_SHARE_MAX_TTL.
+      responses:
+        "201": { description: created }
+        "400": { description: APP artifact, archived, bad ttl or scope }
+        "403": { description: caller can read the document but does not own it }
+        "404": { description: unknown document, or caller cannot see it }
+    get:
+      summary: List the document's share links (never includes a token)
+      responses: { "200": { description: ok } }
+  /api/shares/{shareID}:
+    parameters:
+      - { in: path, name: shareID, required: true, schema: { type: string, format: uuid } }
+    delete:
+      summary: Revoke a share link (authority follows the document, not the minter)
+      responses:
+        "204": { description: revoked }
+        "403": { description: caller does not own the linked document }
+  /api/shares/{shareID}/opens:
+    parameters:
+      - { in: path, name: shareID, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: Access log for one share link
+      responses: { "200": { description: ok } }
+  /share/{token}:
+    parameters:
+      - { in: path, name: token, required: true, schema: { type: string } }
+    get:
+      summary: Read a shared document — public, no authentication
+      description: >-
+        The token in the path is the whole credential. Unknown, revoked,
+        expired, archived and APP targets all return an identical 404.
+      responses:
+        "200": { description: the document }
+        "404": { description: no live link (indistinguishable across causes) }
   /mcp:
     post:
       summary: MCP (Streamable HTTP) endpoint — JSON-RPC 2.0

@@ -1,4 +1,4 @@
-import { ArtifactInfo, ArtifactListResponse, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Group, IdpGroup, Me, Role, RoleAssignment, UserAccess, ApiKey, CreatedApiKey } from "./types";
+import { ArtifactInfo, ArtifactListResponse, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Group, IdpGroup, Me, Role, RoleAssignment, RosterResponse, RosterUser, UserAccess, ApiKey, CreatedApiKey, ShareLink, MintedShare, ShareOpen } from "./types";
 
 // hasPerm reports whether `me` holds an RBAC permission key. Prefer this over
 // the bare is_admin flag for capability gating so a non-ADMIN role carrying a
@@ -538,6 +538,26 @@ export async function updateArtifactAccess(
   return resp.json();
 }
 
+// updateArtifactCommentsEnabled PATCHes the per-doc comment switch. Unlike the
+// access editor this is per-DOCUMENT: the server writes every version of the
+// slug, and accepts it only from the artifact's owner (the earliest version's
+// creator) or an admin — a delegated writer gets a 403.
+export async function updateArtifactCommentsEnabled(
+  id: string,
+  enabled: boolean,
+): Promise<ArtifactInfo> {
+  const resp = await fetch(`/api/artifacts/${id}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ comments_enabled: enabled }),
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+  return resp.json();
+}
+
 // ─── user groups ───────────────────────────────────────────────────────
 
 // listGroups returns all user groups. Readable by any authenticated caller —
@@ -553,6 +573,25 @@ export async function listGroups(cookie?: string): Promise<Group[]> {
 export async function listIdpGroups(cookie?: string): Promise<IdpGroup[]> {
   const { idp_groups } = await http<{ idp_groups: IdpGroup[] }>("/api/idp-groups", undefined, cookie);
   return idp_groups ?? [];
+}
+
+// searchPeople returns emails arti already knows (login history, artifact
+// creators, group rosters, role assignments) matching a partial address, for
+// the access + membership typeaheads. Served by GET /api/people.
+//
+// Below MIN_PEOPLE_QUERY characters the server answers with an empty list by
+// design — there is no query that enumerates the workspace — so the caller
+// short-circuits rather than spending a request to be told nothing.
+export const MIN_PEOPLE_QUERY = 2;
+
+export async function searchPeople(q: string, cookie?: string): Promise<string[]> {
+  if (q.trim().length < MIN_PEOPLE_QUERY) return [];
+  const { people } = await http<{ people: { email: string }[] }>(
+    `/api/people?q=${encodeURIComponent(q.trim())}`,
+    undefined,
+    cookie,
+  );
+  return (people ?? []).map((p) => p.email);
 }
 
 // createGroup creates a new group. Admin only (server returns 404 otherwise).
@@ -666,6 +705,37 @@ export async function unassignRole(input: {
   return mutate(`/api/role-assignments?${qs}`, "DELETE");
 }
 
+// ─── users roster (admin: MANAGE_ROLES) ─────────────────────────────────
+
+// listUsers returns every principal arti knows. MANAGE_ROLES only — the server
+// answers 404 otherwise, so the surface isn't discoverable. This is the one
+// endpoint allowed to enumerate principals; /api/people (the typeahead) refuses
+// to, by design.
+export async function listUsers(cookie?: string): Promise<RosterResponse> {
+  return http<RosterResponse>("/api/users", undefined, cookie);
+}
+
+// addUser records a principal so it appears on the roster before it has done
+// anything. It grants NOTHING: roles are assigned separately, and this exists
+// because a role assignment cannot express baseline privilege (the store rejects
+// assigning the USER role, which everyone holds implicitly).
+export async function addUser(input: {
+  email: string;
+  kind?: "human" | "service";
+  note?: string;
+}): Promise<RosterUser> {
+  const resp = await fetch(`/api/users`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+  return resp.json();
+}
+
 export async function lookupUserAccess(email: string): Promise<UserAccess> {
   return http<UserAccess>(`/api/role-lookup?email=${encodeURIComponent(email)}`);
 }
@@ -695,4 +765,54 @@ export function createApiKey(
 // revokeApiKey soft-deletes a key by id (owner or admin). Returns void on 204.
 export function revokeApiKey(id: string): Promise<void> {
   return http<void>(`/api/keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// ─── external share links ────────────────────────────────────────────
+// The mint response carries the only copy of the URL that will ever exist;
+// everything else in this group is deliberately token-free.
+
+export async function mintShare(
+  artifactID: string,
+  scope: "version" | "slug",
+  ttl: string,
+  note: string,
+): Promise<MintedShare> {
+  const resp = await fetch(`/api/artifacts/${artifactID}/shares`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope, ttl, note }),
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+  return resp.json();
+}
+
+export async function listShares(artifactID: string): Promise<ShareLink[]> {
+  const resp = await fetch(`/api/artifacts/${artifactID}/shares`, { credentials: "include" });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+  const body = await resp.json();
+  return body.shares ?? [];
+}
+
+export async function revokeShare(shareID: string): Promise<void> {
+  const resp = await fetch(`/api/shares/${shareID}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+}
+
+export async function listShareOpens(shareID: string): Promise<ShareOpen[]> {
+  const resp = await fetch(`/api/shares/${shareID}/opens`, { credentials: "include" });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+  const body = await resp.json();
+  return body.opens ?? [];
 }

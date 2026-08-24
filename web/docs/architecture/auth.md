@@ -49,7 +49,33 @@ public-ingress caller could forge the header). The forwarded
 cryptographically verified like any other bearer. `X-Auth-Request-Email` is trusted
 **only** on the two ProtectedIngress handlers where oauth2-proxy overwrites it: the
 browser/CLI login handler (which mints the cookie) and the MCP `/oauth/authorize`
-handler.
+handler. Neither issues a credential from the navigation alone: both render an
+arti-served page whose same-origin POST does the minting, so a cross-site
+navigation cannot produce a code or a paired CLI token.
+
+That trust is conditional on the deployment declaring a proxy, not on the header
+being present. `ARTI_AUTH_MODE` decides: `proxy` (and the legacy `""` default)
+say an authenticating proxy terminates every request and overwrites the
+`X-Auth-Request-*` headers, so `/oauth/authorize` may read identity from them.
+Under `oidc` and `disabled` there is no such proxy, arti faces the network
+itself, and the header is a string the caller chose. `/oauth/authorize` then
+ignores it and identifies the user from the signed `arti_session` cookie,
+redirecting to `/auth/login` when there is no session. In `oidc` mode that
+holds for every route, because the login switch mounts `OIDCLogin` and the
+header-reading `IngressLoginHandler` is never mounted. In `disabled` mode
+`/auth/login` is still the ingress handler and still reads the header, which
+that mode's own guarantee already covers: it attributes every request to a
+fixed email regardless, so it must never be network-reachable.
+Both the consent GET and the approving POST resolve identity through one shared
+path, so they cannot drift apart into a flow that renders a page it will not
+honour.
+
+The cookie path applies no separate required-groups check, and that is
+deliberate: both interactive login handlers apply `AUTH_REQUIRED_GROUPS` before
+they mint `arti_session`, so a cookie that verifies has already passed the gate,
+and an `oidc`-mode request carries no groups header to re-read. The proxy path
+keeps checking `X-Auth-Request-Groups` on every request, where the proxy is the
+live authority on group membership.
 
 There is also a **local dev bypass** (`ARTI_AUTH_DISABLED`) that attributes every
 request to a fixed email and logs a loud warning. Never enable it in prod — and with

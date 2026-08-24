@@ -6,6 +6,7 @@ import {
   isJSONContentType,
   prettyPrintJSON,
   resolvePackageEntry,
+  textScaleFromParam,
 } from "./viewer";
 import { DIAGRAM_CONTENT_TYPE } from "./diagram";
 
@@ -148,5 +149,26 @@ describe("fileParamSearch", () => {
   it("still sets ?file= for the entry point when there is no entry point to compare", () => {
     // entryPoint null ⇒ nothing is 'the clean base', so every file is explicit.
     expect(fileParamSearch("", "index.html", null)).toBe("?file=index.html");
+  });
+});
+
+// ?ts= is how an embedder (couch's artifact side panel) syncs the reader's own
+// font-size preference into the chrome-less viewer. Unknown values must land on
+// 1 — a stale or hand-typed link should render at today's size, not a surprise.
+describe("textScaleFromParam", () => {
+  it("maps the named steps, including the embed-only xs", () => {
+    expect(textScaleFromParam({ ts: "xs" })).toBe(0.72);
+    expect(textScaleFromParam({ ts: "sm" })).toBe(0.85);
+    expect(textScaleFromParam({ ts: "md" })).toBe(1);
+    expect(textScaleFromParam({ ts: "lg" })).toBe(1.15);
+  });
+  it("falls back to 1 for absent, empty, or unknown values", () => {
+    expect(textScaleFromParam({})).toBe(1);
+    expect(textScaleFromParam({ ts: "" })).toBe(1);
+    expect(textScaleFromParam({ ts: "huge" })).toBe(1);
+    expect(textScaleFromParam({ ts: "0.85" })).toBe(1);
+  });
+  it("takes the first value of a repeated param", () => {
+    expect(textScaleFromParam({ ts: ["sm", "lg"] })).toBe(0.85);
   });
 });

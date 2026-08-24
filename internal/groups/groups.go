@@ -42,6 +42,9 @@ func (s *Service) Mount(r chi.Router) {
 	r.Patch("/api/groups/{name}", s.update)
 	r.Delete("/api/groups/{name}", s.del)
 	r.Get("/api/idp-groups", s.listIdP)
+	// The person half of the same typeahead the group routes above feed — see
+	// people.go for why it lives here and how disclosure is bounded.
+	r.Get("/api/people", s.listPeople)
 }
 
 // IdPGroupDTO is one grantable IdP (SSO) group: its name, the literal

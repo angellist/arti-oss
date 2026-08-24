@@ -75,13 +75,17 @@ relevant endpoints (registered in `cmd/arti-server/cmd_serve.go`):
 | `GET /.well-known/oauth-authorization-server` | Authorization-server metadata (RFC 8414). |
 | `GET /.well-known/oauth-protected-resource[/mcp]` | Protected-resource metadata (RFC 9728). Because the resource is at a path (`/mcp`), a client builds the URL per RFC 9728 §3.1 as `…/oauth-protected-resource/mcp` — that's what the `/mcp` 401 `WWW-Authenticate` advertises; the bare-origin path is also served. |
 | `POST /oauth/register` | Dynamic client registration (RFC 7591). |
-| `GET /oauth/authorize` | Authorization endpoint; PKCE (`S256`) required. |
+| `GET /oauth/authorize` | Authorization endpoint; PKCE (`S256`) required. Renders a consent page. Identifies the user from the `arti_session` cookie, or from the proxy headers under `ARTI_AUTH_MODE=proxy`; with no session it redirects to `/auth/login` and returns here. |
+| `POST /oauth/authorize/confirm` | The consent page's own submit — the only path that issues a code. |
 | `POST /oauth/token` | Authorization-code and refresh-token grants. |
 
 The flow: the gateway discovers the metadata, dynamically registers a client,
-sends the user through `/oauth/authorize` (arti reads the SSO-verified identity
-from the proxy in front of it and mints a short-lived code), then exchanges the
-code at `/oauth/token` for an access token plus a refresh token. The access token
+sends the user through `/oauth/authorize` (arti identifies the user and asks them
+to approve the request; the code is issued when they do), then exchanges the code
+at `/oauth/token` for an access
+token plus a refresh token. **A human has to approve** — the authorization step
+is a page with a button, not a redirect, so an unattended client cannot complete
+it. The access token
 is a signed JWT carrying the user's email; the gateway puts it in
 `Authorization: Bearer …` on every `/mcp` call. Point a gateway at the `/mcp`
 URL and let it handle discovery — you don't drive these endpoints by hand.

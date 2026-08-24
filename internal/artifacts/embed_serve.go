@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -54,6 +57,33 @@ func (s *Service) ServeForEmbed(w http.ResponseWriter, r *http.Request, surface,
 	}
 
 	return s.serveEmbedBody(w, r, row, frameAncestors)
+}
+
+// ServeForEmbedPinned is ServeForEmbed for a viewer-mode surface. It resolves
+// as the real signed-in viewer, so resolveIdent's checkAccess is the access gate
+// — exactly the rule that applies at /s/<slug>. pinnedArtifactID is the UUID the
+// viewer's token was minted for; if the requested ident resolves to a different
+// artifact the request is refused, so a token for artifact A cannot serve
+// artifact B (which matters because slug_allow may be a wide glob).
+//
+// Returns false (writing nothing) on any miss, so the handler renders its own
+// placeholder and never distinguishes "absent" from "not yours".
+func (s *Service) ServeForEmbedPinned(w http.ResponseWriter, r *http.Request, surface, ident string, ver *int32, viewer, frameAncestors, pinnedArtifactID string) (served, pinMismatch bool) {
+	row, err := s.resolveIdent(r.Context(), ident, ver, viewer)
+	if err != nil {
+		return false, false
+	}
+	aid := pgstore.UUIDFromPG(row.ArtifactID).String()
+	if pinnedArtifactID == "" || !strings.EqualFold(aid, pinnedArtifactID) {
+		return false, true
+	}
+	switch row.ArtifactType {
+	case pgstore.TypeApp:
+		return s.serveAppRow(w, r, row, viewer, frameAncestors, s.embedFilesBase(surface, viewer, aid), "", nil, nil) == nil, false
+	case pgstore.TypePackage:
+		return s.serveEmbedPackageEntry(w, r, row, viewer, frameAncestors, s.embedFilesBase(surface, viewer, aid)), false
+	}
+	return s.serveEmbedBody(w, r, row, frameAncestors), false
 }
 
 // ServeForEmbedUser is ServeForEmbed for a user-mode surface: there is NO
@@ -155,19 +185,19 @@ func (s *Service) serveEmbedPackageEntry(w http.ResponseWriter, r *http.Request,
 // string) as `caller`, for the embed sibling-asset path. Subresources (js/css/
 // img) need no framing; a navigated sibling HTML page gets the app-grade sandbox
 // + frameAncestors so it stays framable. Returns false on miss.
-func (s *Service) ServeEmbedFile(w http.ResponseWriter, r *http.Request, artifactID, path, caller, frameAncestors string) bool {
-	return s.serveEmbedFile(w, r, artifactID, path, caller, frameAncestors, true)
+func (s *Service) ServeEmbedFile(w http.ResponseWriter, r *http.Request, artifactID, path, caller, frameAncestors, filesRoot string) bool {
+	return s.serveEmbedFile(w, r, artifactID, path, caller, frameAncestors, filesRoot, true)
 }
 
 // ServeEmbedFilePublic is ServeEmbedFile with no caller access check — for
 // user-mode surfaces, where the route's verified files token (scoped to
 // exactly this artifact, minted only after the surface secret passed) is the
 // credential, mirroring how the doc itself was served.
-func (s *Service) ServeEmbedFilePublic(w http.ResponseWriter, r *http.Request, artifactID, path, frameAncestors string) bool {
-	return s.serveEmbedFile(w, r, artifactID, path, "", frameAncestors, false)
+func (s *Service) ServeEmbedFilePublic(w http.ResponseWriter, r *http.Request, artifactID, path, frameAncestors, filesRoot string) bool {
+	return s.serveEmbedFile(w, r, artifactID, path, "", frameAncestors, filesRoot, false)
 }
 
-func (s *Service) serveEmbedFile(w http.ResponseWriter, r *http.Request, artifactID, path, caller, frameAncestors string, checkCaller bool) bool {
+func (s *Service) serveEmbedFile(w http.ResponseWriter, r *http.Request, artifactID, path, caller, frameAncestors, filesRoot string, checkCaller bool) bool {
 	id, err := uuid.Parse(artifactID)
 	if err != nil {
 		return false
@@ -199,6 +229,7 @@ func (s *Service) serveEmbedFile(w http.ResponseWriter, r *http.Request, artifac
 	// past the entry document. No-op on non-HTML; inert in embed surfaces (no
 	// listener there).
 	body = injectFileNavReporter(body, ct, path)
+	body = injectExternalLinkHandler(body, ct, filesRoot)
 	_, _ = w.Write(body)
 	return true
 }
@@ -223,7 +254,15 @@ func (s *Service) httpFileByToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if !s.ServeEmbedFile(w, r, aid, chi.URLParam(r, "*"), email, "'self'") {
+	// frame-ancestors: the artifact allowlist, NOT a hardcoded 'self'. This route
+	// backs the <base href> injected into every served PACKAGE page, so an
+	// in-content link click navigates the viewer's content frame HERE. When the
+	// viewer itself is embedded by a trusted internal origin (couch's side panel),
+	// that frame's ancestor chain includes the embedder — 'self' would block the
+	// second page exactly as X-Frame-Options blocked the first. The embed surfaces
+	// keep their own per-surface lists; they ride /embed/<surface>/_files/, not
+	// this route.
+	if !s.ServeEmbedFile(w, r, aid, chi.URLParam(r, "*"), email, s.artifactFrameAncestors(), "/api/artifacts/"+aid+"/files-token/"+chi.URLParam(r, "token")+"/") {
 		http.NotFound(w, r)
 	}
 }
@@ -311,6 +350,7 @@ func renderMarkdownDoc(src []byte, title string) []byte {
 		content.WriteString(html.EscapeString(string(src)))
 		content.WriteString("</pre>")
 	}
+	body := spaceTightEmphasis(content.Bytes())
 	var doc bytes.Buffer
 	doc.WriteString(`<!doctype html><html lang="en"><head><meta charset="utf-8">`)
 	doc.WriteString(`<meta name="viewport" content="width=device-width, initial-scale=1">`)
@@ -320,9 +360,70 @@ func renderMarkdownDoc(src []byte, title string) []byte {
 	doc.WriteString("</title><style>")
 	doc.WriteString(embedMarkdownCSS)
 	doc.WriteString("</style></head><body>")
-	doc.Write(content.Bytes())
+	doc.Write(body)
 	doc.WriteString("</body></html>")
 	return doc.Bytes()
+}
+
+// Go twin of spaceTightEmphasis() in web/lib/markdown.tsx — keep the two in
+// lockstep. Emphasis delimiters often carry the only separation between two
+// words (an email subject quoted verbatim: "Re: ***PAST DUE***Document
+// Request"); the parser consumes them and the render collides. Where emphasis
+// abuts a letter or digit with no separator at all, inject a zero-content
+// marker that carries a small inline padding (.arti-emph-gap below). RE2 has
+// no lookaround, so the neighbouring rune is captured and written back.
+// Punctuation and real spaces are left exactly as they are.
+var (
+	tightEmphasisClose = regexp.MustCompile(`</(em|strong|del)>([\p{L}\p{N}])`)
+	tightEmphasisOpen  = regexp.MustCompile(`([\p{L}\p{N}])<(em|strong|del)>`)
+)
+
+const emphGapHTML = `<span class="arti-emph-gap"></span>`
+
+// Scripts that run words together with no inter-word space. "Tight" is
+// meaningless there — `**粗体**文字` is ordinary continuous text, and a gap
+// would insert a word break the author never wrote. The abutting rune decides.
+var noSpaceScripts = []*unicode.RangeTable{
+	unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul,
+	unicode.Thai, unicode.Lao, unicode.Khmer, unicode.Myanmar, unicode.Tibetan,
+}
+
+func spaceTightEmphasis(src []byte) []byte {
+	src = injectEmphGap(src, tightEmphasisClose, true)
+	return injectEmphGap(src, tightEmphasisOpen, false)
+}
+
+// injectEmphGap inserts the gap marker at the tag↔word boundary of every match
+// whose abutting rune belongs to a space-separating script. gapAfterTag says
+// which side the tag is on: true for the closing form (`</em>W`, where the rune
+// is capture 2), false for the opening form (`W<em>`, capture 1). RE2 has no
+// lookaround, so the script test lives here rather than in the pattern.
+func injectEmphGap(src []byte, re *regexp.Regexp, gapAfterTag bool) []byte {
+	matches := re.FindAllSubmatchIndex(src, -1)
+	if matches == nil {
+		return src
+	}
+	var out bytes.Buffer
+	last := 0
+	for _, m := range matches {
+		start, end := m[2], m[3] // opening form: the rune is capture 1
+		if gapAfterTag {
+			start, end = m[4], m[5] // closing form: capture 2
+		}
+		r, _ := utf8.DecodeRune(src[start:end])
+		if unicode.IsOneOf(noSpaceScripts, r) {
+			continue
+		}
+		at := end // opening form: gap goes after the word rune, before the tag
+		if gapAfterTag {
+			at = start
+		}
+		out.Write(src[last:at])
+		out.WriteString(emphGapHTML)
+		last = at
+	}
+	out.Write(src[last:])
+	return out.Bytes()
 }
 
 // embedMarkdownCSS is a small, self-contained readable stylesheet for rendered
@@ -345,6 +446,8 @@ pre code{background:none;padding:0}
 blockquote{border-left:3px solid rgba(127,127,127,.4);padding-left:1em;color:#666;margin-left:0}
 table{border-collapse:collapse;width:100%}
 th,td{border:1px solid rgba(127,127,127,.3);padding:6px 10px;text-align:left}
+em,i{padding-inline-end:.045em}
+.arti-emph-gap{padding-inline-end:.19em}
 img{max-width:100%}
 hr{border:0;border-top:1px solid rgba(127,127,127,.3);margin:2em 0}
 `

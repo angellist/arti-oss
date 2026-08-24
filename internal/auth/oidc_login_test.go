@@ -468,6 +468,38 @@ func TestOIDCLogin_ReturnToSanitized(t *testing.T) {
 	}
 }
 
+// Every off-site shape of return_to lands on "/" instead. Go writes the
+// Location header verbatim, and browsers normalise `\` to `/`, so `/\host`
+// leaves the site exactly as `//host` does — a post-login open redirect,
+// which is the moment a user is most likely to trust where they land.
+func TestOIDCLogin_ReturnToRejectsOffSiteShapes(t *testing.T) {
+	for _, returnTo := range []string{
+		"//evil.test/phish",
+		`/\evil.test/phish`,
+		"https://evil.test/phish",
+		`\\evil.test/phish`,
+		// http.Redirect path.Cleans a relative Location before writing it,
+		// so these reach the browser as `/\evil.test` unless the check is
+		// applied to the cleaned path rather than the raw parameter.
+		`/../\evil.test/phish`,
+		`/./\evil.test/phish`,
+		`/a/../../\evil.test/phish`,
+	} {
+		t.Run(returnTo, func(t *testing.T) {
+			f := newFakeIdP(t, "arti")
+			f.email = "alice@example.com"
+			mux, _, _ := loginStack(t, f, nil)
+			w := drive(t, mux, f, "/auth/login?return_to="+url.QueryEscape(returnTo))
+			if w.Code != http.StatusFound {
+				t.Fatalf("code = %d", w.Code)
+			}
+			if got := w.Header().Get("Location"); got != "/" {
+				t.Errorf("redirect = %q, want / — this sends the user off-site after login", got)
+			}
+		})
+	}
+}
+
 func TestRequireAuthOrRedirect_ForbiddenProxyToken(t *testing.T) {
 	f := newFakeIdP(t, "arti")
 	f.email = "alice@example.com"

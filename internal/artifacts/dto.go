@@ -39,7 +39,27 @@ type ArtifactInfo struct {
 	// membership without the client re-deriving any of it. Pointer + omitempty:
 	// nil (omitted) on caller-agnostic paths (list/search) where it isn't
 	// computed; set only on the single-artifact viewer paths (Get/GetBySlug).
-	CanWrite   *bool          `json:"can_write,omitempty"`
+	CanWrite *bool `json:"can_write,omitempty"`
+	// CommentsEnabled is the per-doc comment switch (see migration 0021).
+	// False means the document's owner turned commenting off: the viewer
+	// renders no comment controls, served HTML gets no in-page overlay, and
+	// the comments API reports no threads and refuses writes. Always emitted
+	// (no omitempty) — a missing field would read as `false` in JS truthiness
+	// checks and silently hide comments on every artifact.
+	CommentsEnabled bool `json:"comments_enabled"`
+	// CanManageComments reports whether the requesting caller may flip
+	// CommentsEnabled: the slug's OWNER (its earliest-version creator) or an
+	// admin — never a delegated writer, who could otherwise version the doc to
+	// become its creator and take over the switch. Pointer + omitempty: set
+	// only on the single-artifact viewer paths, nil where it isn't computed.
+	CanManageComments *bool `json:"can_manage_comments,omitempty"`
+	// CanShare reports whether the requesting caller may mint an external
+	// share link: the same authority as CanManageComments (the slug's OWNER or
+	// an admin), computed server-side so the viewer never re-derives it. The
+	// client cannot infer this from `creator`, which versioning reassigns to
+	// whoever pushed the latest version — a delegated writer would otherwise
+	// be offered a control the server then refuses.
+	CanShare   *bool          `json:"can_share,omitempty"`
 	Metadata   map[string]any `json:"metadata"`
 	CreatedAt  time.Time      `json:"created_at"`
 	ModifiedAt time.Time      `json:"modified_at"`
@@ -102,25 +122,26 @@ func ToInfo(row sqlc.Artifact, baseURL string) ArtifactInfo {
 	}
 
 	return ArtifactInfo{
-		ArtifactID:    id,
-		ArtifactType:  row.ArtifactType,
-		NamedSlug:     row.NamedSlug,
-		Version:       row.Version,
-		Title:         row.Title,
-		Description:   row.Description,
-		ContentType:   row.ContentType,
-		SizeBytes:     row.SizeBytes,
-		SHA256:        row.SHA256,
-		Creator:       row.Creator,
-		Scopes:        scopes,
-		Labels:        labels,
-		AllowedAccess: access,
-		AllowedWrite:  row.AllowedWrite, // nil stays nil (mirror) — do NOT normalize
-		Metadata:      meta,
-		CreatedAt:     row.CreatedAt.Time,
-		ModifiedAt:    row.ModifiedAt.Time,
-		DeletedAt:     deletedAt,
-		URL:           url,
+		ArtifactID:      id,
+		ArtifactType:    row.ArtifactType,
+		NamedSlug:       row.NamedSlug,
+		Version:         row.Version,
+		Title:           row.Title,
+		Description:     row.Description,
+		ContentType:     row.ContentType,
+		SizeBytes:       row.SizeBytes,
+		SHA256:          row.SHA256,
+		Creator:         row.Creator,
+		Scopes:          scopes,
+		Labels:          labels,
+		AllowedAccess:   access,
+		AllowedWrite:    row.AllowedWrite, // nil stays nil (mirror) — do NOT normalize
+		CommentsEnabled: row.CommentsEnabled,
+		Metadata:        meta,
+		CreatedAt:       row.CreatedAt.Time,
+		ModifiedAt:      row.ModifiedAt.Time,
+		DeletedAt:       deletedAt,
+		URL:             url,
 	}
 }
 

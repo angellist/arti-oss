@@ -148,17 +148,8 @@ func (s *Store) CallerGroups(ctx context.Context, caller string) ([]string, erro
 		return nil, err
 	}
 	var tokens []string
-	for _, g := range snap {
-		for _, m := range g.Members {
-			// Members may be exact emails OR globs (`*@domain`, `*`), matched
-			// with the same matcher as allowed_access patterns. Both sides are
-			// already lowercased (normalizeMembers + the caller lowercasing
-			// above), which is what matchGlob expects.
-			if matchGlob(m, caller) {
-				tokens = append(tokens, GroupToken(g.Name))
-				break
-			}
-		}
+	for _, name := range groupNamesFor(snap, caller) {
+		tokens = append(tokens, GroupToken(name))
 	}
 	// Union in the caller's IdP-derived group tokens (idp:<name>), resolved
 	// from their login-time snapshot. Distinct namespace from group:, so the
@@ -168,6 +159,28 @@ func (s *Store) CallerGroups(ctx context.Context, caller string) ([]string, erro
 		return nil, err
 	}
 	return append(tokens, idp...), nil
+}
+
+// groupNamesFor returns the names of the groups in snap whose membership
+// includes email. Members may be exact addresses OR globs (`*@domain`, `*`),
+// matched with the same matcher as allowed_access patterns; both sides are
+// already lowercased (normalizeMembers plus the caller's own lowercasing),
+// which is what matchGlob expects.
+//
+// Shared by CallerGroups (which decides access) and the Users roster (which
+// displays it) so the two cannot disagree about who is in a group. Both must
+// also start from the same snapshot — see the note in ListUsers.
+func groupNamesFor(snap []Group, email string) []string {
+	var names []string
+	for _, g := range snap {
+		for _, m := range g.Members {
+			if matchGlob(m, email) {
+				names = append(names, g.Name)
+				break
+			}
+		}
+	}
+	return names
 }
 
 // UpsertIdPGroups records a user's current IdP (SSO) group memberships,

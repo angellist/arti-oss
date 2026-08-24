@@ -21,9 +21,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
 	"github.com/angellist/arti-oss/internal/auth"
+	"github.com/angellist/arti-oss/internal/httperr"
 	"github.com/angellist/arti-oss/internal/pkgzip"
 	"github.com/angellist/arti-oss/internal/rbac"
 	"github.com/angellist/arti-oss/internal/store/opensearch"
@@ -63,9 +65,16 @@ type Service struct {
 	// appFrameAncestors is the CSP `frame-ancestors` source list applied to
 	// served APP HTML — it controls which origins may iframe an arti app (the
 	// embedding use case). Empty ⇒ "'self'" (same-origin only, the prior
-	// behavior); deployments widen it to internal origins. Scoped to APP
-	// responses; regular artifacts keep X-Frame-Options: SAMEORIGIN.
+	// behavior); deployments widen it to internal origins. Also applied to
+	// served artifact HTML bodies (see artifactFrameAncestors), which the
+	// full-page viewer loads in a nested iframe; non-HTML bodies keep
+	// X-Frame-Options: SAMEORIGIN.
 	appFrameAncestors string
+
+	// share carries the external timed share-link settings (SetShareConfig).
+	// Zero value = disabled, which is also the config default: the flag is
+	// this feature's backout.
+	share ShareConfig
 
 	// osClient is the OpenSearch HTTP client (nil = disabled).
 	osClient *opensearch.Client
@@ -100,8 +109,10 @@ func (s *Service) SetEmbedFilesTokenFn(fn func(artifactID string) (string, error
 
 // SetAppFrameAncestors sets the CSP frame-ancestors source list for served APP
 // HTML, controlling which origins may embed an arti app in an iframe (e.g.
-// "'self' https://*.example.com"). Empty keeps the same-origin-only
-// default. Other artifact types are unaffected.
+// "'self' https://*.example.com"). Empty keeps the same-origin-only default.
+// It is also the default for served artifact HTML bodies (the full-page
+// viewer's nested content frame — see artifactFrameAncestors); non-HTML bodies
+// are unaffected and keep X-Frame-Options.
 func (s *Service) SetAppFrameAncestors(v string) {
 	s.appFrameAncestors = strings.TrimSpace(v)
 }
@@ -257,6 +268,11 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 	if req.AllowedWrite != nil {
 		write = *req.AllowedWrite
 	}
+	// The per-doc comment switch is deliberately absent here. It is not
+	// settable through this request — only the owner flips it, via PATCH — and
+	// a new version inherits it from the prior one inside store.Put, off the
+	// same fresh read CheckAccess uses. Resolving it here instead would race a
+	// concurrent owner toggle and could silently re-open comments.
 	if req.NamedSlug != nil && *req.NamedSlug != "" {
 		if prev, err := s.store.GetBySlug(ctx, *req.NamedSlug, nil); err == nil {
 			// Versioning an existing slug requires WRITE access to it (creator,
@@ -306,6 +322,11 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 		return ArtifactInfo{}, err
 	}
 
+	// Set inside the CheckAccess hook when this publish carries an ACL that
+	// differs from the slug's fresh prior version — i.e. Put will fan the new
+	// pair out to the siblings (DD-0055 D3) — so the sync below knows to
+	// refresh THEIR index docs too, not just the new row's.
+	var aclFanout bool
 	row, err := s.store.Put(ctx, pgstore.PutInput{
 		ArtifactType:  at,
 		NamedSlug:     req.NamedSlug,
@@ -319,6 +340,12 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 		Metadata:      meta,
 		AllowedAccess: access,
 		AllowedWrite:  write,
+		// An omitted ACL is an INHERIT, not a value: Put re-resolves it from
+		// the fresh prior version inside its critical section, so a publish
+		// racing an ACL change can't persist (let alone fan out) this
+		// function's possibly-stale `access`/`write` fallbacks.
+		InheritAccess: req.AllowedAccess == nil,
+		InheritWrite:  req.AllowedWrite == nil,
 		// Closes the race the check above can't: if the slug looked absent
 		// on our own pre-check but a concurrent writer created it (as a
 		// restricted artifact) before this call landed, Put re-checks
@@ -327,9 +354,22 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 			if err := s.checkWriteAccess(ctx, prev, creator); err != nil {
 				return err
 			}
+			// Resolve the pair against THIS fresh prev — mirroring Put's
+			// inherit override — so the values validated here are exactly
+			// the values Put persists, even when the inherit fallbacks
+			// above were resolved from a now-stale read.
+			fa := access
+			if req.AllowedAccess == nil {
+				fa = prev.AllowedAccess
+			}
+			fw := write
+			if req.AllowedWrite == nil {
+				fw = prev.AllowedWrite
+			}
+			aclFanout = aclChanged(prev, fa, fw)
 			// ACL-change authority against the FRESH prev (owner/admin only),
 			// validating the access/write about to be persisted — race-safe.
-			return s.requireAclChangeAuthority(ctx, creator, *req.NamedSlug, prev, access, write)
+			return s.requireAclChangeAuthority(ctx, creator, *req.NamedSlug, prev, fa, fw)
 		},
 	})
 	if err != nil {
@@ -342,6 +382,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 			s.osIndexer.IndexArtifact(context.Background(), row)
 			if req.NamedSlug != nil && *req.NamedSlug != "" {
 				s.osIndexer.UpdateLatestFlags(context.Background(), *req.NamedSlug)
+				if aclFanout {
+					s.reindexSlugSiblings(context.Background(), *req.NamedSlug, row.ArtifactID)
+				}
 			}
 		}()
 	}
@@ -440,6 +483,9 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 		sep = []byte(*req.Separator)
 	}
 
+	// Set inside the CheckAccess hook when this append carries an ACL that
+	// differs from the slug's fresh prior version (see Create).
+	var aclFanout bool
 	row, perr := s.store.Append(ctx, pgstore.AppendInput{
 		NamedSlug:     slug,
 		Separator:     sep,
@@ -469,6 +515,10 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 			if req.AllowedWrite != nil {
 				fw = *req.AllowedWrite
 			}
+			// An explicit differing ACL fans out to the siblings inside Put
+			// (DD-0055 D3) — remember it so the sync below refreshes their
+			// index docs too.
+			aclFanout = aclChanged(prev, fa, fw)
 			return s.requireAclChangeAuthority(ctx, creator, slug, prev, fa, fw)
 		},
 	})
@@ -496,6 +546,9 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 		go func() {
 			s.osIndexer.IndexArtifact(context.Background(), row)
 			s.osIndexer.UpdateLatestFlags(context.Background(), slug)
+			if aclFanout {
+				s.reindexSlugSiblings(context.Background(), slug, row.ArtifactID)
+			}
 		}()
 	}
 
@@ -726,7 +779,62 @@ func (s *Service) infoWithWrite(ctx context.Context, row sqlc.Artifact, caller s
 		}
 	}
 	info.CanWrite = &cw
+	// One isDocOwner call feeds both flags: the comment switch and the share
+	// control take the same authority, and computing it twice would let them
+	// drift.
+	owner := s.isDocOwner(ctx, row, caller) == nil
+	info.CanManageComments = &owner
+	// can_share must agree with what MintShare will actually allow, so it runs
+	// the same gate rather than re-deriving from ownership alone: minting adds
+	// an ambiguous-lineage refusal that the comment switch does not have.
+	canShare := s.share.Enabled && row.ArtifactType != pgstore.TypeApp && !row.DeletedAt.Valid &&
+		s.canMintShare(ctx, row, caller)
+	info.CanShare = &canShare
 	return info
+}
+
+// canMintShare is the boolean form of shareMintAuthority, for the can_share
+// flag. Same gate, so the control the viewer offers matches what the server
+// will allow.
+func (s *Service) canMintShare(ctx context.Context, row sqlc.Artifact, caller string) bool {
+	_, err := s.shareMintAuthority(ctx, row, caller)
+	return err == nil
+}
+
+// isDocOwner returns nil when `caller` may change document-level settings on
+// `row` — today, the per-doc comment switch. Authority is the same one ACL
+// changes use (requireAclChangeAuthority): an admin, or the slug's OWNER, i.e.
+// the creator of its EARLIEST version. It is deliberately NOT row.Creator:
+// versioning reassigns each version's creator to whoever pushed it, so a
+// delegated writer could publish a content-only version and inherit the
+// switch. Slugless artifacts have no lineage, so their creator is the owner.
+func (s *Service) isDocOwner(ctx context.Context, row sqlc.Artifact, caller string) error {
+	if caller == "" {
+		return errForbidden("only the artifact's owner or an admin may change this")
+	}
+	admin, err := s.canManageArtifacts(ctx, caller)
+	if err != nil {
+		return err
+	}
+	if admin {
+		return nil
+	}
+	if row.NamedSlug != nil && *row.NamedSlug != "" {
+		owner, oerr := s.store.SlugCreator(ctx, *row.NamedSlug)
+		if oerr != nil && !errors.Is(oerr, pgstore.ErrNotFound) {
+			return oerr
+		}
+		if owner != "" {
+			if strings.EqualFold(owner, caller) {
+				return nil
+			}
+			return errForbidden("only the artifact's owner or an admin may change this")
+		}
+	}
+	if strings.EqualFold(row.Creator, caller) {
+		return nil
+	}
+	return errForbidden("only the artifact's owner or an admin may change this")
 }
 
 // GetBySlug returns the metadata DTO for the slug. For non-admin callers
@@ -1668,7 +1776,7 @@ func (s *Service) httpGetContent(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 	setContentDisposition(w, r, row.Title, ct, row.ArtifactType)
-	s.writeServedContent(w, rc, ct, id.String(), row.ArtifactType, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()), row.SizeBytes, fullPageContext(r))
+	s.writeServedContent(w, rc, ct, row, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()), fullPageContext(r))
 }
 
 func (s *Service) httpArchive(w http.ResponseWriter, r *http.Request) {
@@ -1740,7 +1848,7 @@ func (s *Service) httpGetBySlugRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 	setContentDisposition(w, r, row.Title, ct, row.ArtifactType)
-	s.writeServedContent(w, rc, ct, pgstore.UUIDFromPG(row.ArtifactID).String(), row.ArtifactType, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()), row.SizeBytes, false)
+	s.writeServedContent(w, rc, ct, row, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()), false)
 }
 
 func (s *Service) httpVersions(w http.ResponseWriter, r *http.Request) {
@@ -1848,6 +1956,10 @@ func (s *Service) httpMe(w http.ResponseWriter, r *http.Request) {
 		"name":        name,
 		"picture":     auth.PictureFromContext(r.Context()),
 		"permissions": perms,
+		// Capability bit so the FE hides the external-link half of the Share
+		// dialog when ARTI_SHARE_ENABLED is off, instead of offering a control
+		// whose endpoint 404s.
+		"share_links_enabled": s.share.Enabled,
 	})
 }
 
@@ -1887,6 +1999,10 @@ type UpdateMetadataRequest struct {
 	Labels        *[]string `json:"labels"`
 	AllowedAccess *[]string `json:"allowed_access"`
 	AllowedWrite  *[]string `json:"allowed_write"`
+	// CommentsEnabled is the per-doc comment switch. Unlike every other field
+	// here it applies to the whole DOCUMENT: setting it writes every version
+	// of the slug, and only the slug's owner (or an admin) may set it.
+	CommentsEnabled *bool `json:"comments_enabled"`
 }
 
 // cleanStringSlice trims each element, drops empties, and dedupes
@@ -1910,11 +2026,13 @@ func cleanStringSlice(in []string) []string {
 }
 
 // UpdateMetadata edits the mutable fields (title, description, scopes, labels,
-// allowed_access) of ONE artifact version in place — content / type stay
-// immutable (create a new version to change those). Only fields whose pointer
-// is non-nil are touched; an explicit empty slice clears the field. The edit
-// applies to the single version named by `id`: sibling versions under the same
-// slug keep their prior metadata until patched individually.
+// allowed_access) of an artifact — content / type stay immutable (create a new
+// version to change those). Only fields whose pointer is non-nil are touched;
+// an explicit empty slice clears the field. Title, description, scopes, and
+// labels are PER-VERSION: they apply to the single version named by `id`, and
+// siblings keep theirs until patched individually. allowed_access /
+// allowed_write are PER-DOCUMENT (DD-0055): an owner/admin edit writes every
+// version of the slug — the comments_enabled asymmetry, extended to access.
 //
 // Enforces creator-or-MANAGE_ARTIFACTS, plus the kind:skill write-guard
 // (editing — or relabeling into/out of — a skill artifact needs MANAGE_SKILLS,
@@ -1931,15 +2049,34 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 	if err != nil {
 		return ArtifactInfo{}, err
 	}
-	if !admin && !strings.EqualFold(existing.Creator, caller) {
+	// A PATCH touching only DOC-LEVEL settings — the comment switch and, since
+	// DD-0055, the ACL fields — is gated by its own authority checks further
+	// down (isDocOwner, or the per-version creator re-check in the ACL
+	// branch) instead of the per-version creator check here. The exemption
+	// exists for exactly one caller: the slug's OWNER looking at a version
+	// someone else pushed. They own the document, so they must be able to
+	// reach its settings — revoking access via the version a viewer actually
+	// lands on must not 403 — while a delegated writer who became a version's
+	// creator must not gain doc-level authority (isDocOwner resolves it to
+	// the earliest version's creator).
+	commentsOnly := req.CommentsEnabled != nil && req.Title == nil && req.Description == nil &&
+		req.Scopes == nil && req.Labels == nil && req.AllowedAccess == nil && req.AllowedWrite == nil
+	docSettingsOnly := (req.CommentsEnabled != nil || req.AllowedAccess != nil || req.AllowedWrite != nil) &&
+		req.Title == nil && req.Description == nil && req.Scopes == nil && req.Labels == nil
+	if !admin && !docSettingsOnly && !strings.EqualFold(existing.Creator, caller) {
 		return ArtifactInfo{}, errForbidden("only the creator or an admin may edit")
 	}
-	guardSets := [][]string{existing.Labels}
-	if req.Labels != nil {
-		guardSets = append(guardSets, *req.Labels)
-	}
-	if err := s.requireSkillWrite(ctx, caller, guardSets...); err != nil {
-		return ArtifactInfo{}, err
+	// The kind:skill write-guard protects a skill's content and metadata. A
+	// comments-only PATCH changes neither — it is a document setting, gated by
+	// ownership — so it doesn't additionally require MANAGE_SKILLS.
+	if !commentsOnly {
+		guardSets := [][]string{existing.Labels}
+		if req.Labels != nil {
+			guardSets = append(guardSets, *req.Labels)
+		}
+		if err := s.requireSkillWrite(ctx, caller, guardSets...); err != nil {
+			return ArtifactInfo{}, err
+		}
 	}
 	if req.Title != nil {
 		t := strings.TrimSpace(*req.Title)
@@ -1965,11 +2102,21 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 			return ArtifactInfo{}, err
 		}
 	}
+	// Set when an owner/admin ACL edit actually changed sibling rows, so the
+	// index sync below refreshes every version's doc, not just this one's.
+	var aclFanout bool
+	// Set ONLY in branches that ran a doc-settings write behind their own
+	// authority check (isDocOwner / the version-creator re-check). Gates the
+	// post-write Get fallback below: a no-op request that fired no authority
+	// check must never convert an unauthorized caller's NotFound into
+	// metadata.
+	var authorizedDocWrite bool
 	if req.AllowedAccess != nil || req.AllowedWrite != nil {
 		// Compute the final (access, write) pair from the request overlaid on
-		// the current row, then write both together. UpdateAccess enforces the
-		// ⊆ invariant (unions write into access). Omitting one field leaves it
-		// as-is; passing allowed_write:[] means creator-only writes.
+		// the current row (DD-0055 D7), then write both together. The store
+		// enforces the ⊆ invariant (unions write into access). Omitting one
+		// field leaves it as-is; passing allowed_write:[] means creator-only
+		// writes.
 		access := existing.AllowedAccess
 		if req.AllowedAccess != nil {
 			access = cleanStringSlice(*req.AllowedAccess)
@@ -1978,23 +2125,105 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 		if req.AllowedWrite != nil {
 			write = cleanStringSlice(*req.AllowedWrite)
 		}
-		// Changing a slug's ACL requires the slug OWNER (or admin), not merely
-		// the creator of the version being patched: a delegated writer can push
-		// a content-only version to become its creator and pass the top-level
-		// creator guard, so ACL authority must be pinned to the immutable owner
-		// (same rule as Create/Append). Slugless artifacts have no versioning
-		// and thus no owner/creator divergence — the top guard already covers
-		// them.
-		if existing.NamedSlug != nil {
-			if err := s.requireAclChangeAuthority(ctx, caller, *existing.NamedSlug, existing, access, write); err != nil {
+		if existing.NamedSlug != nil && *existing.NamedSlug != "" {
+			// Access is a property of the DOCUMENT (DD-0055): for the slug's
+			// owner or an admin the write is slug-wide — every version,
+			// archived included — and it runs even when the pair matches the
+			// targeted row, because "identical to this version" is not
+			// "identical to every sibling": the owner's no-op resend is
+			// exactly how a drifted slug gets healed (and how the one-time
+			// convergence pass works). The branch is selected by a POSITIVE
+			// authority check (isDocOwner — same immutable-owner rule as the
+			// comment switch below). requireAclChangeAuthority passing is NOT
+			// an authority signal: its !aclChanged early-out passes any
+			// caller, and gating fan-out on it would let a delegated writer
+			// resend their own version's ACL as a "no-op" and converge
+			// siblings they have no authority over.
+			ownerErr := s.isDocOwner(ctx, existing, caller)
+			var fb forbidden
+			switch {
+			case ownerErr == nil:
+				n, err := s.store.UpdateAccessBySlug(ctx, *existing.NamedSlug, access, write)
+				if err != nil {
+					return ArtifactInfo{}, err
+				}
+				aclFanout = n > 0
+				authorizedDocWrite = true
+			case errors.As(ownerErr, &fb):
+				// Not the owner: pre-DD-0055 per-version semantics stay
+				// bit-identical. The docSettingsOnly exemption above means a
+				// caller here may be ANYONE, so first re-impose the contract
+				// the top guard used to give this path: only the targeted
+				// version's creator proceeds — otherwise even a byte-identical
+				// resend (which the authority helper waves through as a no-op)
+				// would hand strangers a per-version write.
+				if !strings.EqualFold(existing.Creator, caller) {
+					return ArtifactInfo{}, errForbidden("changing access requires being the artifact's owner or an admin")
+				}
+				// An identical resend is a legal no-op (the authority
+				// helper's aclChanged early-out), a real change is 403 — and
+				// nothing a non-owner does touches siblings.
+				if err := s.requireAclChangeAuthority(ctx, caller, *existing.NamedSlug, existing, access, write); err != nil {
+					return ArtifactInfo{}, err
+				}
+				if _, err := s.store.UpdateAccess(ctx, id, access, write); err != nil {
+					return ArtifactInfo{}, err
+				}
+				authorizedDocWrite = true
+			default:
+				return ArtifactInfo{}, ownerErr
+			}
+		} else {
+			// Slugless: single-version, no siblings. The docSettingsOnly
+			// exemption bypassed the top creator guard, so authority is
+			// re-checked here — isDocOwner degenerates to creator-or-admin
+			// for slugless artifacts.
+			if err := s.isDocOwner(ctx, existing, caller); err != nil {
 				return ArtifactInfo{}, err
 			}
-		}
-		if _, err := s.store.UpdateAccess(ctx, id, access, write); err != nil {
-			return ArtifactInfo{}, err
+			if _, err := s.store.UpdateAccess(ctx, id, access, write); err != nil {
+				return ArtifactInfo{}, err
+			}
+			authorizedDocWrite = true
 		}
 	}
+	if req.CommentsEnabled != nil && *req.CommentsEnabled != existing.CommentsEnabled {
+		// Owner-or-admin only — stricter than the creator check at the top of
+		// this function, for the same reason ACL changes are (see isDocOwner).
+		if err := s.isDocOwner(ctx, existing, caller); err != nil {
+			return ArtifactInfo{}, err
+		}
+		// Per-DOC, not per-version: write the whole slug so the setting can't
+		// disagree between versions of the same document. Slugless artifacts
+		// are single-version, so the by-id form is the whole doc.
+		if existing.NamedSlug != nil && *existing.NamedSlug != "" {
+			if _, err := s.store.SetCommentsEnabledBySlug(ctx, *existing.NamedSlug, *req.CommentsEnabled); err != nil {
+				return ArtifactInfo{}, err
+			}
+		} else if _, err := s.store.SetCommentsEnabled(ctx, id, *req.CommentsEnabled); err != nil {
+			return ArtifactInfo{}, err
+		}
+		authorizedDocWrite = true
+	}
 	info, err := s.Get(ctx, id, caller)
+	if errors.Is(err, pgstore.ErrNotFound) && authorizedDocWrite {
+		// An authority-checked write landed above, so a 404 here would
+		// misreport it. This is reachable when the caller's own edit revoked
+		// their read on the targeted row — e.g. the slug OWNER setting
+		// creator-only access ([]) via a version a delegated writer created:
+		// []'s reader set is the ROW creator + admins, which doesn't include
+		// the owner. Returning the refreshed metadata to the caller who just
+		// authored it leaks nothing; CanWrite is simply left uncomputed.
+		// The authorizedDocWrite gate is load-bearing: a NO-OP request (e.g.
+		// comments_enabled resent at its current value) fires no authority
+		// check, and without the gate it would convert an unauthorized
+		// caller's NotFound into a metadata disclosure.
+		row, gerr := s.store.GetByID(ctx, id)
+		if gerr != nil {
+			return ArtifactInfo{}, gerr
+		}
+		info, err = ToInfo(row, s.baseURL), nil
+	}
 	if err != nil {
 		return ArtifactInfo{}, err
 	}
@@ -2004,6 +2233,9 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 				s.osIndexer.IndexArtifact(context.Background(), row)
 				if row.NamedSlug != nil && *row.NamedSlug != "" {
 					s.osIndexer.UpdateLatestFlags(context.Background(), *row.NamedSlug)
+					if aclFanout {
+						s.reindexSlugSiblings(context.Background(), *row.NamedSlug, row.ArtifactID)
+					}
 				}
 			}
 		}()
@@ -2011,10 +2243,31 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 	return info, nil
 }
 
+// reindexSlugSiblings refreshes the OpenSearch docs of every OTHER live
+// version of slug after a slug-wide ACL write, so the index's allowed_access
+// converges with Postgres instead of waiting for each version's next write.
+// Best-effort like all indexing (IndexArtifact logs its own failures); a
+// stale doc is fail-closed anyway — the search path re-verifies ACL against
+// Postgres before serving. Archived versions are skipped: they are excluded
+// from live results, covered by the same re-verification, and refreshed on
+// unarchive.
+func (s *Service) reindexSlugSiblings(ctx context.Context, slug string, except pgtype.UUID) {
+	rows, err := s.store.Versions(ctx, slug)
+	if err != nil {
+		return
+	}
+	for _, r := range rows {
+		if r.ArtifactID == except {
+			continue
+		}
+		s.osIndexer.IndexArtifact(ctx, r)
+	}
+}
+
 // httpPatch updates editable fields on an artifact. `title`, `description`,
 // `scopes`, `labels`, and `allowed_access` are mutable post-publish; content /
 // type stay immutable (create a new version to change those). Creator or admin
-// only.
+// only; ACL fields are slug-wide for the owner (see UpdateMetadata).
 func (s *Service) httpPatch(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseUUIDParam(w, r, "id")
 	if !ok {
@@ -2098,16 +2351,18 @@ func (s *Service) httpFileByID(w http.ResponseWriter, r *http.Request) {
 		writeBadOrInternal(w, err)
 		return
 	}
-	body = s.injectFilesBaseToken(body, ct, id.String(), caller, path)
+	filesRoot := s.filesRootFor(caller, id.String())
+	body = s.injectFilesBaseToken(body, ct, filesRoot, caller, path)
 	if row.ArtifactType == pgstore.TypeApp {
 		// APP files get ONLY the app bridge, never the comments overlay — a
 		// sandboxed page should carry one scoped token, not two.
 		body = s.injectAppBridge(body, ct, id.String(), caller, nil)
 		s.setContentSecurityApp(w, ct)
 	} else {
-		body = s.injectComments(body, ct, id.String(), caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()))
+		body = s.injectComments(body, ct, id.String(), row.CommentsEnabled, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()))
 		body = injectFileNavReporter(body, ct, path)
-		setContentSecurityMaybeFullPage(w, ct, fullPageContext(r))
+		body = injectExternalLinkHandler(body, ct, filesRoot)
+		s.setContentSecurityMaybeFullPage(w, ct, fullPageContext(r))
 	}
 	_, _ = w.Write(body)
 }
@@ -2345,16 +2600,18 @@ func (s *Service) httpFileBySlug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	aid := pgstore.UUIDFromPG(row.ArtifactID).String()
-	body = s.injectFilesBaseToken(body, ct, aid, caller, path)
+	filesRoot := s.filesRootFor(caller, aid)
+	body = s.injectFilesBaseToken(body, ct, filesRoot, caller, path)
 	if row.ArtifactType == pgstore.TypeApp {
 		// APP files get ONLY the app bridge, never the comments overlay — a
 		// sandboxed page should carry one scoped token, not two.
 		body = s.injectAppBridge(body, ct, aid, caller, nil)
 		s.setContentSecurityApp(w, ct)
 	} else {
-		body = s.injectComments(body, ct, aid, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()))
+		body = s.injectComments(body, ct, aid, row.CommentsEnabled, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()))
 		body = injectFileNavReporter(body, ct, path)
-		setContentSecurityMaybeFullPage(w, ct, fullPageContext(r))
+		body = injectExternalLinkHandler(body, ct, filesRoot)
+		s.setContentSecurityMaybeFullPage(w, ct, fullPageContext(r))
 	}
 	_, _ = w.Write(body)
 }
@@ -2392,8 +2649,11 @@ func (s *Service) httpFileBySlug(w http.ResponseWriter, r *http.Request) {
 // the package root, or a nested page's document-relative refs (e.g.
 // docs/page.html's "style.css") resolve to the wrong directory and 404.
 func (s *Service) filesBaseFor(caller, artifactID, path string) string {
-	dir := dirOf(path)
-	cookiePath := "/api/artifacts/" + artifactID + "/files/" + dir
+	return s.filesRootFor(caller, artifactID) + dirOf(path)
+}
+
+func (s *Service) filesRootFor(caller, artifactID string) string {
+	cookiePath := "/api/artifacts/" + artifactID + "/files/"
 	if s.appToken == nil || s.appTokenVerify == nil || caller == "" {
 		return cookiePath
 	}
@@ -2401,7 +2661,7 @@ func (s *Service) filesBaseFor(caller, artifactID, path string) string {
 	if err != nil || tok == "" {
 		return cookiePath
 	}
-	return "/api/artifacts/" + artifactID + "/files-token/" + tok + "/" + dir
+	return "/api/artifacts/" + artifactID + "/files-token/" + tok + "/"
 }
 
 // dirOf returns the directory portion of a package-relative path, with a
@@ -2420,20 +2680,23 @@ func dirOf(path string) string {
 // request's own (cookie-gated) URL. path is the served file's own
 // package-relative path (see filesBaseFor). No-op for non-HTML or an
 // anonymous caller.
-func (s *Service) injectFilesBaseToken(body []byte, ct, artifactID, caller, path string) []byte {
+func (s *Service) injectFilesBaseToken(body []byte, ct, filesRoot, caller, path string) []byte {
 	if caller == "" || !strings.HasPrefix(strings.ToLower(ct), "text/html") {
 		return body
 	}
-	return injectBaseHref(body, ct, s.filesBaseFor(caller, artifactID, path))
+	return injectBaseHref(body, ct, filesRoot+dirOf(path))
 }
 
 // injectComments inserts the comments overlay (a small config blob + the
 // arti-served bundle) into served text/html package files, so a reader can
 // comment on the prototype page itself. The overlay reaches the comments API
 // with a scoped bearer token (the sandboxed page can't send the cookie).
-// No-ops for non-HTML, unauthenticated requests, or when injection is off.
-func (s *Service) injectComments(body []byte, ct, artifactID, email, name, picture string) []byte {
-	if s.embedToken == nil || email == "" || !strings.HasPrefix(strings.ToLower(ct), "text/html") {
+// No-ops for non-HTML, unauthenticated requests, when injection is off, or
+// when the document's owner has turned commenting off — that last case is what
+// keeps a served HTML page free of comment controls, since the overlay lives
+// inside the sandboxed page where the React app can't reach it.
+func (s *Service) injectComments(body []byte, ct, artifactID string, commentsEnabled bool, email, name, picture string) []byte {
+	if s.embedToken == nil || email == "" || !commentsEnabled || !strings.HasPrefix(strings.ToLower(ct), "text/html") {
 		return body
 	}
 	tok, err := s.embedToken(email, artifactID, name, picture)
@@ -3031,10 +3294,7 @@ func (s *Service) setContentSecurityAppFA(w http.ResponseWriter, ct, fa string) 
 	w.Header().Set("Content-Type", ct)
 	if strings.HasPrefix(strings.ToLower(ct), "text/html") {
 		if fa == "" {
-			fa = s.appFrameAncestors
-		}
-		if fa == "" {
-			fa = "'self'"
+			fa = s.artifactFrameAncestors()
 		}
 		w.Header().Set("Content-Security-Policy",
 			"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads; frame-ancestors "+fa)
@@ -3048,23 +3308,25 @@ func (s *Service) setContentSecurityAppFA(w http.ResponseWriter, ct, fa string) 
 // non-HTML — including the multi-MB zip of a PACKAGE download — it streams
 // straight through without buffering. injectComments no-ops on non-HTML, but we
 // gate on the content type here too so we never read a large zip into memory.
-func (s *Service) writeServedContent(w http.ResponseWriter, rc io.Reader, ct, artifactID, artifactType, caller, callerName, callerPicture string, sizeBytes *int64, fullPage bool) {
+func (s *Service) writeServedContent(w http.ResponseWriter, rc io.Reader, ct string, row sqlc.Artifact, caller, callerName, callerPicture string, fullPage bool) {
 	if strings.HasPrefix(strings.ToLower(ct), "text/html") {
 		body, err := io.ReadAll(rc)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
-		setContentSecurityMaybeFullPage(w, ct, fullPage)
+		s.setContentSecurityMaybeFullPage(w, ct, fullPage)
 		// ATTACHMENT uploads never get the comments overlay — you can't
 		// comment on an attachment. Everything else (standalone HTML, package
 		// files) keeps the in-page injected overlay. Both paths do a single
 		// buffered Write, so net/http sets Content-Length itself — and comment
 		// injection changes the length, so we must NOT pre-set the stored size.
-		if artifactType == pgstore.TypeAttachment {
-			_, _ = w.Write(body)
+		contentRoot := "/api/artifacts/" + pgstore.UUIDFromPG(row.ArtifactID).String()
+		if row.ArtifactType == pgstore.TypeAttachment {
+			_, _ = w.Write(injectExternalLinkHandler(body, ct, contentRoot))
 		} else {
-			_, _ = w.Write(s.injectComments(body, ct, artifactID, caller, callerName, callerPicture))
+			body = s.injectComments(body, ct, pgstore.UUIDFromPG(row.ArtifactID).String(), row.CommentsEnabled, caller, callerName, callerPicture)
+			_, _ = w.Write(injectExternalLinkHandler(body, ct, contentRoot))
 		}
 		return
 	}
@@ -3072,8 +3334,8 @@ func (s *Service) writeServedContent(w http.ResponseWriter, rc io.Reader, ct, ar
 	// Advertise the body length up front so HTTP clients (and agents) can size
 	// the artifact before consuming the stream. Safe here: the non-HTML path
 	// streams the stored bytes verbatim (no injection), so size_bytes is exact.
-	if sizeBytes != nil && *sizeBytes >= 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(*sizeBytes, 10))
+	if row.SizeBytes != nil && *row.SizeBytes >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(*row.SizeBytes, 10))
 	}
 	_, _ = io.Copy(w, rc)
 }
@@ -3114,14 +3376,44 @@ func fullPageContext(r *http.Request) bool {
 // call arti's APIs as the viewer. HTML-ONLY: every other content type falls
 // through to setContentSecurity, so a forged ?ctx=fullpage can never turn an
 // uploaded SVG/XML into a script-enabled document.
-func setContentSecurityMaybeFullPage(w http.ResponseWriter, ct string, fullPage bool) {
-	if fullPage && strings.HasPrefix(strings.ToLower(ct), "text/html") {
+//
+// It also governs EMBEDDING, and must: FullPageView renders an HTML artifact as
+// a nested iframe whose `src` is this route, so when a trusted internal origin
+// frames the viewer (couch's artifact side panel embeds /s/<slug>?v=full) the
+// ancestor chain is couch → arti catalog page → this response. The global
+// `X-Frame-Options: SAMEORIGIN` is evaluated against EVERY ancestor, so it
+// blocks that inner frame even though the catalog page itself is allowed to be
+// framed (cmd_serve.go drops XFO on the Next.js-proxied catalog responses, but
+// this body is served by arti-server directly). XFO can't express an allowlist,
+// so — exactly as the APP and embed paths already do — drop it for HTML bodies
+// and let `frame-ancestors` be authoritative. The body is still opaque-origin
+// sandboxed with no allow-same-origin, so widening who may frame it grants no
+// access to arti. Non-HTML bodies keep XFO unchanged.
+func (s *Service) setContentSecurityMaybeFullPage(w http.ResponseWriter, ct string, fullPage bool) {
+	if strings.HasPrefix(strings.ToLower(ct), "text/html") {
+		sandbox := "sandbox allow-scripts allow-top-navigation-by-user-activation allow-downloads"
+		if fullPage {
+			sandbox = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads"
+		}
 		w.Header().Set("Content-Type", ct)
-		w.Header().Set("Content-Security-Policy",
-			"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads")
+		w.Header().Set("Content-Security-Policy", sandbox+"; frame-ancestors "+s.artifactFrameAncestors())
+		w.Header().Del("X-Frame-Options")
 		return
 	}
 	setContentSecurity(w, ct)
+}
+
+// artifactFrameAncestors is the CSP `frame-ancestors` source list for served
+// artifact HTML bodies — the ONE place the global default resolves, shared with
+// setContentSecurityAppFA so APP and non-APP HTML can't drift. It reuses the APP
+// allowlist (ARTI_APP_FRAME_ANCESTORS) — the same trusted-internal-origin
+// boundary the catalog viewer's own frame-ancestors uses (web/next.config.ts) —
+// falling back to same-origin-only.
+func (s *Service) artifactFrameAncestors() string {
+	if s.appFrameAncestors == "" {
+		return "'self'"
+	}
+	return s.appFrameAncestors
 }
 
 // isScriptSafeMedia reports whether ct is a media type the browser renders
@@ -3708,6 +4000,40 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, code, detail string) {
 	writeJSON(w, status, Error{Detail: detail, Code: code})
+}
+
+// writeInternal answers a request that failed for a reason the caller supplied
+// no bad input for. The two things that go wrong here need opposite treatment:
+//
+//   - The caller hung up mid-request — a browser navigating away, or React
+//     unmounting a component whose fetch is still in flight. The in-flight
+//     query then fails with context.Canceled. Nothing is wrong with the server
+//     and nothing is left reading the response, so answer 499 and stay quiet.
+//     Answering 500 here is what fabricated 13-21 daily "server errors" on
+//     /api/artifacts/aggregates in prod, and logging it at ERROR instead would
+//     just move the same noise into the error stream.
+//
+//   - Anything else is a real failure, so log it. That includes a server-side
+//     deadline, which httperr.ClientGone deliberately does not absorb.
+//     writeError puts the reason in the response BODY and nothing stores
+//     response bodies, so without this line a genuine 500 leaves no record of
+//     what broke — the prod failures above ran for a week undiagnosable for
+//     exactly that reason.
+//
+// The route pattern is logged rather than r.URL.Path deliberately: some paths
+// carry a scoped token in a segment (see redactLogPath), and the pattern is
+// both secret-free and the better aggregation key.
+func writeInternal(w http.ResponseWriter, r *http.Request, err error) {
+	if httperr.ClientGone(r, err) {
+		w.WriteHeader(httperr.StatusClientClosedRequest)
+		return
+	}
+	attrs := []any{"m", r.Method, "err", err}
+	if rc := chi.RouteContext(r.Context()); rc != nil {
+		attrs = append(attrs, "route", rc.RoutePattern())
+	}
+	slog.Error("request failed", attrs...)
+	writeError(w, http.StatusInternalServerError, "internal", err.Error())
 }
 
 func writeMaybeNotFound(w http.ResponseWriter, err error) bool {

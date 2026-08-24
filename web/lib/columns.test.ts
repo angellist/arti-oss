@@ -16,6 +16,7 @@ import {
   toggleColumn,
   visibleColumns,
   widthOf,
+  SLUG_VIEW_PINNED,
   type ColumnKey,
   type ColumnPrefs,
 } from "./columns";
@@ -33,6 +34,34 @@ describe("defaults", () => {
     // The menu lists COLUMNS; prefs.order must cover all of them or a column
     // could be toggled on and still never render.
     expect([...defaultColumnPrefs().order].sort()).toEqual([...DEFAULT_ORDER].sort());
+  });
+});
+
+describe("pinned columns", () => {
+  it("shows a pinned column that prefs hide, without editing the prefs", () => {
+    const p = defaultColumnPrefs();
+    expect(p.hidden).toContain("comments");
+    const shown = visibleColumns(p, SLUG_VIEW_PINNED).map((c) => c.key);
+    expect(shown).toContain("comments");
+    // The pin is per-view: the prefs object (and therefore the cookie) is
+    // untouched, so the catalog still hides the column.
+    expect(p.hidden, "pinning must not mutate the caller's prefs").toContain("comments");
+    expect(keys(p)).not.toContain("comments");
+  });
+
+  it("keeps a pinned column in the user's own order and does not duplicate it", () => {
+    // Already visible and moved: pinning must be a no-op, not a second copy
+    // appended at the end.
+    let p = toggleColumn(defaultColumnPrefs(), "comments");
+    p = moveColumn(p, "comments", "slug");
+    const shown = visibleColumns(p, SLUG_VIEW_PINNED).map((c) => c.key);
+    expect(shown.filter((k) => k === "comments").length).toBe(1);
+    expect(shown.indexOf("comments")).toBe(shown.indexOf("slug") - 1);
+  });
+
+  it("still renders a pinned column that a hand-built prefs order omits", () => {
+    const p: ColumnPrefs = { order: ["title"], hidden: [], widths: {} };
+    expect(visibleColumns(p, SLUG_VIEW_PINNED).map((c) => c.key)).toEqual(["title", "comments"]);
   });
 });
 

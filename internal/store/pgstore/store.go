@@ -145,11 +145,25 @@ type PutInput struct {
 	Labels        []string
 	Metadata      json.RawMessage // optional, schema-less
 	AllowedAccess []string        // glob-on-email patterns; nil → default '{*}'
-	// AllowedWrite is the per-version write list. nil → SQL NULL (write
-	// follows read — the back-compat default). Non-nil (incl. empty) is
-	// authoritative; empty == creator-only. Unioned into AllowedAccess on
-	// insert so it stays a subset (read paths untouched).
+	// AllowedWrite is the write list. nil → SQL NULL (write follows read —
+	// the back-compat default). Non-nil (incl. empty) is authoritative;
+	// empty == creator-only. Unioned into AllowedAccess on insert so it
+	// stays a subset (read paths untouched).
 	AllowedWrite []string
+	// InheritAccess / InheritWrite mark the corresponding field above as a
+	// fallback the caller resolved from an EARLIER read rather than an
+	// explicit request value. When a live prior version exists at insert
+	// time, its pair wins — re-resolved from the fresh read inside Put's
+	// slug critical section. Without this, a publish racing an ACL change
+	// would persist (and fan out) the stale pair the caller inherited,
+	// silently reverting the slug's ACL past the owner's newer write.
+	InheritAccess bool
+	InheritWrite  bool
+
+	// NOTE: there is deliberately no CommentsEnabled field. The per-doc comment
+	// switch is resolved by Put itself from a fresh read of the slug's latest
+	// version, so no caller can pass a value it read earlier and re-open
+	// comments an owner turned off in the meantime.
 
 	// CheckAccess, if set and NamedSlug is non-nil, is called against a
 	// fresh read of the slug's current latest version — taken right here,
@@ -186,7 +200,12 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 		return sqlc.Artifact{}, fmt.Errorf("pgstore: title, content_type, creator are required")
 	}
 
-	if in.CheckAccess != nil && in.NamedSlug != nil {
+	// Fast-fail pre-check, OUTSIDE the slug critical section below: a caller
+	// who will be denied anyway shouldn't upload a blob first. This check is
+	// advisory only — the authoritative hook run happens against the fresh
+	// read inside the transaction, where a concurrent ACL change can no
+	// longer be straddled (DD-0055 D8).
+	if in.NamedSlug != nil && in.CheckAccess != nil {
 		prev, err := s.GetBySlug(ctx, *in.NamedSlug, nil)
 		switch {
 		case err == nil:
@@ -194,8 +213,7 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 				return sqlc.Artifact{}, err
 			}
 		case errors.Is(err, ErrNotFound):
-			// No prior version to check access against — proceed as a
-			// fresh create.
+			// No live prior version — nothing to pre-check.
 		default:
 			return sqlc.Artifact{}, err
 		}
@@ -203,6 +221,9 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 
 	// Enforce attachment invariants at the store — the single write
 	// chokepoint — so no caller or slug-inherit path can violate them.
+	// Applied before the slug branch below: attachments are always slugless,
+	// so they never enter the slug critical section at all (and never carry
+	// another doc's comment switch).
 	in = applyAttachmentInvariants(in)
 
 	id := uuid.New()
@@ -232,11 +253,6 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 		blobRef = &key
 	}
 
-	version, err := s.nextVersion(ctx, in.NamedSlug)
-	if err != nil {
-		return sqlc.Artifact{}, err
-	}
-
 	meta := in.Metadata
 	if len(meta) == 0 {
 		meta = json.RawMessage(`{}`)
@@ -254,44 +270,242 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 		sc := in.Scopes[0] // copy so the pointer doesn't alias the slice backing array
 		legacyScope = &sc
 	}
-	// nil → default everyone-authenticated. Distinct from empty slice,
-	// which is "creator-only on this row". Callers that want the
-	// default explicitly should pass nil; those that want creator-only
-	// pass []string{}.
-	access := in.AllowedAccess
-	if access == nil {
-		access = []string{"*"}
-	}
-	// ⊆ invariant: a write grant always implies read, so union the write
-	// tokens into access. nil AllowedWrite (mirror) leaves access untouched.
-	if in.AllowedWrite != nil {
-		access = unionTokens(access, in.AllowedWrite)
+
+	insertParams := func(version *int32, access, write []string, commentsEnabled bool) sqlc.InsertArtifactParams {
+		return sqlc.InsertArtifactParams{
+			ArtifactID:      pgUUID(id),
+			ArtifactType:    in.ArtifactType,
+			NamedSlug:       in.NamedSlug,
+			Version:         version,
+			Title:           in.Title,
+			Description:     in.Description,
+			ContentType:     in.ContentType,
+			InlineContent:   inline,
+			BlobRef:         blobRef,
+			SHA256:          shaPtr,
+			SizeBytes:       szPtr,
+			Creator:         in.Creator,
+			Scope:           legacyScope,
+			Scopes:          in.Scopes,
+			Labels:          in.Labels,
+			Metadata:        meta,
+			AllowedAccess:   access,
+			AllowedWrite:    write,
+			CommentsEnabled: commentsEnabled,
+		}
 	}
 
-	row, err := s.q.InsertArtifact(ctx, sqlc.InsertArtifactParams{
-		ArtifactID:    pgUUID(id),
-		ArtifactType:  in.ArtifactType,
-		NamedSlug:     in.NamedSlug,
-		Version:       version,
-		Title:         in.Title,
-		Description:   in.Description,
-		ContentType:   in.ContentType,
-		InlineContent: inline,
-		BlobRef:       blobRef,
-		SHA256:        shaPtr,
-		SizeBytes:     szPtr,
-		Creator:       in.Creator,
-		Scope:         legacyScope,
-		Scopes:        in.Scopes,
-		Labels:        in.Labels,
-		Metadata:      meta,
-		AllowedAccess: access,
-		AllowedWrite:  in.AllowedWrite,
-	})
+	// Slugless artifacts are single-version: no siblings, no document to
+	// inherit a comment switch or ACL from, and nothing to serialize against.
+	if in.NamedSlug == nil {
+		row, err := s.q.InsertArtifact(ctx, insertParams(nil, finalAccess(in.AllowedAccess, in.AllowedWrite), in.AllowedWrite, true))
+		if err != nil {
+			return sqlc.Artifact{}, fmt.Errorf("pgstore: insert: %w", err)
+		}
+		return row, nil
+	}
+
+	// ---- slug critical section (DD-0055 D8) ----
+	// Everything slug-scoped — the authoritative fresh read + access hook,
+	// comment-switch and ACL inheritance, version numbering, the insert, and
+	// the sibling ACL fan-out — runs inside one transaction holding the
+	// per-slug advisory lock, so it cannot interleave with a concurrent
+	// UpdateAccessBySlug (or another Put) on the same slug. The blob upload
+	// deliberately stayed OUTSIDE: it is keyed by a fresh UUID so it
+	// conflicts with nothing, and holding a per-slug lock across an S3
+	// upload would turn concurrent uploads into lock/pool contention.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return sqlc.Artifact{}, fmt.Errorf("pgstore: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := acquireSlugLock(ctx, tx, *in.NamedSlug); err != nil {
+		return sqlc.Artifact{}, err
+	}
+	qtx := s.q.WithTx(tx)
+
+	// One fresh read of the slug's current latest version, used for the
+	// caller's access hook, the doc-level comment switch, and the ACL
+	// inherit/fan-out decisions. Never inherited from something a caller
+	// read earlier, which a concurrent owner write could have made stale.
+	commentsEnabled := true // no prior version → comments on, the default
+	var livePrev *sqlc.Artifact
+	prev, err := qtx.GetLatestArtifactBySlug(ctx, in.NamedSlug)
+	switch {
+	case err == nil:
+		if in.CheckAccess != nil {
+			if err := in.CheckAccess(ctx, prev); err != nil {
+				return sqlc.Artifact{}, err
+			}
+		}
+		// The switch is a property of the document, and SetCommentsEnabled*
+		// writes every version of the slug — so all rows agree and the
+		// latest live one is as good as any. Inherit it rather than letting
+		// a new version silently re-open comments the owner turned off.
+		commentsEnabled = prev.CommentsEnabled
+		livePrev = &prev
+	case errors.Is(err, pgx.ErrNoRows):
+		// No LIVE prior version — either a brand-new slug or one whose
+		// versions are all archived. The latter still re-versions (version
+		// numbering ignores deleted_at), so fall back to a read that
+		// ignores it too and inherit from there. Without this, archiving a
+		// closed single-version doc and republishing to its slug would
+		// re-open commenting — the exact resurrection the slug-wide update
+		// writes archived rows to prevent. Access is deliberately NOT
+		// re-checked here: an all-archived slug is free to reuse, which is
+		// pre-existing behavior this must not change. ACL fan-out is also
+		// skipped (livePrev stays nil): with no live prev there was no
+		// authority hook run to validate a sibling rewrite — all-archived
+		// slugs are the convergence report's problem, not this path's.
+		archived, aerr := qtx.GetLatestArtifactBySlugAnyState(ctx, in.NamedSlug)
+		switch {
+		case aerr == nil:
+			commentsEnabled = archived.CommentsEnabled
+		case errors.Is(aerr, pgx.ErrNoRows):
+			// Genuinely a fresh slug — keep the default.
+		default:
+			return sqlc.Artifact{}, aerr
+		}
+	default:
+		return sqlc.Artifact{}, err
+	}
+
+	// Inherited ACLs re-resolve from the FRESH prev (see PutInput): the
+	// caller's earlier read may predate a concurrent ACL change, and
+	// persisting that stale pair would silently revert the slug's ACL.
+	if livePrev != nil {
+		if in.InheritAccess {
+			in.AllowedAccess = livePrev.AllowedAccess
+		}
+		if in.InheritWrite {
+			in.AllowedWrite = livePrev.AllowedWrite
+		}
+	}
+	access := finalAccess(in.AllowedAccess, in.AllowedWrite)
+
+	version, err := nextVersionTx(ctx, qtx, in.NamedSlug)
+	if err != nil {
+		return sqlc.Artifact{}, err
+	}
+
+	row, err := qtx.InsertArtifact(ctx, insertParams(version, access, in.AllowedWrite, commentsEnabled))
 	if err != nil {
 		return sqlc.Artifact{}, fmt.Errorf("pgstore: insert: %w", err)
 	}
+
+	// ACL fan-out (DD-0055 D3): a published pair that differs from the
+	// slug's current one changes the SLUG's ACL, so the siblings converge in
+	// the same transaction. Gated on livePrev — the row the caller's
+	// CheckAccess hook just validated ACL-change authority against. The
+	// query's own change predicate skips the freshly inserted row.
+	if livePrev != nil && aclPairDiffers(*livePrev, access, in.AllowedWrite) {
+		if _, err := qtx.UpdateArtifactAccessBySlug(ctx, sqlc.UpdateArtifactAccessBySlugParams{
+			NamedSlug:     in.NamedSlug,
+			AllowedAccess: access,
+			AllowedWrite:  in.AllowedWrite,
+		}); err != nil {
+			return sqlc.Artifact{}, fmt.Errorf("pgstore: acl fan-out: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return sqlc.Artifact{}, fmt.Errorf("pgstore: commit: %w", err)
+	}
 	return row, nil
+}
+
+// finalAccess normalizes an (access, write) input pair to the stored access
+// list: nil access → the everyone-authenticated default, and an explicit
+// write list is unioned in (⊆ invariant: a write grant always implies read).
+func finalAccess(access, write []string) []string {
+	if access == nil {
+		access = []string{"*"}
+	}
+	if write != nil {
+		access = unionTokens(access, write)
+	}
+	return access
+}
+
+// aclPairDiffers reports whether the FINAL pair (post-finalAccess) differs
+// from what row carries — the store-side mirror of the service's aclChanged,
+// against stored (already-normalized) values. nil-vs-non-nil write is itself
+// a difference: mirror mode and an explicit list behave differently as the
+// read list evolves.
+func aclPairDiffers(row sqlc.Artifact, access, write []string) bool {
+	if !tokenSetEq(row.AllowedAccess, access) {
+		return true
+	}
+	if (row.AllowedWrite == nil) != (write == nil) {
+		return true
+	}
+	return !tokenSetEq(row.AllowedWrite, write)
+}
+
+// tokenSetEq reports set-equality (order- and duplicate-insensitive, exact
+// case-sensitive tokens — matching unionTokens / the SQL overlap semantics).
+func tokenSetEq(a, b []string) bool {
+	am := make(map[string]struct{}, len(a))
+	for _, x := range a {
+		am[x] = struct{}{}
+	}
+	bm := make(map[string]struct{}, len(b))
+	for _, x := range b {
+		bm[x] = struct{}{}
+	}
+	if len(am) != len(bm) {
+		return false
+	}
+	for k := range am {
+		if _, ok := bm[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// acquireSlugLock takes the transaction-scoped advisory lock that serializes
+// slug-scoped writes (version inserts vs ACL fan-outs). Without it, a revoke
+// racing a concurrent version insert leaves the NEWEST version carrying the
+// pre-revocation ACL — the exact divergence DD-0055 exists to end.
+func acquireSlugLock(ctx context.Context, tx pgx.Tx, slug string) error {
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", slug); err != nil {
+		return fmt.Errorf("pgstore: slug lock: %w", err)
+	}
+	return nil
+}
+
+// UpdateAccessBySlug replaces (allowed_access, allowed_write) on EVERY
+// version of slug — archived rows included, so an unarchive can't resurrect
+// a stale ACL — enforcing the same ⊆ invariant as UpdateAccess: nil access →
+// ['*'], an explicit write list is unioned into access, nil write → mirror
+// mode (SQL NULL). Returns the number of rows whose pair actually CHANGED
+// (an identical resend returns 0, so callers can skip reindexing). Runs
+// under the per-slug advisory lock (DD-0055 D8) so it cannot interleave with
+// a concurrent version insert. Authority is enforced at the service layer
+// (isDocOwner), exactly as with UpdateAccess.
+func (s *Store) UpdateAccessBySlug(ctx context.Context, slug string, access, write []string) (int64, error) {
+	access = finalAccess(access, write)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("pgstore: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := acquireSlugLock(ctx, tx, slug); err != nil {
+		return 0, err
+	}
+	n, err := s.q.WithTx(tx).UpdateArtifactAccessBySlug(ctx, sqlc.UpdateArtifactAccessBySlugParams{
+		NamedSlug:     &slug,
+		AllowedAccess: access,
+		AllowedWrite:  write,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("pgstore: commit: %w", err)
+	}
+	return n, nil
 }
 
 // AppendInput is the input to Append. Mirrors PutInput except Content
@@ -376,6 +590,12 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 				Labels:        in.Labels,
 				AllowedAccess: dereferenceSlice(in.AllowedAccess),
 				AllowedWrite:  dereferenceSlice(in.AllowedWrite),
+				InheritAccess: in.AllowedAccess == nil,
+				InheritWrite:  in.AllowedWrite == nil,
+				// Thread the hook through so Put's in-transaction fresh read
+				// re-validates access/authority even if we lose the create
+				// race and a prior version appears (DD-0055 D8).
+				CheckAccess: in.CheckAccess,
 			})
 			if err == nil || !isUniqueViolation(err) {
 				return row, err
@@ -467,6 +687,12 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 			Labels:        labels,
 			AllowedAccess: access,
 			AllowedWrite:  write,
+			InheritAccess: in.AllowedAccess == nil,
+			InheritWrite:  in.AllowedWrite == nil,
+			// Re-validated by Put against its in-transaction fresh read, so
+			// an ACL change landing between this loop's read and the insert
+			// can't be straddled (DD-0055 D8).
+			CheckAccess: in.CheckAccess,
 		})
 		if err == nil {
 			return row, nil
@@ -1139,6 +1365,28 @@ func (s *Store) UpdateAccess(ctx context.Context, id uuid.UUID, access []string,
 	})
 }
 
+// SetCommentsEnabled flips the per-doc comment switch on ONE artifact row.
+// Used for slugless artifacts, which have no version lineage. Permission
+// (owner-or-admin) is enforced at the service layer.
+func (s *Store) SetCommentsEnabled(ctx context.Context, id uuid.UUID, enabled bool) (int64, error) {
+	return s.q.UpdateArtifactCommentsEnabled(ctx, sqlc.UpdateArtifactCommentsEnabledParams{
+		ArtifactID:      pgUUID(id),
+		CommentsEnabled: enabled,
+	})
+}
+
+// SetCommentsEnabledBySlug flips the switch on EVERY version of a slug —
+// including archived ones, so restoring a version can't resurrect commenting
+// the owner turned off. This is what makes the control read as per-document
+// rather than per-version (unlike allowed_access, which is deliberately
+// per-version). Permission is enforced at the service layer.
+func (s *Store) SetCommentsEnabledBySlug(ctx context.Context, slug string, enabled bool) (int64, error) {
+	return s.q.UpdateArtifactCommentsEnabledBySlug(ctx, sqlc.UpdateArtifactCommentsEnabledBySlugParams{
+		NamedSlug:       &slug,
+		CommentsEnabled: enabled,
+	})
+}
+
 // unionTokens returns a ∪ b, preserving a's order then b's new entries, with
 // exact (case-sensitive) dedupe — matching how tokens are compared everywhere
 // else (SQL array overlap + matchPatterns group equality).
@@ -1410,10 +1658,18 @@ func (s *Store) SlugCreator(ctx context.Context, slug string) (string, error) {
 }
 
 func (s *Store) nextVersion(ctx context.Context, slug *string) (*int32, error) {
+	return nextVersionTx(ctx, s.q, slug)
+}
+
+// nextVersionTx is nextVersion against an arbitrary query handle, so Put's
+// slug critical section can number the version inside its transaction (the
+// advisory lock then also retires the (slug, version) unique-violation race
+// between lock-taking writers).
+func nextVersionTx(ctx context.Context, q *sqlc.Queries, slug *string) (*int32, error) {
 	if slug == nil {
 		return nil, nil
 	}
-	n, err := s.q.NextVersionForSlug(ctx, slug)
+	n, err := q.NextVersionForSlug(ctx, slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			one := int32(1)

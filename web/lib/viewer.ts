@@ -120,3 +120,27 @@ export function resolvePackageEntry(
   }
   return undefined;
 }
+
+// TEXT_SCALE_PARAM maps the `?ts=` URL param to a body text-scale multiplier.
+// `sm`/`md`/`lg` mirror ViewerToolbar's TEXT_SCALE (the in-viewer control), so a
+// link carrying the reader's own preference renders identically. `xs` is a
+// param-only extra step below the toolbar's smallest, for EMBEDDERS: couch's
+// artifact side panel is a ~420px column, where the toolbar's `md` baseline
+// (tuned for a full page) reads a step too large. Keep the shared keys in sync
+// with TEXT_SCALE.
+export const TEXT_SCALE_PARAM: Record<string, number> = {
+  xs: 0.72,
+  sm: 0.85,
+  md: 1,
+  lg: 1.15,
+};
+
+// textScaleFromParam reads `?ts=` off a page's searchParams and returns the
+// multiplier to publish as --arti-text-scale. Unknown/absent → 1 (today's
+// sizes), so a stale or hand-typed link never renders at a surprise size.
+export function textScaleFromParam(
+  sp: Record<string, string | string[] | undefined>,
+): number {
+  const v = Array.isArray(sp.ts) ? sp.ts[0] : sp.ts;
+  return (v && TEXT_SCALE_PARAM[v]) || 1;
+}

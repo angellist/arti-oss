@@ -28,6 +28,11 @@ func TestMain(m *testing.M) {
 type fakeMinter struct {
 	title, slug, token string
 	appErr, mintErr    error
+	// viewer-mode fields; aid is what EmbedViewerArtifact resolves ident to.
+	aid           string
+	viewerToken   string
+	viewerCalls   int
+	viewerMintFor string
 }
 
 func (f *fakeMinter) EmbedUserApp(_ context.Context, appID, email string) (string, string, error) {
@@ -35,6 +40,22 @@ func (f *fakeMinter) EmbedUserApp(_ context.Context, appID, email string) (strin
 }
 func (f *fakeMinter) MintEmbedUserToken(_ context.Context, appID, email string) (string, error) {
 	return f.token, f.mintErr
+}
+func (f *fakeMinter) EmbedViewerArtifact(_ context.Context, ident string, _ *int32, email string) (string, string, string, bool, error) {
+	f.viewerCalls++
+	aid := f.aid
+	if aid == "" {
+		aid = "aid-" + ident
+	}
+	return f.title, f.slug, aid, false, f.appErr
+}
+func (f *fakeMinter) MintEmbedViewerToken(_ context.Context, artifactID, email string) (string, error) {
+	f.viewerMintFor = artifactID
+	tok := f.viewerToken
+	if tok == "" {
+		tok = f.token
+	}
+	return tok, f.mintErr
 }
 
 // fakeStore is an in-memory PendingTokenStore for tests.

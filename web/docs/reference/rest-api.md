@@ -52,6 +52,8 @@ includes `APP`).
 | `labels` | string[] | |
 | `allowed_access` | string[] | glob-on-email patterns; `["*"]` = any authed reader; `[]` = creator-only |
 | `allowed_write` | string[] \| omitted | tokens allowed to write (new version / append / edit). Omitted = write follows read; `[]` = creator-only writes. Always a subset of `allowed_access` (see below) |
+| `comments_enabled` | bool | per-DOCUMENT comment switch; `false` = the owner turned commenting off (no controls, no threads returned, writes 403) |
+| `can_manage_comments` | bool \| omitted | whether *you* may flip `comments_enabled` (owner or admin). Single-artifact responses only |
 | `metadata` | object | arbitrary; PACKAGE/APP carry a `package` sub-object |
 | `created_at` / `modified_at` | RFC3339 | |
 | `deleted_at` | RFC3339 \| null | set when archived |
@@ -143,9 +145,26 @@ only artifacts they can read (their email + group memberships); admins with
 
 ### PATCH `/api/artifacts/{id}`
 
-Edit mutable fields: `{ title?, scopes?, labels?, allowed_access?, allowed_write? }`. Creator
-or a holder of `MANAGE_ARTIFACTS`; writing a `kind:skill` artifact additionally requires
-`MANAGE_SKILLS`. Response `200` + updated `ArtifactInfo`.
+Edit mutable fields: `{ title?, description?, scopes?, labels?, allowed_access?, allowed_write?,
+comments_enabled? }`. Creator or a holder of `MANAGE_ARTIFACTS`; writing a `kind:skill` artifact
+additionally requires `MANAGE_SKILLS`. Response `200` + updated `ArtifactInfo`.
+
+**`comments_enabled`, `allowed_access`, and `allowed_write` are per-DOCUMENT,
+not per-version:** the server writes them to every version of the slug
+(archived versions included, so unarchiving can't resurrect a stale setting),
+and a new version inherits them. They are settable only by the artifact's
+OWNER (its earliest version's creator) or an admin — not by a delegated
+writer, and not by the creator of the patched version if that differs from
+the owner. For the ACL fields the owner's write is applied slug-wide even when
+the values match the patched version — that resend is how a slug whose
+versions disagree (data predating the slug-wide model) gets converged. A
+non-owner re-sending the current ACL unchanged is still accepted as a no-op;
+changing it is still `403`. Everything else in this section (`title`,
+`description`, `labels`, `scopes`) stays per-version. A comments-only
+PATCH is exempt from the `kind:skill` guard, since it changes no skill content.
+`false` turns commenting off everywhere: no overlay in the viewer, none injected
+into served HTML, no threads from the list endpoints, `403` on every write.
+Existing threads are kept and reappear if it is set back to `true`.
 
 **Read vs write access.** `allowed_access` gates who can *read* a version;
 `allowed_write` gates who can *write* it (push a new version, append, or edit
@@ -263,9 +282,18 @@ Named member sets used in `allowed_access` patterns and role assignments
 | POST | `/api/groups` | Create — `{ name, display_name, members }` → `201` |
 | PATCH | `/api/groups/{name}` | Update `{ display_name?, members? }` (owner or admin) |
 | DELETE | `/api/groups/{name}` | Delete (owner or admin) → `204` |
+| GET | `/api/idp-groups` | List captured IdP (SSO) group names + member counts (no rosters) |
+| GET | `/api/people` | Email typeahead: `?q=` (min 2 chars), `?limit=` (default 10) → `{ people: [{ email }], min_query }` |
 
 A group DTO carries `{ name, display_name, members, member_count, token (group:name),
 created_by, created_at, modified_at }`.
+
+**`/api/people`** backs the email typeahead in the access editor and the membership
+editor. arti provisions no users, so "who exists" is the union of the tables that have
+recorded an address: login snapshots (`user_idp_groups`), artifact creators, group
+members, and user role assignments. Glob members (`*@domain`) are excluded — they are
+patterns, not people. A query under two characters returns an empty list, so no request
+shape enumerates the workspace.
 
 **Role-bearing groups.** A group that has a role assigned to its `group:<name>` principal
 is privileged: creating it, changing its membership, or deleting it additionally requires
@@ -409,7 +437,8 @@ pre-shared credentials (RFC 7591 DCR + RFC 6749 authorization-code + PKCE).
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/oauth/register` | Dynamic client registration → `client_id` (+ `client_secret` unless `none`). IP-rate-limited (`ARTI_OAUTH_REGISTER_RPM`, default 10/min) |
-| GET | `/oauth/authorize` | Authorization request (requires `code_challenge` S256, `state`); redirects with `code` |
+| GET | `/oauth/authorize` | Authorization request (requires `code_challenge` S256, `state`); renders the consent page — issues no code. Identity comes from the `arti_session` cookie, or the proxy headers under `ARTI_AUTH_MODE=proxy`; no session redirects to `/auth/login` |
+| POST | `/oauth/authorize/confirm` | Approves the consented request and redirects to the client with `code`. Same-origin: the page's signed `consent` field plus its `SameSite=Strict` identity cookie |
 | POST | `/oauth/token` | `authorization_code` (with PKCE `code_verifier`) or `refresh_token` grant |
 | GET | `/oauth/obo/callback` | OBO broker callback after upstream consent (the arti→upstream leg) |
 

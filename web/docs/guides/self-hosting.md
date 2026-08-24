@@ -89,7 +89,17 @@ independently — do them in order and run doctor between steps.
    - **`ARTI_AUTH_MODE=proxy`**: you already run an authenticating proxy
      (oauth2-proxy, Cloudflare Access, Pomerium, Authelia…) that injects
      `X-Auth-Request-Email`/`-Groups`. Hard requirement: arti must not be
-     network-reachable except through that proxy.
+     network-reachable except through that proxy, and the proxy must
+     **overwrite** those headers rather than pass them through — this mode
+     tells arti to believe them, so a request that reaches arti directly is
+     whoever it claims to be.
+
+   The mode you pick decides whether those headers are believed at all.
+   Under `oidc` (and `disabled`) arti ignores them everywhere, including
+   the MCP OAuth authorization endpoint, and identifies users only from the
+   session cookie it signed itself — so running arti directly on the
+   network, as this recommended path does, does not hand anyone an identity
+   for the asking. You do not need a proxy to use MCP OAuth safely.
 4. **Allow and administer**: `AUTH_ALLOWED_EMAILS=yourdomain.com` (empty
    admits nobody) and `ARTI_ADMIN_EMAILS=you@yourdomain.com`.
    Entries may be **full addresses** as well as domains, and on a consumer

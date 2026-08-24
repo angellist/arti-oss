@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -161,10 +163,7 @@ func (f loginFinisher) finish(w http.ResponseWriter, r *http.Request, email, nam
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(f.accessTTL.Seconds()),
 	})
-	if returnTo == "" || !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
-		returnTo = "/"
-	}
-	http.Redirect(w, r, returnTo, http.StatusFound)
+	http.Redirect(w, r, sanitizeReturnTo(returnTo), http.StatusFound)
 }
 
 func (f loginFinisher) renderConfirmation(w http.ResponseWriter, r *http.Request, email, code, flow string) {
@@ -335,9 +334,45 @@ func verifyLoginBlob(signer *JWTSigner, domain, value string, payload any) bool 
 		return time.Now().Unix() <= p.Exp
 	case *loginConfirmIdentity:
 		return time.Now().Unix() <= p.Exp
+	case *mcpConsentState:
+		return time.Now().Unix() <= p.Exp
 	default:
 		return false
 	}
+}
+
+// sanitizeReturnTo reduces a return_to parameter to a same-site path, and
+// falls back to "/" for anything else. Used by both interactive front
+// doors, since each finishes through loginFinisher.finish.
+//
+// Testing the raw parameter is not enough. http.Redirect path.Cleans a
+// relative Location before writing it, so the string checked and the
+// string sent can differ: `/../\host` passes a leading-`/\` test and is
+// then written as `/\host`. Browsers normalise a backslash to a slash,
+// which makes that protocol-relative and sends the user off-site at the
+// moment they have most reason to trust where they land. So clean first,
+// judge the cleaned path, and emit exactly what was judged.
+func sanitizeReturnTo(returnTo string) string {
+	const home = "/"
+	if returnTo == "" {
+		return home
+	}
+	u, err := url.Parse(returnTo)
+	// A scheme, an authority, or an opaque body all leave the site. Note
+	// that "//host/x" parses as an authority and is caught here.
+	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" || u.User != nil {
+		return home
+	}
+	// Judge the decoded path, so a backslash is seen as the slash the
+	// browser will treat it as.
+	if p := path.Clean("/" + strings.TrimPrefix(u.Path, "/")); strings.HasPrefix(p, "//") || strings.HasPrefix(p, `/\`) {
+		return home
+	}
+	out := path.Clean("/" + strings.TrimPrefix(u.EscapedPath(), "/"))
+	if u.RawQuery != "" {
+		out += "?" + u.RawQuery
+	}
+	return out
 }
 
 func clearLoginIdentityCookie(w http.ResponseWriter, secure bool) {

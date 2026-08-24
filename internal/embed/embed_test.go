@@ -17,6 +17,8 @@ type fakeArt struct {
 	gotOrigins                             []string
 	gotVer                                 *int32
 	gotFileAID, gotFilePath, gotFileCaller string
+	gotPinned                              string
+	pinMismatch                            bool
 }
 
 func (f *fakeArt) ServeForEmbed(w http.ResponseWriter, _ *http.Request, surface, ident string, ver *int32, caller, fa string) bool {
@@ -29,7 +31,7 @@ func (f *fakeArt) ServeForEmbed(w http.ResponseWriter, _ *http.Request, surface,
 	return true
 }
 
-func (f *fakeArt) ServeEmbedFile(w http.ResponseWriter, _ *http.Request, aid, p, caller, _ string) bool {
+func (f *fakeArt) ServeEmbedFile(w http.ResponseWriter, _ *http.Request, aid, p, caller, _, _ string) bool {
 	f.gotFileAID, f.gotFilePath, f.gotFileCaller = aid, p, caller
 	if !f.fileOK {
 		return false
@@ -49,7 +51,21 @@ func (f *fakeArt) ServeForEmbedUser(w http.ResponseWriter, _ *http.Request, surf
 	return true
 }
 
-func (f *fakeArt) ServeEmbedFilePublic(w http.ResponseWriter, _ *http.Request, aid, p, _ string) bool {
+func (f *fakeArt) ServeForEmbedPinned(w http.ResponseWriter, _ *http.Request, surface, ident string, ver *int32, viewer, fa, pinned string) (bool, bool) {
+	f.gotSurface, f.gotIdent, f.gotVer, f.gotCaller, f.gotFA = surface, ident, ver, viewer, fa
+	f.gotPinned = pinned
+	if f.pinMismatch {
+		return false, true
+	}
+	if !f.serveOK {
+		return false, false
+	}
+	w.Header().Set("Content-Type", "text/html")
+	_, _ = io.WriteString(w, "SERVED-VIEWER:"+ident+":"+viewer)
+	return true, false
+}
+
+func (f *fakeArt) ServeEmbedFilePublic(w http.ResponseWriter, _ *http.Request, aid, p, _, _ string) bool {
 	f.gotFileAID, f.gotFilePath, f.gotFileCaller = aid, p, "<user-mode>"
 	if !f.fileOK {
 		return false
@@ -66,6 +82,19 @@ type fakeTok struct {
 func (t fakeTok) VerifyEmbedToken(string) (string, string, error) { return t.email, t.aid, t.err }
 
 func (t fakeTok) VerifyEmbedFilesToken(string) (string, error) { return t.aid, t.err }
+
+// viewerTok satisfies ViewerTokenVerifier as well, so the viewer-mode doc route
+// can authenticate. fakeTok deliberately does NOT, which is what exercises the
+// "verifier does not support viewer mode" fallback to the gate page.
+type viewerTok struct {
+	fakeTok
+	vEmail, vAID string
+	vErr         error
+}
+
+func (t viewerTok) VerifyEmbedViewerToken(string) (string, string, error) {
+	return t.vEmail, t.vAID, t.vErr
+}
 
 func testSurfaces() map[string]Surface {
 	return map[string]Surface{

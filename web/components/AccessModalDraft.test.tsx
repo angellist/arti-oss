@@ -9,6 +9,10 @@ import AccessModal from "./AccessModal";
 vi.mock("@/lib/arti", () => ({
   listGroups: async () => [],
   listIdpGroups: async () => [],
+  // The people typeahead reads these; the modal renders no suggestions without
+  // a typed draft, so a stub that never matches keeps these tests about access.
+  MIN_PEOPLE_QUERY: 2,
+  searchPeople: async () => [],
   updateArtifactAccess: async () => ({}),
 }));
 
@@ -54,11 +58,20 @@ describe("AccessModal draft mode preserves mirror", () => {
     );
     act(() => btn!.click());
   };
+  // Edits are staged; Confirm is what lifts them into the caller's draft.
+  const confirm = () => {
+    const btn = Array.from(document.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Confirm",
+    ) as HTMLButtonElement;
+    act(() => btn.click());
+  };
 
   it("reports null (mirror) when every remaining reader is still a writer", () => {
     const onCommit = vi.fn();
     render({ onCommit });
     removeFirst();
+    expect(onCommit).not.toHaveBeenCalled(); // staged, not committed
+    confirm();
     expect(onCommit).toHaveBeenCalledTimes(1);
     const [access, write] = onCommit.mock.calls[0];
     expect(access).toEqual(["b@example.com"]);
@@ -71,6 +84,7 @@ describe("AccessModal draft mode preserves mirror", () => {
     const onCommit = vi.fn();
     render({ onCommit, write: ["a@example.com"] });
     removeFirst(); // drop a@ — b@ remains, and b@ is read-only
+    confirm();
     const [access, write] = onCommit.mock.calls[0];
     expect(access).toEqual(["b@example.com"]);
     expect(write).toEqual([]);
@@ -80,6 +94,7 @@ describe("AccessModal draft mode preserves mirror", () => {
     const onCommit = vi.fn();
     render({ onCommit, write: [] });
     removeFirst();
+    confirm();
     const [, write] = onCommit.mock.calls[0];
     expect(write).not.toBeNull();
     expect(write).toEqual([]);

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -32,6 +33,8 @@ func (s *Service) Mount(r chi.Router) {
 	r.Post("/api/role-assignments", s.assign)
 	r.Delete("/api/role-assignments", s.unassign)
 	r.Get("/api/role-lookup", s.lookup)
+	r.Get("/api/users", s.listUsers)
+	r.Post("/api/users", s.addUser)
 }
 
 // ─── DTOs ────────────────────────────────────────────────────────────
@@ -273,47 +276,18 @@ func (s *Service) lookup(w http.ResponseWriter, r *http.Request) {
 		permsOf[role.Name] = p
 	}
 
-	// Collect held roles as one entry per (role, source) pair, so a role held
-	// BOTH directly and via a group shows up once per source (e.g. ADMIN/direct
-	// and ADMIN/group:X are separate columns). De-dupe only exact repeats.
-	held := []HeldRoleDTO{}
-	seen := map[string]struct{}{}
-	add := func(name, source string) {
-		key := name + "\x00" + source
-		if _, ok := seen[key]; ok {
-			return
-		}
-		perms, live := permsOf[name]
-		if !live {
-			return // assignment to a since-deleted role
-		}
-		seen[key] = struct{}{}
-		held = append(held, HeldRoleDTO{Name: name, Permissions: perms, Source: source})
-	}
-
-	add(rbac.RoleUser, "baseline")
-	direct, err := s.store.RolesAssignedTo(r.Context(), rbac.PrincipalUser, email)
+	// Held roles come from the store so this endpoint and the Users roster
+	// share one definition of role sources — baseline/direct/group:<name>, one
+	// entry per (role, source) pair. Reimplementing it here is what would let
+	// the two surfaces disagree.
+	heldRoles, err := s.store.HeldRoles(r.Context(), email)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	for _, rn := range direct {
-		add(rn, "direct")
-	}
-	groups, err := s.store.GroupsForCaller(r.Context(), email)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	for _, g := range groups {
-		grp, err := s.store.RolesAssignedTo(r.Context(), rbac.PrincipalGroup, g)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		for _, rn := range grp {
-			add(rn, "group:"+g)
-		}
+	held := make([]HeldRoleDTO, 0, len(heldRoles))
+	for _, hr := range heldRoles {
+		held = append(held, HeldRoleDTO{Name: hr.Name, Permissions: permsOf[hr.Name], Source: hr.Source})
 	}
 
 	effSet, err := s.store.EffectivePermissions(r.Context(), email)
@@ -370,4 +344,130 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"detail": msg, "code": http.StatusText(code)})
+}
+
+// ─── users roster ────────────────────────────────────────────────────
+//
+// GET /api/users enumerates every principal arti knows. That is a deliberate
+// difference from GET /api/people (internal/groups/people.go), which answers a
+// bounded typeahead for any authenticated caller and refuses to enumerate: both
+// read the same union, but only this one is allowed to return all of it, and
+// only behind MANAGE_ROLES.
+
+// RosterRoleDTO is one role a principal holds, with its source.
+type RosterRoleDTO struct {
+	Name   string `json:"name"`
+	Source string `json:"source"` // "baseline" | "direct" | "group:<name>"
+}
+
+// RosterUserDTO is one row of the Users page.
+type RosterUserDTO struct {
+	Email string `json:"email"`
+	Kind  string `json:"kind"` // "human" | "service"
+	Note  string `json:"note"`
+
+	Roles     []RosterRoleDTO `json:"roles"`
+	Groups    []string        `json:"groups"`
+	IdPGroups []string        `json:"idp_groups"`
+
+	// IdPStale reports that the IdP snapshot has aged past
+	// ARTI_IDP_GROUPS_MAX_AGE (or that the bound is disabled), so the
+	// idp_groups above currently grant nothing. Clients must not render a stale
+	// group as live access.
+	IdPStale bool `json:"idp_stale"`
+
+	// LastSeenAt is null when no login was recorded. That is NOT "never signed
+	// in": logins were only recorded from migration 0020 onward.
+	LastSeenAt *string `json:"last_seen_at"`
+
+	Registered bool    `json:"registered"`
+	AddedBy    string  `json:"added_by"`
+	AddedAt    *string `json:"added_at"`
+}
+
+func stamp(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.Format("2006-01-02T15:04:05Z07:00")
+	return &s
+}
+
+func toRosterDTO(u pgstore.RosterUser) RosterUserDTO {
+	roles := make([]RosterRoleDTO, 0, len(u.Roles))
+	for _, r := range u.Roles {
+		roles = append(roles, RosterRoleDTO{Name: r.Name, Source: r.Source})
+	}
+	// Slices are built empty rather than left nil so the JSON carries [] and a
+	// client never has to distinguish absent from empty.
+	groups := u.Groups
+	if groups == nil {
+		groups = []string{}
+	}
+	idp := u.IdPGroups
+	if idp == nil {
+		idp = []string{}
+	}
+	return RosterUserDTO{
+		Email:      u.Email,
+		Kind:       u.Kind,
+		Note:       u.Note,
+		Roles:      roles,
+		Groups:     groups,
+		IdPGroups:  idp,
+		IdPStale:   len(idp) > 0 && !u.IdPFresh,
+		LastSeenAt: stamp(u.LastSeenAt),
+		Registered: u.Registered,
+		AddedBy:    u.AddedBy,
+		AddedAt:    stamp(u.AddedAt),
+	}
+}
+
+func (s *Service) listUsers(w http.ResponseWriter, r *http.Request) {
+	if !s.requireManageRoles(w, r) {
+		return
+	}
+	users, err := s.store.ListUsers(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]RosterUserDTO, 0, len(users))
+	for _, u := range users {
+		out = append(out, toRosterDTO(u))
+	}
+	// sources comes from the store, beside the CTE it describes, so the two
+	// cannot drift — a principal class that is missing stays diagnosable from
+	// the response rather than from the source.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"users":   out,
+		"sources": pgstore.KnownPrincipalSources,
+	})
+}
+
+type addUserReq struct {
+	Email string `json:"email"`
+	Kind  string `json:"kind"`
+	Note  string `json:"note"`
+}
+
+// addUser records a principal. It assigns no role: the response's roles field
+// shows the baseline every authenticated caller already holds, and granting
+// anything more is a separate role assignment.
+func (s *Service) addUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireManageRoles(w, r) {
+		return
+	}
+	var body addUserReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	u, err := s.store.AddUser(r.Context(), body.Email, body.Kind, body.Note,
+		auth.EmailFromContext(r.Context()))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, toRosterDTO(u))
 }

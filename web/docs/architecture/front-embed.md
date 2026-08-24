@@ -12,7 +12,7 @@ is one configured surface — its side panel ("Deployment Context") was the firs
 consumer — not a special-cased feature. The embed routes are mounted on the
 **public** ingress alongside the comments embed and apps proxy.
 
-A surface serves in one of two **identity modes**:
+A surface serves in one of three **identity modes**:
 
 - **`service`** (default) — every request resolves as a fixed, configured
   `email`. Simple; the surface's read scope is that one identity's. Good for
@@ -22,6 +22,12 @@ A surface serves in one of two **identity modes**:
   then runs **as that real viewer** (full per-user OBO). This is what lets an
   embedded APP call tools the surface identity isn't provisioned for, with
   correct attribution — see [Per-user mode](#per-user-mode-identity-user).
+- **`viewer`** — the **document render itself** is gated on the real viewer's
+  ACL. Nothing is served until the viewer completes the same consent popup;
+  then `checkAccess` decides, exactly as it does at `/s/<slug>`. This is the
+  only mode in which the URL is not a credential, and therefore the only mode
+  in which `secret` may be omitted — see
+  [Viewer mode](#viewer-mode-identity-viewer).
 
 ## Why the cookie path fails
 
@@ -43,10 +49,10 @@ A surface is a JSON object in the `ARTI_EMBED_SURFACES` map, validated at startu
 
 | field | required | role |
 |---|---|---|
-| `secret` | yes | shared secret, compared constant-time against `?auth_secret=` |
+| `secret` | service, user | shared secret, compared constant-time against `?auth_secret=`. Optional in `viewer` mode, where it protects nothing; if left set there it is still compared, so migrating a surface is a deliberate two-step |
 | `origin` | yes | host(s) allowed to frame this surface (`frame-ancestors`). A single string or a list — a **nested** topology (e.g. Front ▸ couch ▸ arti) must enumerate *every* ancestor origin |
-| `identity` | no | `"service"` (default) or `"user"` — see [modes](#embed-surfaces) |
-| `email` | service only | identity artifacts resolve as — the read-scope gate. **Required** in service mode; **rejected** in user mode (tool calls run as the real viewer, so a fixed identity would be a footgun) |
+| `identity` | no | `"service"` (default), `"user"` or `"viewer"` — see [modes](#embed-surfaces) |
+| `email` | service only | identity artifacts resolve as — the read-scope gate. **Required** in service mode; **rejected** in user and viewer mode (the real viewer decides, so a fixed identity would be a footgun) |
 | `slug_allow` | yes | patterns (exact or `*` glob) the requested slug must match; `["*"]` = any |
 | `shell` | no | client adapter: `""` or `"front"` |
 | `shell_slug` | with shell | how the shell builds a slug from the host id, e.g. `deployment-ctx-{id}` (must contain `{id}`) |
@@ -189,6 +195,62 @@ own k8s charts are not part of the public tree):
 Both auth modes work: the handshake only needs *a protected route that yields
 the signed-in user*, which `/auth/login` provides in `proxy` mode (behind
 oauth2-proxy) and in built-in `oidc` mode alike.
+
+## Viewer mode (`identity: "viewer"`)
+
+Service mode serves a document as a configured identity, so the document's own
+ACL plays no part: anyone who can reach the URL sees the document. Viewer mode
+removes that. The render is gated on the **real signed-in viewer**, so an
+embedded document has the same visibility as the same document at `/s/<slug>`,
+and the embed URL grants nothing on its own.
+
+`shell` is rejected with this mode: a shell resolves a slug client-side and
+re-fetches the doc route, while the viewer gate does its own token reload, and
+combining them has no defined meaning.
+
+The flow reuses the user-mode handshake wholesale — only the *consumer* of the
+minted token is new:
+
+1. **Gate.** A request with no token gets a small, **completely static** sign-in
+   page under the app-grade sandbox (which is what permits the popup). It
+   interpolates nothing: every value it needs — surface, slug, version, a stale
+   `auth_secret` — already sits in its own URL. That is what keeps the gate from
+   becoming an existence oracle; the bytes are identical for a readable slug, an
+   unreadable slug, and a slug that was never created, and the artifact layer is
+   never consulted.
+2. **Consent.** The page opens `/auth/embed/app-token` in a top-level popup.
+   Viewer surfaces may name the artifact with `?slug=` there (user mode uses
+   `?app=` with a UUID). The route resolves it **as that viewer**, so an artifact
+   they cannot read 404s exactly as it would at `/s/<slug>` — no new existence
+   signal — then renders consent and issues the signed one-time challenge.
+3. **Complete.** Consent completes with a `fetch` POST, never a form submit:
+   `allow-forms` is absent from the effective sandbox inside a Notion embed (the
+   host's `sandbox` attribute composes with arti's CSP and the stricter side
+   wins), so a form would silently fail there.
+4. **Deliver.** The page polls the token endpoint, then reloads itself with
+   `?t=<token>`. A fragment cannot be used because it never reaches the server.
+5. **Serve.** The reload verifies the token, recovers the viewer's email, and
+   serves through `ServeForEmbedPinned`, which resolves as that viewer — so
+   `resolveIdent`'s `checkAccess` is the gate — and additionally refuses when the
+   requested slug resolves to a different artifact than the token was minted
+   for. That pin matters because `slug_allow` may be a wide glob.
+
+The token carries a distinct **`embed-viewer`** scope rather than reusing
+`embed-user`. Both have the same app-scope shape, so without the distinction any
+token carrying an app scope would authorize a viewer document render — the one
+direction that must not happen, since a document render has no second gate. The
+reverse direction stays open on purpose: a viewer token minted for an APP still
+authorizes tool calls on that app, which is what lets an APP embedded in viewer
+mode keep working, and it grants exactly what the same viewer would get from a
+user-mode surface.
+
+**Not included yet.** The minted token lives only in the page's URL, so every
+iframe load re-prompts. Front avoids this with the
+[zero-click relay](#zero-click-reloads--the-embedding-host-token-relay), but
+that needs host-side code and a Notion embed is an opaque iframe running none of
+ours. A partitioned (CHIPS) cookie is the intended fix and is tracked
+separately; partitioned cookies were verified to persist in this exact
+top-level/embedded partition.
 
 ## Invariants / security
 

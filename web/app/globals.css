@@ -9,12 +9,20 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  /* The `font-sans` utility must carry the SAME fallback chain as `body`
+     below. With a bare `var(--font-geist-sans)` the declaration collapses to
+     nothing whenever that variable is unset or the webfont hasn't loaded, and
+     the browser falls back to its *default* family — a serif (Times). That is
+     how an element explicitly marked sans ends up rendering serif. */
+  --font-sans: var(--font-geist-sans), system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
   /* System UI mono — uses the OS-native monospace (SF Mono on macOS,
      Cascadia Mono on Windows, etc.) so artifact code surfaces box-
      align with the user's editor. No Google Fonts fetch. */
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --font-serif: var(--font-petrona);
+  /* Wordmark only — same reasoning as --font-sans: keep a real fallback so a
+     missing Petrona degrades to another serif instead of an empty family. */
+  --font-serif: var(--font-petrona), Georgia, "Times New Roman", serif;
 }
 
 body {
@@ -93,6 +101,32 @@ pre {
 }
 
 /*
+ * Optical spacing around emphasis.
+ *
+ *   - Italic correction: an italic's last glyph leans into whatever follows
+ *     it, so `*word*text` and even `*word*, ` read tighter than the same
+ *     characters upright. A hairline of trailing padding restores the rhythm;
+ *     it is deliberately below the threshold where it looks like a space.
+ *   - .arti-emph-gap: injected by spaceTightEmphasis() (lib/markdown.tsx) only
+ *     where emphasis abuts a letter/digit with NO separator at all — the
+ *     "***PAST DUE***Document Request" case, where the delimiters were doing
+ *     the word-separating and the parser ate them. Wider than the italic
+ *     correction because here two words genuinely have to come apart, but
+ *     still under a full space so a deliberate `**bold**text` compound
+ *     doesn't turn into two words.
+ *
+ * Padding (not margin/letter-spacing) so nothing shifts line-breaking, and
+ * the marker contributes no text to selection, copy or find-in-page.
+ */
+.prose em,
+.prose i {
+  padding-inline-end: 0.045em;
+}
+.prose .arti-emph-gap {
+  padding-inline-end: 0.19em;
+}
+
+/*
  * arti-260710 style, table + blockquote pieces that Tailwind's prose-*
  * variants can't express:
  *   - slimmer table cells than the typography plugin's 0.667em padding,
@@ -142,9 +176,13 @@ pre {
 }
 /*
  * Replaced elements don't stretch to `bottom` (CSS 2.1 § 10.6.5 keeps the
- * intrinsic height), so the iframe layers need an explicit height instead of
- * the `h-full` they carried under inset-0 — `h-full` would resolve to the full
- * viewport and hang the last strip-height pixels off the bottom edge.
+ * intrinsic height), so an iframe that IS the layer needs an explicit height
+ * instead of the `h-full` it carried under inset-0 — `h-full` would resolve to
+ * the full viewport and hang the last strip-height pixels off the bottom edge.
+ * Today that's the PDF frame. The HTML frame instead nests inside a <div> layer
+ * and fills it with h-full: a viewport-unit height would be multiplied by the
+ * text-scale `zoom` on that frame, leaving a background strip along the bottom
+ * (see FullPageHtmlFrame).
  */
 iframe.arti-fullpage-layer {
   height: calc(100dvh - var(--arti-top-strip, 0px));

@@ -11,7 +11,33 @@ artifact's per-version UUID, so a comment made on v3 doesn't leak onto v4. The
 data model is two tables: threads (an anchor + open/resolved status) and comments
 (bodies hanging off a thread in time order), both cascade-deleted when the
 artifact is hard-deleted. Access reuses the artifact's read rule — anyone who can
-read an artifact can read and add comments on it.
+read an artifact can read and add comments on it — unless the document's owner has
+turned commenting off (below).
+
+## Turning comments off (per document)
+
+Commenting can be switched off for a whole document. The switch is the
+`artifacts.comments_enabled` column (default `TRUE`), exposed on the artifact DTO
+as `comments_enabled` and toggled from the viewer's ⋮ menu — the row shows the
+current state with a green (allowed) or grey (off) dot.
+
+- **Per document, not per version.** Unlike `allowed_access`, a change writes
+  *every version of the slug* (archived ones included), and publishing a new
+  version inherits the previous version's value — resolved inside `store.Put`
+  from a read taken immediately before the insert, so a concurrent toggle can't
+  be overwritten by an in-flight version. So a doc can't end up with commenting
+  on for v3 and off for v4. Inheritance also falls back to archived rows: a slug
+  whose versions are *all* archived is still re-versionable, and republishing
+  onto it must not re-open a document the owner closed.
+- **Owner only.** The setter is the slug's OWNER — the creator of its *earliest*
+  version — or a `MANAGE_ARTIFACTS` admin. It is deliberately not the patched
+  version's creator: versioning reassigns that field, so a delegated writer could
+  otherwise push a content-only version and take over the switch. The DTO carries
+  the server's own verdict as `can_manage_comments`, so the UI never re-derives it.
+- **Off means gone, not hidden.** The viewer mounts no overlay, arti-server stops
+  injecting the overlay into served HTML, the list endpoints (REST and MCP) report
+  zero threads, and every mutating endpoint returns 403. Existing threads stay in
+  the table — flipping the switch back restores them.
 
 ## Anchors
 

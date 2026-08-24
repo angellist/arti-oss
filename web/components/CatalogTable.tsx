@@ -6,7 +6,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import type { ArtifactInfo, Me } from "@/lib/types";
 import { archiveArtifact, hasPerm, sameEmail, unarchiveArtifact, type SortDir, type SortField } from "@/lib/arti";
 import { ALL_VERSIONS_KEY, SEARCH_OPEN_KEY, SHOW_ARCHIVED_KEY, catalogView, rowSetKey } from "@/lib/catalog";
+import { useSearchBarOpen, useSetSearchBarOpen } from "@/lib/rail-context";
 import {
+  SLUG_VIEW_PINNED,
   clampWidth,
   defaultColumnPrefs,
   moveColumn,
@@ -31,6 +33,10 @@ const PAGE_SIZE = 50;
 // tiny — it exists so the menu has a visible, keyboard-reachable affordance,
 // since a right-click menu is otherwise invisible.
 const MENU_COL_WIDTH = 30;
+
+// Stable empty pin list, so the no-pins case doesn't hand a fresh array to
+// visibleColumns (and any future memo) on every render.
+const NO_PINNED: readonly ColumnKey[] = [];
 
 // Shared by every header cell. Sticky per-cell rather than on <thead>: cell
 // stickiness is the universally supported form (Safari only grew `position:
@@ -112,7 +118,20 @@ export default function CatalogTable({
   const suppressClickRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const cols = visibleColumns(prefs);
+  // Catalog view state, parsed once via the shared helper so page.tsx and
+  // this component interpret the URL identically. drilledIntoSlug (a single
+  // slug in focus) drives the inline archive controls, hides the control bar,
+  // and pins the comments column; showAllVersions also covers the "latest
+  // version only" toggle being off, so the version column header reverts from
+  // "latest" to a plain "v".
+  const view = catalogView((k) => sp.get(k));
+  const drilledIntoSlug = view.drilledIntoSlug;
+  const showAllVersions = drilledIntoSlug || view.allVersions;
+  const versionColLabel = showAllVersions ? "v" : "latest";
+
+  // The drill-in always shows comment counts — see SLUG_VIEW_PINNED.
+  const pinnedCols = drilledIntoSlug ? SLUG_VIEW_PINNED : NO_PINNED;
+  const cols = visibleColumns(prefs, pinnedCols);
   // Latest prefs for handlers that outlive their render — the reorder drag
   // parks its finish handler on the window until pointerup.
   const prefsRef = useRef(prefs);
@@ -155,16 +174,6 @@ export default function CatalogTable({
     }
   };
 
-  // Catalog view state, parsed once via the shared helper so page.tsx and
-  // this component interpret the URL identically. drilledIntoSlug (a single
-  // slug in focus) drives the inline archive controls and hides the control
-  // bar; showAllVersions also covers the "latest version only" toggle being
-  // off, so the version column header reverts from "latest" to a plain "v".
-  const view = catalogView((k) => sp.get(k));
-  const drilledIntoSlug = view.drilledIntoSlug;
-  const showAllVersions = drilledIntoSlug || view.allVersions;
-  const versionColLabel = showAllVersions ? "v" : "latest";
-
   const q = sp.get("q") ?? "";
 
   // The search + toggles live in a reveal-on-demand bar (opened via SEARCH in
@@ -172,9 +181,35 @@ export default function CatalogTable({
   // explicitly opened (find=1) OR when a query/toggle is already active (so the
   // active state is always visible and editable). Never in the drill-in view —
   // that already shows full version history with its own inline controls.
+  //
+  // Open/close is client state (shared with the rail's SEARCH item via the
+  // shell — see useSearchBarOpen) rather than a router navigation. `find=1` is
+  // UI-only, so pushing it made revealing the box wait on a full re-render of a
+  // force-dynamic page; now the box appears in the same frame as the keypress
+  // and the URL catches up shallowly.
+  const barOpen = useSearchBarOpen();
+  const setBarOpen = useSetSearchBarOpen();
   const searchOpen =
-    !drilledIntoSlug && (view.searchOpen || !!q || view.allVersions || view.showArchived);
+    !drilledIntoSlug &&
+    (barOpen || view.searchOpen || !!q || view.allVersions || view.showArchived);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Reveal the bar now, and write `find=1` into the URL without a navigation so
+  // a reload or a copied link still opens it. replaceState is Next's supported
+  // shallow-routing escape hatch: it syncs useSearchParams and does not re-run
+  // the server component.
+  //
+  // `page` is deliberately left alone. Every navigating path here drops it,
+  // because they all change the row set and page 5 of the old set means nothing
+  // in the new one. A shallow update changes no rows, so dropping `page` would
+  // leave page 2's rows on screen under a page-1 URL — and the next reload or
+  // shared link would jump.
+  const revealSearch = useCallback(() => {
+    setBarOpen(true);
+    const params = new URLSearchParams(window.location.search);
+    params.set(SEARCH_OPEN_KEY, "1");
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+  }, [setBarOpen]);
   // Focus the box when the bar opens empty (the explicit "I clicked SEARCH"
   // case). When it opens because a query is already active, leave focus alone.
   useEffect(() => {
@@ -223,16 +258,8 @@ export default function CatalogTable({
       if (isEditable(document.activeElement)) return; // already typing somewhere
       if (e.key === "/") {
         e.preventDefault();
-        if (searchOpen) {
-          searchInputRef.current?.focus();
-        } else {
-          // Reveal the bar (reads the live URL so no other filter/sort is lost);
-          // it mounts on navigation and autofocuses itself (empty q).
-          const params = new URLSearchParams(window.location.search);
-          params.set(SEARCH_OPEN_KEY, "1");
-          params.delete("page");
-          router.push(`/?${params.toString()}`);
-        }
+        if (searchOpen) searchInputRef.current?.focus();
+        else revealSearch(); // renders this frame; the effect below focuses it
         return;
       }
       // type-to-search: only when the bar is visible. Focus and let the
@@ -244,7 +271,7 @@ export default function CatalogTable({
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [searchOpen, drilledIntoSlug, router, menuOpen]);
+  }, [searchOpen, drilledIntoSlug, revealSearch, menuOpen]);
 
   // Free-text query terms, for client-side highlighting of slug and
   // scope/label chip hits. Server-side highlights only cover title/body
@@ -326,6 +353,17 @@ export default function CatalogTable({
   // keeps it visible, returning to the clean default listing. A `type` chip
   // filter and the current sort are left intact (they aren't shown in the bar).
   function closeSearch() {
+    setBarOpen(false);
+    // Closing an empty bar changes nothing the server queried on, so it gets
+    // the same shallow treatment as opening it. Closing one with a query or a
+    // toggle active does change the row set, so that still navigates.
+    if (!q && !view.allVersions && !view.showArchived) {
+      const params = new URLSearchParams(window.location.search);
+      params.delete(SEARCH_OPEN_KEY);
+      const qs = params.toString();
+      window.history.replaceState(null, "", qs ? `${window.location.pathname}?${qs}` : window.location.pathname);
+      return;
+    }
     router.push(
       withParams((next) => {
         next.delete("q");
@@ -857,6 +895,7 @@ export default function CatalogTable({
           x={menuAt.x}
           y={menuAt.y}
           prefs={prefs}
+          pinned={pinnedCols}
           onToggle={(k) => applyPrefs(toggleColumn(prefs, k))}
           onReset={() => {
             applyPrefs(defaultColumnPrefs());

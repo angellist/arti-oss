@@ -78,7 +78,7 @@ Shown by default: **title**, **slug**, **v**, **creator**, **scope · labels**,
 
 | Column | What it shows |
 | --- | --- |
-| **comments** | Comments on *that version* — comments anchor to a version, not a slug. An amber **●** marks unresolved threads. |
+| **comments** | Comments on *that version* — comments anchor to a version, not a slug. An amber **●** marks unresolved threads. Always on when you click into a single slug (see below). |
 | **description** | The artifact's description, truncated (full text on hover). |
 | **content type** | The MIME type as its own column. (It rides under **type** as a subline while this column is off, so it's never shown twice.) |
 | **size** | Stored byte size of the content. |
@@ -86,6 +86,13 @@ Shown by default: **title**, **slug**, **v**, **creator**, **scope · labels**,
 | **modified** | Last change to that version. |
 | **archived** | When a version was archived — pairs with **show archived**. |
 | **id** | The artifact UUID of that exact version. |
+
+**One column is pinned by view.** Clicking a slug drills into that slug's
+version history, and there **comments** is always shown, whatever your saved
+layout says — the whole point of that view is comparing versions, and which
+version the discussion landed on is part of that. It reads as a locked, greyed
+row in the column menu while it's pinned. Your own setting is untouched: the
+catalog and search results still hide the column unless you switched it on.
 
 Sorting is unchanged: click a header to sort by it. **archived** sorts like the
 default columns do; the rest of the opt-in columns have no server-side sort
@@ -192,7 +199,13 @@ The toolbar on the right gives you:
   IdP groups your login carries, badged *SSO*). Read-only viewers see the same
   list without controls. **Read** lets someone open the version; **Read & write**
   additionally lets them publish new versions, append, and edit — a write grant
-  always implies read. Changes apply to the shown version only.
+  always implies read. Access is a property of the document: changes apply
+  to **every version of the slug** (archived ones included), whichever
+  version you happen to be viewing. Edits are **staged**: add / remove / level
+  changes stay local until you press **Confirm** (lit only when something
+  actually changed) — **Cancel** or Esc throws them away. The dialog is a fixed
+  size and the group typeahead is an overlay, so it never resizes or jumps as
+  you add entries.
 - **Archive** / **Unarchive** — soft-delete, for creators and admins.
 
 ### How each type renders
@@ -259,12 +272,12 @@ files share one artifact id), and on non-text content.
 The user menu (bottom of the left rail) links to **Settings**, a small admin/account
 area with its own sub-nav:
 
-- **User Groups** — create and manage the named member sets used in access rules
-  (everyone can manage their own; role-bearing groups need `MANAGE_USER_GROUPS`).
 - **API Keys** — mint, list, and revoke your own self-serve **upload-only** API keys
   for programmatic access. Keys are shown once at creation; a yellow badge warns on the
   user menu when one is within 7 days of expiring. See
   [Using the API](api.md#api-keys-self-serve) for the how-to.
+- **User Groups** — create and manage the named member sets used in access rules
+  (everyone can manage their own; role-bearing groups need `MANAGE_USER_GROUPS`).
 - **Roles and Permissions** — visible only to holders of `MANAGE_ROLES`; assign roles
   to users and groups.
 

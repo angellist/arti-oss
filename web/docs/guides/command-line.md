@@ -125,8 +125,11 @@ key like `user:alice@example.com`, `agent:bt-router`, or `topic:funds`. See
 arti add q1-notes.md --slug q1-notes --scope topic:funds --label report --label q1
 ```
 
-Control who can read it with `--access` (repeatable; an email, `*@domain`, or
-`*` for everyone) or `--private` for creator-only. With neither flag, access is
+Control who can read it with `--access` (repeatable; an email, `*@domain`, a
+`group:<name>`, or `*` for everyone) or `--private` for creator-only; add
+`--write-access` / `--write-private` to split writers from readers. To change
+access later without minting a version, `arti access <slug> [--access …]` —
+the edit applies to every version of the document. With neither flag, access is
 inherited from a prior version or falls back to the server default. See
 [Authentication](../architecture/auth.md) for the access model.
 

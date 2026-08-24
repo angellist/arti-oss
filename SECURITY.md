@@ -28,6 +28,20 @@ arti's security posture assumes the deployment guidance in the README and
 - `ARTI_AUTH_MODE=disabled` is for local development only and must never be
   network-reachable.
 - `proxy` mode is safe **only** when arti is unreachable except through the
-  authenticating reverse proxy.
+  authenticating reverse proxy, and only when that proxy **overwrites** the
+  `X-Auth-Request-*` headers instead of forwarding what the client sent.
+  Selecting this mode is how a deployment tells arti those headers are
+  trustworthy; a request that reaches arti directly is then whoever it says
+  it is.
+- Under `oidc`, arti ignores the `X-Auth-Request-*` headers on every route,
+  including the MCP OAuth authorization endpoint, and takes identity only
+  from the session cookie it signed itself. A report that a forged identity
+  header is accepted in `oidc` mode **is** a vulnerability; the same report
+  against `proxy` mode is a misconfiguration of the proxy.
+- Under `disabled`, the MCP OAuth authorization endpoint likewise ignores
+  those headers, but `/auth/login` still reads them, because that mode
+  mounts the proxy login handler. This is not a separate weakness: the mode
+  already attributes every request to a fixed email with no credentials at
+  all, which is why it must never be network-reachable.
 - An empty domain allowlist admits nobody by design; misconfiguration reports
   that amount to opting out of these guardrails are not vulnerabilities.

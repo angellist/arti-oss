@@ -4,6 +4,16 @@ import "testing"
 
 func TestRedactLogPath(t *testing.T) {
 	cases := []struct{ in, want string }{
+		// share links: the whole credential is the path segment after /share/.
+		// The sibling case matters most — that path also contains "/_files/",
+		// so a marker-based rule would mask the asset and leak the token.
+		{"/share/abc123def", "/share/<redacted>"},
+		{"/share/abc123def/", "/share/<redacted>/"},
+		{"/share/abc123def/download", "/share/<redacted>/download"},
+		{"/share/abc123def/_files/css/app.css", "/share/<redacted>/_files/css/app.css"},
+		// Not a share path: left alone.
+		{"/share/", "/share/"},
+		{"/shared-thing", "/shared-thing"},
 		// embed sibling-file paths: the token segment is masked, rest preserved.
 		{"/embed/front/_files/eyJhbGci.payload.sig/css/app.css", "/embed/front/_files/<redacted>/css/app.css"},
 		{"/embed/front/_files/tok123/style.css", "/embed/front/_files/<redacted>/style.css"},

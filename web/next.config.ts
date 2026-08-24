@@ -1,10 +1,14 @@
 import type { NextConfig } from "next";
 import { DEFAULT_CATALOG_FRAME_ANCESTORS } from "./tenant-defaults";
 
-// In production, arti-server is the front door and reverse-proxies
-// non-API paths to this Next.js process. In local dev `npm run dev`
-// runs Next.js directly on :3030 and we want browser fetches like
-// `/api/artifacts` to hit the Go server on :8095. Rewrite them.
+// NOTE: the /api, /auth, /app, /mcp, /healthz, /openapi.yaml and /.well-known
+// forwards to arti-server are NOT here. They lived in `rewrites()` until they
+// were found to bake `ARTI_API_URL` at image-build time (Next writes rewrites
+// into routes-manifest.json during `next build`), which pinned every deployed
+// image to the local-dev target `http://localhost:8095` and 500'd any request
+// that actually reached arti-web on those paths. They now run in middleware.ts,
+// which resolves the target per request. See web/lib/proxy-target.ts.
+//
 // Baseline CSP for the catalog UI. Next.js inlines bootstrap scripts
 // and Tailwind injects inline styles, so we have to permit
 // 'unsafe-inline' for both. The important parts are:
@@ -61,18 +65,6 @@ const CSP_CATALOG = [
 ].join("; ");
 
 const nextConfig: NextConfig = {
-  async rewrites() {
-    const target = process.env.ARTI_API_URL ?? "http://localhost:8095";
-    return [
-      { source: "/api/:path*",        destination: `${target}/api/:path*` },
-      { source: "/app/:path*",        destination: `${target}/app/:path*` },
-      { source: "/auth/:path*",       destination: `${target}/auth/:path*` },
-      { source: "/.well-known/:path*", destination: `${target}/.well-known/:path*` },
-      { source: "/healthz",           destination: `${target}/healthz` },
-      { source: "/mcp",               destination: `${target}/mcp` },
-      { source: "/openapi.yaml",      destination: `${target}/openapi.yaml` },
-    ];
-  },
   async headers() {
     return [
       {

@@ -90,10 +90,18 @@ func TestSetContentSecurityEmbed_H3Scriptable(t *testing.T) {
 // NEVER add allow-same-origin (that would expose arti_session to uploaded HTML),
 // and — the F7 guard — a forged ?ctx=fullpage on any non-HTML type (especially a
 // scriptable SVG/XML) must fall through to the normal script-safe CSP, never
-// gaining scripts or popups. Non-full-page HTML is unchanged.
+// gaining scripts or popups. Non-full-page HTML differs only in the popups.
+//
+// Every HTML body also carries `frame-ancestors` (the APP allowlist) and drops
+// X-Frame-Options, so the nested content frame inside the full-page viewer
+// survives being embedded by a trusted internal origin — XFO is checked against
+// the whole ancestor chain and would block it. Non-HTML keeps XFO.
 func TestSetContentSecurityMaybeFullPage(t *testing.T) {
-	const fullPageHTML = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads"
-	const normalHTML = "sandbox allow-scripts allow-top-navigation-by-user-activation allow-downloads"
+	const fa = "'self' https://*.internal.example.com"
+	const fullPageHTML = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads; frame-ancestors " + fa
+	const normalHTML = "sandbox allow-scripts allow-top-navigation-by-user-activation allow-downloads; frame-ancestors " + fa
+	s := &Service{}
+	s.SetAppFrameAncestors(fa)
 	cases := []struct {
 		ct       string
 		fullPage bool
@@ -102,7 +110,7 @@ func TestSetContentSecurityMaybeFullPage(t *testing.T) {
 		// Full-page HTML: popups granted.
 		{"text/html; charset=utf-8", true, fullPageHTML},
 		{"text/html", true, fullPageHTML},
-		// Non-full-page HTML: unchanged (no popups) — matches setContentSecurity.
+		// Non-full-page HTML: no popups, same framing rules.
 		{"text/html; charset=utf-8", false, normalHTML},
 		// F7 guard: a forged ?ctx=fullpage on a scriptable non-HTML type must NOT
 		// widen the sandbox — SVG/XML stay script-less, never script-or-popup-enabled.
@@ -116,7 +124,8 @@ func TestSetContentSecurityMaybeFullPage(t *testing.T) {
 	}
 	for _, c := range cases {
 		w := httptest.NewRecorder()
-		setContentSecurityMaybeFullPage(w, c.ct, c.fullPage)
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN") // as the global middleware would
+		s.setContentSecurityMaybeFullPage(w, c.ct, c.fullPage)
 		got := w.Header().Get("Content-Security-Policy")
 		if got != c.wantCSP {
 			t.Errorf("setContentSecurityMaybeFullPage(%q, fullPage=%v): CSP = %q, want %q", c.ct, c.fullPage, got, c.wantCSP)
@@ -126,6 +135,56 @@ func TestSetContentSecurityMaybeFullPage(t *testing.T) {
 		}
 		if w.Header().Get("Content-Type") != c.ct {
 			t.Errorf("setContentSecurityMaybeFullPage(%q): Content-Type not set", c.ct)
+		}
+		// HTML must hand framing to frame-ancestors; everything else keeps XFO.
+		isHTML := strings.HasPrefix(c.ct, "text/html")
+		if xfo := w.Header().Get("X-Frame-Options"); (xfo == "") != isHTML {
+			t.Errorf("setContentSecurityMaybeFullPage(%q): X-Frame-Options = %q (isHTML=%v)", c.ct, xfo, isHTML)
+		}
+	}
+}
+
+// With no APP allowlist configured (the OSS/default deployment), artifact HTML
+// falls back to same-origin-only framing — the pre-existing X-Frame-Options
+// behavior, now expressed as frame-ancestors.
+func TestArtifactFrameAncestors_DefaultsToSelf(t *testing.T) {
+	s := &Service{}
+	w := httptest.NewRecorder()
+	s.setContentSecurityMaybeFullPage(w, "text/html; charset=utf-8", true)
+	if got := w.Header().Get("Content-Security-Policy"); !strings.HasSuffix(got, "; frame-ancestors 'self'") {
+		t.Errorf("CSP = %q, want it to end with frame-ancestors 'self'", got)
+	}
+}
+
+// The three CSP writers that serve a viewer-reachable HTML body — the entry
+// document, an APP, and the files-token route a PACKAGE's in-content links
+// navigate to via the injected <base> — must resolve the same default
+// allowlist. A hardcoded 'self' on any one of them re-breaks embedding at the
+// next click (the files-token route did exactly that).
+func TestHTMLBodyFrameAncestors_ShareOneDefault(t *testing.T) {
+	const fa = "'self' https://*.internal.example.com"
+	s := &Service{}
+	s.SetAppFrameAncestors(fa)
+	writers := map[string]func(w *httptest.ResponseRecorder){
+		"entry document": func(w *httptest.ResponseRecorder) {
+			s.setContentSecurityMaybeFullPage(w, "text/html; charset=utf-8", true)
+		},
+		"APP": func(w *httptest.ResponseRecorder) {
+			s.setContentSecurityApp(w, "text/html; charset=utf-8")
+		},
+		"files-token (in-content navigation)": func(w *httptest.ResponseRecorder) {
+			setContentSecurityEmbed(w, "text/html; charset=utf-8", s.artifactFrameAncestors())
+		},
+	}
+	for name, write := range writers {
+		w := httptest.NewRecorder()
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN") // as the global middleware would
+		write(w)
+		if got := w.Header().Get("Content-Security-Policy"); !strings.HasSuffix(got, "; frame-ancestors "+fa) {
+			t.Errorf("%s: CSP = %q, want it to end with frame-ancestors %s", name, got, fa)
+		}
+		if got := w.Header().Get("X-Frame-Options"); got != "" {
+			t.Errorf("%s: X-Frame-Options = %q, want it dropped so frame-ancestors is authoritative", name, got)
 		}
 	}
 }

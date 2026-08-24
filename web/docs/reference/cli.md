@@ -128,11 +128,48 @@ from the prior version when not overridden.
 | `--scope` | string[] | Override, repeatable (else inherit). |
 | `--label` | string[] | Override, repeatable (else inherit). |
 | `--access` | string[] | Override, repeatable (else inherit). |
+| `--private` | bool | Creator-only read (explicit empty list). Mutually exclusive with `--access`. |
+| `--write-access` | string[] | Override the write list, repeatable (else inherit). |
+| `--write-private` | bool | Creator-only writes (explicit empty list). Mutually exclusive with `--write-access`. |
+
+An access pair that differs from the slug's current one applies to **all
+versions of the document** (slug owner or admin only) — same rule as
+[`arti access`](#arti-access) and the PATCH endpoint.
 
 ```sh
 echo "new entry" | arti append --slug changelog
 arti append --slug log line.txt --auto-key
 arti append --slug thread entry.md --idempotency-key "$(uuidgen)"
+```
+
+### `arti access`
+
+Show or edit an artifact's access control **without creating a new version**.
+With no flags it prints the current read/write lists; with flags it PATCHes
+them. Access is a property of the document: the edit applies to **every
+version of the slug** (archived versions included), and changing it requires
+being the slug's owner (its earliest version's creator) or an admin.
+
+| Positional | Meaning |
+|---|---|
+| `ident` | UUID or slug |
+
+| Flag | Type | Meaning |
+|---|---|---|
+| `--access` | string[] | Replace read access, repeatable: an email, `*@domain`, `group:<name>`, or `*` = everyone. Omit to keep current. |
+| `--private` | bool | Creator-only read (explicit empty list). Mutually exclusive with `--access`. |
+| `--write-access` | string[] | Replace the write list, repeatable — the subset of readers who may push versions / append / edit. The server unions it into read access. Omit to keep current. |
+| `--write-private` | bool | Creator-only writes; readers stay read-only. Mutually exclusive with `--write-access`. |
+
+Flags you omit leave that side untouched — a `--write-access` edit doesn't
+resend read access, and vice versa.
+
+```sh
+arti access my-doc                                  # show current access
+arti access my-doc --access '*@example.com'         # domain-readable, all versions
+arti access my-doc --access alice@x --access group:eng
+arti access my-doc --private                        # creator-only
+arti access my-doc --write-access group:eng         # readers stay; group may write
 ```
 
 ### `arti get`

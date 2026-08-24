@@ -16,10 +16,17 @@ import {
 // It stays open across toggles on purpose — turning on three columns should be
 // three clicks, not three right-clicks. Escape, an outside click, or scrolling
 // the page closes it.
+//
+// `pinned` columns are shown by the current view regardless of prefs (the
+// single-slug drill-in pins `comments`). They render checked and inert: a
+// checkbox that visibly does nothing is worse than one that reads as locked,
+// and toggling the underlying pref here would be invisible until the user
+// navigated away.
 export default function ColumnMenu({
   x,
   y,
   prefs,
+  pinned = [],
   onToggle,
   onReset,
   onClose,
@@ -27,6 +34,7 @@ export default function ColumnMenu({
   x: number;
   y: number;
   prefs: ColumnPrefs;
+  pinned?: readonly ColumnKey[];
   onToggle: (key: ColumnKey) => void;
   onReset: () => void;
   onClose: () => void;
@@ -94,31 +102,42 @@ export default function ColumnMenu({
         columns
       </div>
       {COLUMNS.map((c) => {
-        const on = isVisible(prefs, c.key);
+        const locked = pinned.includes(c.key);
+        const on = locked || isVisible(prefs, c.key);
+        const help = locked ? `${c.help} · always shown here` : c.help;
         return (
           <button
             key={c.key}
             type="button"
             role="menuitemcheckbox"
             aria-checked={on}
+            aria-disabled={locked || undefined}
+            disabled={locked}
             onClick={() => onToggle(c.key)}
-            title={c.help}
-            className="flex w-full items-start gap-2 px-3 py-1.5 text-left transition hover:bg-neutral-50"
+            title={help}
+            className={
+              "flex w-full items-start gap-2 px-3 py-1.5 text-left transition " +
+              (locked ? "cursor-default" : "hover:bg-neutral-50")
+            }
           >
             <span
               aria-hidden
               className={
                 "mt-[1px] inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border text-[10px] leading-none " +
                 (on
-                  ? "border-blue-600 bg-blue-600 text-white"
+                  ? locked
+                    ? "border-neutral-300 bg-neutral-300 text-white"
+                    : "border-blue-600 bg-blue-600 text-white"
                   : "border-neutral-300 bg-white text-transparent")
               }
             >
               ✓
             </span>
             <span className="min-w-0">
-              <span className="block text-neutral-800">{c.label}</span>
-              <span className="block truncate text-[11px] text-neutral-400">{c.help}</span>
+              <span className={"block " + (locked ? "text-neutral-500" : "text-neutral-800")}>
+                {c.label}
+              </span>
+              <span className="block truncate text-[11px] text-neutral-400">{help}</span>
             </span>
           </button>
         );

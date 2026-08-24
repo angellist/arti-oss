@@ -29,6 +29,7 @@ import (
 	"github.com/angellist/arti-oss/internal/config"
 	"github.com/angellist/arti-oss/internal/embed"
 	"github.com/angellist/arti-oss/internal/groups"
+	"github.com/angellist/arti-oss/internal/httperr"
 	"github.com/angellist/arti-oss/internal/llm"
 	"github.com/angellist/arti-oss/internal/mcp"
 	"github.com/angellist/arti-oss/internal/obo"
@@ -148,6 +149,21 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 
 	root := chi.NewRouter()
 	root.Use(chimid.RequestID)
+	// Order matters, and all three lines are load-bearing.
+	//
+	// StripSpoofableIPHeaders runs FIRST. chi's RealIP prefers True-Client-IP
+	// above every other header, and this deployment's edge does not manage that
+	// one — measured on staging, a caller-supplied value passed through intact
+	// while X-Forwarded-For and X-Real-IP were both rewritten. Without the
+	// strip, any caller picks the address used for rate-limit bucketing and
+	// written to share-link audit rows.
+	//
+	// CapturePeerAddr then records the TCP peer before RealIP overwrites
+	// RemoteAddr. Behind the load balancer that peer is the ingress pod, not
+	// the client, so it identifies the path a request took rather than who
+	// sent it.
+	root.Use(auth.StripSpoofableIPHeaders)
+	root.Use(auth.CapturePeerAddr)
 	root.Use(chimid.RealIP)
 	root.Use(reqLogger(logger))
 	root.Use(chimid.Recoverer)
@@ -193,15 +209,28 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	// register themselves and broker user logins through arti without
 	// pre-shared credentials.
 	mcpOAuth := auth.MCPOAuthConfig{
-		BaseURL:    cfg.Server.BaseURL,
-		Store:      pgstoreInst,
-		Signer:     signer,
-		AccessTTL:  7 * 24 * time.Hour,
-		RefreshTTL: 90 * 24 * time.Hour,
+		BaseURL:        cfg.Server.BaseURL,
+		Store:          pgstoreInst,
+		Signer:         signer,
+		AccessTTL:      7 * 24 * time.Hour,
+		RefreshTTL:     90 * 24 * time.Hour,
+		RequiredGroups: cfg.Auth.RequiredGroups,
+		CookieSecure:   cfg.Server.CookieSecure,
+		// Only "proxy" (and the legacy "" default) put an authenticating
+		// proxy in front that overwrites X-Auth-Request-*. In "oidc" mode
+		// arti faces the network itself, so the header is client-settable
+		// and the authorize flow identifies the user from the signed
+		// arti_session cookie instead.
+		TrustProxyHeaders: cfg.Auth.Mode == "" || cfg.Auth.Mode == "proxy",
 	}
 	// Rate-limited per client IP: public dynamic-client-registration, one DB INSERT each.
 	root.With(ipRateLimiter(cfg.Auth.OAuthRegisterRPM)).Post("/oauth/register", auth.MCPRegisterHandler(mcpOAuth))
 	root.Get("/oauth/authorize", auth.MCPAuthorizeHandler(mcpOAuth))
+	// The consent page's own POST — the only path that mints an
+	// authorization code. A subpath of /oauth/authorize on purpose: the
+	// ingress rule that keeps the authorize flow behind the front door is a
+	// prefix rule (angellist/cdk8s/srv.ts), so this route inherits it.
+	root.Post("/oauth/authorize/confirm", auth.MCPAuthorizeConfirmHandler(mcpOAuth))
 	root.Post("/oauth/token", auth.MCPTokenHandler(mcpOAuth))
 	// RFC 7591 registration is POST-only, but an OAuth client's client-registration
 	// probe (Runlayer's deep diagnostic) GETs the discovered registration_endpoint
@@ -475,11 +504,31 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		logger.Info("embed surfaces enabled", "surfaces", names)
 	}
 
+	// External timed share links. Public group — the token in the path
+	// authenticates the request — and rate-limited per IP. Mounted only when
+	// enabled; the FE-proxy guard and redactLogPath entries are deliberately
+	// UNCONDITIONAL, because the ingress prefix survives a flag flip: with the
+	// feature off a /share request must 404 here rather than fall through to
+	// the FE reverse proxy and collect an SSO redirect.
+	if cfg.Share.Enabled {
+		svc.SetShareConfig(artifacts.ShareConfig{
+			Enabled: true,
+			MaxTTL:  cfg.Share.MaxTTL.Std(),
+		})
+		root.Group(func(r chi.Router) {
+			r.Use(ipRateLimiter(cfg.Share.OpenRPM))
+			svc.MountShare(r)
+		})
+		logger.Info("external share links enabled",
+			"max_ttl", cfg.Share.MaxTTL.Std(), "open_rpm", cfg.Share.OpenRPM)
+	}
+
 	root.Group(func(r chi.Router) {
 		r.Use(authMiddleware)
 		r.Use(auth.EnforceUploadScope(pgstoreInst, int64(cfg.Auth.Device.MaxUploadBytes)))
 		r.Post("/auth/device/revoke", auth.DeviceRevokeHandler(devCfg))
 		artifacts.Mount(r, svc)
+		artifacts.MountShareAdmin(r, svc, ipRateLimiter(cfg.Share.MintRPM))
 		commentsSvc.Mount(r)
 		admin.NewService(pool, pgstoreInst).Mount(r)
 		groups.NewService(pgstoreInst).Mount(r)
@@ -499,15 +548,17 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		artifacts.MountApp(r, svc)
 	})
 
-	// Nothing lives UNDER the MCP endpoint — it is the exact path /mcp above.
-	// Return a clean 404 for /mcp/* instead of letting it fall through to the FE
-	// reverse proxy below, whose middleware redirects unauthenticated browser
-	// navigations into the SSO login chain. An MCP/OAuth client probing the
-	// OpenID-Connect-Discovery path-prefix form (/mcp/.well-known/openid-configuration)
-	// would otherwise follow that chain into "too many redirects". Spec-compliant
-	// discovery uses the RFC 9728 §3.1 path-scoped metadata under /.well-known
-	// (see auth.WellKnownRoutes), not a path under /mcp.
-	root.Handle("/mcp/*", http.NotFoundHandler())
+	// Unmatched paths under a prefix arti-server owns (/api, /app, /auth, /mcp)
+	// answer 404 here instead of falling through to the FE reverse proxy below.
+	// Two reasons, both load-bearing — see feproxy.go:
+	//   - arti-web forwards those prefixes straight back to arti-server, so a
+	//     fall-through is a request loop between the two pods.
+	//   - the FE's middleware redirects unauthenticated browser navigations into
+	//     the SSO chain, which turned an MCP client's probe of
+	//     /mcp/.well-known/openid-configuration into "too many redirects".
+	//     (Spec-compliant discovery uses the RFC 9728 §3.1 path-scoped metadata
+	//     under /.well-known — see auth.WellKnownRoutes — not a path under /mcp.)
+	mountFEProxyGuards(root)
 
 	// FE reverse proxy (everything else).
 	if cfg.Server.WebURL != "" {
@@ -515,7 +566,10 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		if err != nil {
 			return fmt.Errorf("bad ARTI_WEB_URL: %w", err)
 		}
-		proxy := httputil.NewSingleHostReverseProxy(target)
+		// Marked with X-Arti-Fe-Proxy so arti-web can tell "arti-server asked
+		// me for this" from "a client asked me for this" and decline to send
+		// it back. Belt to the guards' braces, for a version-skewed rollout.
+		proxy := newFEProxy(httputil.NewSingleHostReverseProxy(target))
 		// Catalog/viewer pages (served by the Next.js FE) carry their own
 		// `frame-ancestors` CSP (next.config.ts) that allows trusted internal
 		// origins to iframe the viewer — e.g. couch's artifact side panel
@@ -569,20 +623,65 @@ func reqLogger(l *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			ww := chimid.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)
+
+			// A client that hangs up mid-request cancels the request context,
+			// so the handler's in-flight DB query fails with context.Canceled
+			// and the handler answers 500 — a server fault the server did not
+			// commit, written to a connection nobody is reading. Record those
+			// as 499, nginx's "client closed request", so `s>=500` stays a
+			// true server-error signal. On prod this was 13-21 fabricated
+			// 500s/day on /api/artifacts/aggregates alone (the catalog
+			// sidebar's fetch, aborted by navigation or an unmounting
+			// component), which is most of what arti reported as 5xx.
+			//
+			// net/http cancels this context on connection close, and only
+			// cancels it for a completed request AFTER the whole middleware
+			// chain returns — so reading it here means "the client left".
+			// httperr.ClientGone is the one definition of that, shared with the
+			// handlers; it counts cancellation only, so chimid.Timeout's 60s
+			// deadline still records as a 5xx.
+			//
+			// Deliberately narrow: only a would-be server fault is
+			// reclassified. A 2xx the client abandoned mid-download stays a
+			// 2xx, leaving success counts and latency percentiles untouched.
+			status := ww.Status()
+			if status >= 500 && httperr.ClientGone(r, nil) {
+				status = httperr.StatusClientClosedRequest
+			}
 			l.Info("http",
 				"m", r.Method, "p", redactLogPath(r.URL.Path),
-				"s", ww.Status(), "b", ww.BytesWritten(),
+				"s", status, "b", ww.BytesWritten(),
 				"d", time.Since(start).Milliseconds())
 		})
 	}
 }
 
-// redactLogPath masks scoped app tokens embedded in sibling-file URL paths
-// before logging, so a bearer credential never lands in centralized HTTP
-// logs: /embed/{surface}/_files/{token}/... (embed sibling-file route) and
-// /api/artifacts/{id}/files-token/{token}/... (in-catalog sibling-file
-// route, see filesBaseFor). Other paths are returned unchanged.
+// redactLogPath masks bearer credentials embedded in URL paths before logging,
+// so one never lands in centralized HTTP logs:
+//   - /share/{token}/...                          (external share link)
+//   - /embed/{surface}/_files/{token}/...         (embed sibling-file route)
+//   - /api/artifacts/{id}/files-token/{token}/... (in-catalog sibling-file
+//     route, see filesBaseFor)
+//
+// Registered unconditionally, independent of ARTI_SHARE_ENABLED: a token must
+// never reach the log, whatever the feature flag says.
+//
+// The share rule runs FIRST and keys off the prefix, because a share sibling
+// path (/share/{token}/_files/css/app.css) also contains "/_files/" — the
+// marker loop below would mask the asset segment and leave the live token in
+// the log, which is the exact failure this function exists to prevent.
 func redactLogPath(p string) string {
+	const share = "/share/"
+	if strings.HasPrefix(p, share) {
+		rest := p[len(share):]
+		if rest == "" {
+			return p
+		}
+		if j := strings.IndexByte(rest, '/'); j >= 0 {
+			return share + "<redacted>" + rest[j:]
+		}
+		return share + "<redacted>"
+	}
 	for _, marker := range [...]string{"/_files/", "/files-token/"} {
 		i := strings.Index(p, marker)
 		if i < 0 {

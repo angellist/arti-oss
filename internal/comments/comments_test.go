@@ -309,3 +309,90 @@ func TestComments_FlowAndAccess(t *testing.T) {
 		}
 	}
 }
+
+// A document whose owner turned commenting off must behave as if it has no
+// comments at all: existing threads are not reported, and every mutating
+// endpoint refuses — 403, not 404, because the artifact itself is readable and
+// the client needs to be able to say WHY.
+func TestComments_DisabledDocument(t *testing.T) {
+	ctx := context.Background()
+	pool := newPool(t)
+	art := pgstore.New(pool, blob.NewInMemory(), pgstore.Config{})
+	svc := NewService(pool, art, auth.NewJWTSigner([]byte("test-secret")))
+	router := newRouter(svc)
+
+	const owner = "owner@example.com"
+
+	row, err := art.Put(ctx, pgstore.PutInput{
+		ArtifactType: pgstore.TypeText, Title: "doc", ContentType: "text/plain",
+		Content: []byte("body"), Creator: owner, AllowedAccess: []string{"*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuidStr(row.ArtifactID)
+
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("X-Test-Email", owner)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Seed a thread while commenting is still on.
+	rec := do("POST", "/api/artifacts/"+id+"/comments", `{"anchor":{"type":"doc"},"body":"before"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("seed comment: got %d (%s)", rec.Code, rec.Body)
+	}
+	var seeded Thread
+	json.Unmarshal(rec.Body.Bytes(), &seeded)
+
+	if _, err := art.SetCommentsEnabled(ctx, uuidFrom(row.ArtifactID), false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reads report nothing — the threads still exist in the table, they are
+	// just not part of the document while the switch is off.
+	rec = do("GET", "/api/artifacts/"+id+"/comments", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: got %d", rec.Code)
+	}
+	var list ListResponse
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list.Threads) != 0 {
+		t.Fatalf("comments off: want 0 threads, got %d", len(list.Threads))
+	}
+	mcp, err := svc.ListForCaller(ctx, uuidFrom(row.ArtifactID), owner, true)
+	if err != nil {
+		t.Fatalf("ListForCaller: %v", err)
+	}
+	if len(mcp.Threads) != 0 {
+		t.Fatalf("comments off (MCP): want 0 threads, got %d", len(mcp.Threads))
+	}
+
+	// Every write is refused — including by the owner, who must flip the
+	// switch back rather than write around it.
+	for _, c := range []struct{ method, path, body string }{
+		{"POST", "/api/artifacts/" + id + "/comments", `{"anchor":{"type":"doc"},"body":"after"}`},
+		{"POST", "/api/comments/" + seeded.ID + "/replies", `{"body":"after"}`},
+		{"POST", "/api/comments/" + seeded.ID + "/resolve", ""},
+		{"POST", "/api/comments/" + seeded.ID + "/reopen", ""},
+		{"PUT", "/api/comments/" + seeded.ID + "/comments/" + seeded.Comments[0].ID, `{"body":"edited"}`},
+		{"DELETE", "/api/comments/" + seeded.ID + "/comments/" + seeded.Comments[0].ID, ""},
+	} {
+		if rec := do(c.method, c.path, c.body); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s %s with comments off: want 403, got %d (%s)", c.method, c.path, rec.Code, rec.Body)
+		}
+	}
+
+	// Flipping it back restores the seeded thread untouched.
+	if _, err := art.SetCommentsEnabled(ctx, uuidFrom(row.ArtifactID), true); err != nil {
+		t.Fatal(err)
+	}
+	rec = do("GET", "/api/artifacts/"+id+"/comments", "")
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list.Threads) != 1 || len(list.Threads[0].Comments) != 1 {
+		t.Fatalf("re-enabled: want the seeded thread back, got %+v", list.Threads)
+	}
+}

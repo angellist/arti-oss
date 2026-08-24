@@ -216,3 +216,192 @@ func TestRoles_NoSelfDemotion(t *testing.T) {
 		t.Errorf("unassigning ADMIN from another user: want 204, got %d", w.Code)
 	}
 }
+
+// TestUsers_RosterGatedAndEnumerates pins criterion 1 plus the disclosure
+// boundary that matters: /api/users is the ONE surface allowed to enumerate
+// principals, and only behind MANAGE_ROLES. A non-holder must get 404, not 403,
+// so the surface is not discoverable — the same choice the rest of this package
+// makes.
+func TestUsers_RosterGatedAndEnumerates(t *testing.T) {
+	r, st := setup(t)
+	ctx := context.Background()
+	const admin, plain = "rosteradmin@a.com", "rosterplain@a.com"
+	if err := st.AssignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.UnassignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin) })
+
+	if w := do(t, r, plain, "GET", "/api/users", ""); w.Code != http.StatusNotFound {
+		t.Errorf("roster without MANAGE_ROLES: want 404, got %d", w.Code)
+	}
+	if w := do(t, r, plain, "POST", "/api/users", `{"email":"x@y.com"}`); w.Code != http.StatusNotFound {
+		t.Errorf("add-user without MANAGE_ROLES: want 404, got %d", w.Code)
+	}
+
+	w := do(t, r, admin, "GET", "/api/users", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin roster: want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	var got struct {
+		Users []struct {
+			Email string `json:"email"`
+			Roles []struct {
+				Name   string `json:"name"`
+				Source string `json:"source"`
+			} `json:"roles"`
+			Groups    []string `json:"groups"`
+			IdPGroups []string `json:"idp_groups"`
+		} `json:"users"`
+		Sources []string `json:"sources"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode roster: %v", err)
+	}
+	// The admin was just assigned a role, so the roster must contain them —
+	// role_assignments is one of the arms.
+	var found bool
+	for _, u := range got.Users {
+		if u.Email == admin {
+			found = true
+			if u.Groups == nil || u.IdPGroups == nil {
+				t.Error("group slices must marshal as [] not null, so clients need not handle absent")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("roster is missing %q, who holds a direct role", admin)
+	}
+	if len(got.Sources) == 0 {
+		t.Error("the response must name the sources it read, so a missing principal class is diagnosable")
+	}
+}
+
+// TestUsers_AddUserRecordsWithoutGranting pins that the add-user path records a
+// principal and grants nothing. This is the whole reason the users table exists:
+// AssignRole REJECTS the USER role, so a role assignment cannot express "this
+// principal exists at baseline privilege".
+func TestUsers_AddUserRecordsWithoutGranting(t *testing.T) {
+	r, st := setup(t)
+	ctx := context.Background()
+	const admin = "rosteradmin2@a.com"
+	if err := st.AssignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.UnassignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin) })
+
+	email := unique("sa") + "@example.com"
+	w := do(t, r, admin, "POST", "/api/users",
+		`{"email":"`+email+`","kind":"service","note":"platform team"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("add user: want 201, got %d (%s)", w.Code, w.Body.String())
+	}
+	var u struct {
+		Email      string `json:"email"`
+		Kind       string `json:"kind"`
+		Note       string `json:"note"`
+		AddedBy    string `json:"added_by"`
+		Registered bool   `json:"registered"`
+		Roles      []struct {
+			Name   string `json:"name"`
+			Source string `json:"source"`
+		} `json:"roles"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &u); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if u.Email != email || u.Kind != "service" || u.Note != "platform team" || !u.Registered {
+		t.Errorf("registration not reflected: %+v", u)
+	}
+	if u.AddedBy != admin {
+		t.Errorf("added_by = %q, want the calling admin", u.AddedBy)
+	}
+	for _, role := range u.Roles {
+		if role.Source != "baseline" {
+			t.Errorf("adding a user must grant nothing beyond the baseline; got %+v", u.Roles)
+		}
+	}
+
+	// A pattern is not a principal and must be refused.
+	if w := do(t, r, admin, "POST", "/api/users", `{"email":"*@example.com"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("glob email: want 400, got %d", w.Code)
+	}
+}
+
+// TestUsers_RosterAgreesWithRoleLookup pins criterion 3 across the HTTP
+// boundary: the roster and /api/role-lookup must report the same role sources
+// for the same person, because they now share one computation.
+func TestUsers_RosterAgreesWithRoleLookup(t *testing.T) {
+	r, st := setup(t)
+	ctx := context.Background()
+	const admin = "rosteradmin3@a.com"
+	if err := st.AssignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.UnassignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin) })
+
+	subject := unique("both") + "@example.com"
+	group := unique("rgrp")
+	if _, err := st.CreateGroup(ctx, group, "roster fixture", []string{subject}, admin); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.DeleteGroup(ctx, group) })
+	if err := st.AssignRole(ctx, rbac.PrincipalUser, subject, rbac.RoleAdmin, admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AssignRole(ctx, rbac.PrincipalGroup, group, rbac.RoleAdmin, admin); err != nil {
+		t.Fatal(err)
+	}
+
+	sources := func(body []byte, path string) map[string]bool {
+		t.Helper()
+		out := map[string]bool{}
+		var rl struct {
+			Roles []struct {
+				Name   string `json:"name"`
+				Source string `json:"source"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &rl); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		for _, x := range rl.Roles {
+			out[x.Name+"/"+x.Source] = true
+		}
+		return out
+	}
+
+	lw := do(t, r, admin, "GET", "/api/role-lookup?email="+url.QueryEscape(subject), "")
+	if lw.Code != http.StatusOK {
+		t.Fatalf("role-lookup: %d (%s)", lw.Code, lw.Body.String())
+	}
+	fromLookup := sources(lw.Body.Bytes(), "role-lookup")
+
+	rw := do(t, r, admin, "GET", "/api/users", "")
+	var roster struct {
+		Users []json.RawMessage `json:"users"`
+	}
+	if err := json.Unmarshal(rw.Body.Bytes(), &roster); err != nil {
+		t.Fatal(err)
+	}
+	var fromRoster map[string]bool
+	for _, raw := range roster.Users {
+		var probe struct {
+			Email string `json:"email"`
+		}
+		_ = json.Unmarshal(raw, &probe)
+		if probe.Email == subject {
+			fromRoster = sources(raw, "roster")
+		}
+	}
+	if fromRoster == nil {
+		t.Fatalf("roster has no row for %q", subject)
+	}
+	if len(fromRoster) != len(fromLookup) {
+		t.Errorf("roster and role-lookup disagree:\n roster=%v\n lookup=%v", fromRoster, fromLookup)
+	}
+	for k := range fromLookup {
+		if !fromRoster[k] {
+			t.Errorf("roster is missing %q, which role-lookup reports", k)
+		}
+	}
+}

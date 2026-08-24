@@ -35,9 +35,20 @@ describe("middleware matcher", () => {
     expect(matches("/comments-embed.js"), "comments-embed must stay public").toBe(false);
   });
 
-  it("exempts Next internals and the paths the Go binary owns", () => {
-    for (const p of ["/_next/static/chunk.js", "/_next/image", "/favicon.ico", "/api/artifacts", "/auth/login", "/login"]) {
+  it("exempts Next internals, public assets and the login page", () => {
+    for (const p of ["/_next/static/chunk.js", "/_next/image", "/favicon.ico", "/login"]) {
       expect(matches(p), `${p} must be exempt`).toBe(false);
+    }
+  });
+
+  // These used to be excluded from the matcher, back when next.config.ts
+  // rewrote them. It doesn't any more (that rewrite baked ARTI_API_URL at
+  // build time and 500'd in every split-pod deployment), so middleware is the
+  // only thing forwarding them — excluding them again would 404 the whole API
+  // surface for anyone who reaches arti-web directly.
+  it("runs on the arti-server paths, because middleware is what forwards them", () => {
+    for (const p of ["/api/artifacts", "/api/graphql", "/auth/login", "/mcp", "/healthz", "/openapi.yaml", "/.well-known/oauth-protected-resource"]) {
+      expect(matches(p), `${p} must reach middleware`).toBe(true);
     }
   });
 });

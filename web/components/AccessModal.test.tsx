@@ -5,6 +5,10 @@ import AccessModal, { levelsFor } from "./AccessModal";
 vi.mock("@/lib/arti", () => ({
   listGroups: async () => [],
   listIdpGroups: async () => [],
+  // The people typeahead reads these; the modal renders no suggestions without
+  // a typed draft, so a stub that never matches keeps these tests about access.
+  MIN_PEOPLE_QUERY: 2,
+  searchPeople: async () => [],
   updateArtifactAccess: async () => ({}),
 }));
 
@@ -75,7 +79,7 @@ describe("AccessModal", () => {
     expect(html).toContain("Read");
   });
 
-  it("shows the this-version-only note when there are other versions", () => {
+  it("says edits apply to all versions when there are other versions", () => {
     const html = renderToStaticMarkup(
       <AccessModal
         artifactID="x"
@@ -86,7 +90,10 @@ describe("AccessModal", () => {
         onSaved={() => {}}
       />,
     );
-    expect(html).toContain("this version only");
+    // Access is slug-wide (DD-0055): the note must say ALL versions, and the
+    // old per-version warning must be gone.
+    expect(html).toContain("all versions");
+    expect(html).not.toContain("this version only");
   });
 
   it("says nothing is saved yet in draft mode", () => {
@@ -102,7 +109,40 @@ describe("AccessModal", () => {
       />,
     );
     expect(html).toContain("Not saved yet");
-    // The only dismissal is Done — the page's Create is the commit.
-    expect(html).toContain("Done");
+    // Staged, not implicit: Confirm lands the rows in the draft, Cancel drops them.
+    expect(html).toContain("Confirm");
+    expect(html).toContain("Cancel");
+  });
+
+  it("edits are staged behind Confirm/Cancel, and Confirm starts disabled", () => {
+    const html = renderToStaticMarkup(
+      <AccessModal
+        artifactID="x"
+        access={["alice@example.com"]}
+        hasOtherVersions={false}
+        canEdit={true}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />,
+    );
+    expect(html).toContain("Confirm");
+    expect(html).toContain("Cancel");
+    // Nothing changed yet → Confirm is not lit up.
+    expect(html).toContain("no changes");
+  });
+
+  it("read-only variant gets a Close button and no Confirm", () => {
+    const html = renderToStaticMarkup(
+      <AccessModal
+        artifactID="x"
+        access={["alice@example.com"]}
+        hasOtherVersions={false}
+        canEdit={false}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />,
+    );
+    expect(html).toContain("Close");
+    expect(html).not.toContain("Confirm");
   });
 });

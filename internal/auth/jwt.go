@@ -85,6 +85,26 @@ const (
 // IsUploadScoped reports whether the token carries the device-flow upload scope.
 func (c Claims) IsUploadScoped() bool { return containsString(c.Scopes, UploadScope) }
 
+// IsSessionCredential reports whether these claims may stand in for an
+// interactive browser session, as the arti_session cookie does. A valid
+// signature is not enough on its own: every token this service mints is
+// signed by the same key, and a caller can put any of them in that cookie
+// by hand, so accepting one would launder a narrower or longer-lived
+// token into a full session.
+//
+// This states what a session IS rather than listing what it is not, so a
+// token type added later fails closed. loginFinisher.finish is the only
+// mint of arti_session and it sets exactly the `user` scope, with no flow
+// type and no token family. The negative clauses are the rejections
+// RequireAuth applies on its HS256 rung (embed, app) and the flow-binding
+// guard on the refresh path (family, upload), kept explicit so the
+// intent survives a change to what the positive clauses admit.
+func (c Claims) IsSessionCredential() bool {
+	return c.Typ == "" && c.Fam == "" &&
+		containsString(c.Scopes, "user") && !containsString(c.Scopes, "refresh") &&
+		!c.IsEmbedScoped() && !c.IsAppScoped() && !c.IsUploadScoped()
+}
+
 // IsAppScoped reports whether any scope is an APP-bridge scope. Such tokens are
 // exposed in served-page source and must only be honored by the apps proxy,
 // never as a session credential on the regular API/MCP routes.

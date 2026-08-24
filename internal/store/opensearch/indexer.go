@@ -47,16 +47,31 @@ func (ix *Indexer) IndexArtifact(ctx context.Context, row sqlc.Artifact) {
 	}
 	doc := rowToDoc(row)
 
-	switch row.ArtifactType {
-	case pgstore.TypeText:
-		body, err := ix.readContent(ctx, row)
-		if err != nil {
-			ix.logger.Warn("opensearch: read content for indexing", "id", doc.ArtifactID, "err", err)
-		} else {
-			doc.ContentText = ExtractText(body, row.ContentType)
+	// An artifact labelled index:skip-fulltext keeps every metadata field —
+	// title, description, labels, slug, creator — and only withholds its body
+	// from content_text, so it stays findable by name but its contents can't
+	// match a free-text query. This exists for machine-state artifacts: the
+	// publisher state doc `couch-skill-publish-state` is ~315 KB of sha256s and
+	// UUIDs, re-written daily, and every version was indexed in full — so a
+	// search for a bare hash returned it, and the index carried a 256 KiB copy
+	// per version of something no human ever full-text searches.
+	//
+	// Skipping also avoids the content read entirely, which for an over-inline
+	// (>64 KiB) TEXT artifact is an S3 GET on every index write.
+	if SkipFullText(doc.Labels) {
+		ix.logger.Debug("opensearch: skipping content_text", "id", doc.ArtifactID, "label", SkipFullTextLabel)
+	} else {
+		switch row.ArtifactType {
+		case pgstore.TypeText:
+			body, err := ix.readContent(ctx, row)
+			if err != nil {
+				ix.logger.Warn("opensearch: read content for indexing", "id", doc.ArtifactID, "err", err)
+			} else {
+				doc.ContentText = ExtractText(body, row.ContentType)
+			}
+		case pgstore.TypePackage, pgstore.TypeApp:
+			doc.ContentText = extractPackageText(row)
 		}
-	case pgstore.TypePackage, pgstore.TypeApp:
-		doc.ContentText = extractPackageText(row)
 	}
 
 	if err := ix.client.Index(ctx, doc); err != nil {

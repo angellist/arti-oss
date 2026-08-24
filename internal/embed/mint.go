@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -76,6 +75,17 @@ type UserTokenMinter interface {
 	EmbedUserApp(ctx context.Context, appID, email string) (title, slug string, err error)
 	// MintEmbedUserToken mints the short-TTL, embed-user-marked app token.
 	MintEmbedUserToken(ctx context.Context, appID, email string) (string, error)
+	// EmbedViewerArtifact verifies email can read the artifact named by ident
+	// (slug or UUID) AT ver, of ANY type, and returns its title, slug and UUID.
+	// ver must be the same version the doc route will serve: every version is its
+	// own row with its own UUID, so resolving "latest" here while the doc route
+	// serves ?version=N would pin a UUID that can never match.
+	// isApp reports whether the artifact is an APP, which changes the grant the
+	// consent page must describe.
+	EmbedViewerArtifact(ctx context.Context, ident string, ver *int32, email string) (title, slug, artifactID string, isApp bool, err error)
+	// MintEmbedViewerToken mints the short-TTL, embed-viewer-marked document
+	// token the gate page reloads itself with.
+	MintEmbedViewerToken(ctx context.Context, artifactID, email string) (string, error)
 }
 
 // MintConfig wires the handshake endpoint's dependencies.
@@ -99,7 +109,7 @@ type MintConfig struct {
 func (s *Service) MountMint(r chi.Router, cfg MintConfig) {
 	hasUser := false
 	for _, surf := range s.surfaces {
-		if surf.Identity == "user" {
+		if surf.Identity == "user" || surf.Identity == "viewer" {
 			hasUser = true
 			break
 		}
@@ -127,12 +137,12 @@ func (s *Service) handlePoll(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	surf, ok := s.surfaces[chi.URLParam(r, "surface")]
-	if !ok || surf.Identity != "user" || s.mint == nil || s.mint.Store == nil {
+	if !ok || !handshakeSurface(surf) || s.mint == nil || s.mint.Store == nil {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"unknown surface"}`))
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("auth_secret")), []byte(surf.Secret)) != 1 {
+	if !secretMatches(surf, r.URL.Query().Get("auth_secret")) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
 		return
@@ -167,22 +177,45 @@ func setEmbedCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Max-Age", "600")
 }
 
+// handshakeSurface reports whether a surface uses the popup handshake at all.
+// Both user mode (per-tool-call identity for an APP) and viewer mode (identity
+// for the document render) do.
+func handshakeSurface(surf Surface) bool {
+	return surf.Identity == "user" || surf.Identity == "viewer"
+}
+
+// challengePurpose names the grant a consent page is asking for, so a challenge
+// can never be redeemed for a different one. See challengePayload.Purpose.
+func challengePurpose(surf Surface) string {
+	if surf.Identity == "viewer" {
+		return "viewer"
+	}
+	return "user"
+}
+
 func (s *Service) handleMint(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 
 	surfName := r.URL.Query().Get("surface")
 	surf, ok := s.surfaces[surfName]
-	if !ok || surf.Identity != "user" {
+	if !ok || !handshakeSurface(surf) {
 		http.NotFound(w, r)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("auth_secret")), []byte(surf.Secret)) != 1 {
+	if !secretMatches(surf, r.URL.Query().Get("auth_secret")) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	appID := r.URL.Query().Get("app")
+	// user mode mints for an APP by UUID (?app=); viewer mode mints for any
+	// artifact named the way the embed URL names it (?slug=, which may also be a
+	// UUID). Accept either key so a viewer gate page and an app bridge can share
+	// this route.
+	ident := r.URL.Query().Get("app")
+	if ident == "" && surf.Identity == "viewer" {
+		ident = r.URL.Query().Get("slug")
+	}
 	state := r.URL.Query().Get("state")
-	if appID == "" || state == "" || len(state) > maxStateLen {
+	if ident == "" || state == "" || len(state) > maxStateLen {
 		http.Error(w, "missing or bad app/state", http.StatusBadRequest)
 		return
 	}
@@ -200,16 +233,29 @@ func (s *Service) handleMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mint by the version-pinned UUID the served page carries, so the token
-	// always matches the page's app_id.
-	title, slug, err := s.mint.Minter.EmbedUserApp(r.Context(), appID, email)
+	// Resolve as THIS viewer, so an artifact they cannot read 404s here exactly
+	// as it would at /s/<slug> — no new existence signal. appID is the resolved
+	// UUID, which is what the challenge and the token pin, so the token can never
+	// authorize a different row than the one that was authorized here.
+	var title, slug, appID string
+	var isApp bool
+	var err error
+	if surf.Identity == "viewer" {
+		title, slug, appID, isApp, err = s.mint.Minter.EmbedViewerArtifact(r.Context(), ident, parseVersion(r), email)
+	} else {
+		isApp = true
+		appID = ident
+		title, slug, err = s.mint.Minter.EmbedUserApp(r.Context(), ident, email)
+	}
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	// A surface only hands out tokens for apps it may embed. Mirror the doc
-	// route: the allowlisted ident may be the slug OR the UUID.
-	if !slugAllowed(surf.SlugAllow, slug) && !slugAllowed(surf.SlugAllow, appID) {
+	// A surface only hands out tokens for artifacts it may embed. Mirror the doc
+	// route: the allowlisted ident may be the slug OR the UUID. `ident` is also
+	// checked so a viewer surface allowlisted by slug still matches when the
+	// caller named the artifact by slug.
+	if !slugAllowed(surf.SlugAllow, slug) && !slugAllowed(surf.SlugAllow, appID) && !slugAllowed(surf.SlugAllow, ident) {
 		http.Error(w, "app not allowed for this surface", http.StatusForbidden)
 		return
 	}
@@ -223,9 +269,10 @@ func (s *Service) handleMint(w http.ResponseWriter, r *http.Request) {
 	_ = slug
 	challenge := s.signChallenge(challengePayload{
 		Email: email, App: appID, Surface: surfName, State: state,
-		Exp: time.Now().Add(challengeTTL).Unix(),
+		Purpose: challengePurpose(surf),
+		Exp:     time.Now().Add(challengeTTL).Unix(),
 	})
-	s.writeConsentPage(w, surfName, surf, appID, state, email, title, challenge)
+	s.writeConsentPage(w, surfName, surf, appID, state, email, title, challenge, isApp)
 }
 
 // handleComplete is the PUBLIC, CORS-enabled mint step the consent page's
@@ -240,13 +287,13 @@ func (s *Service) handleComplete(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	surfName := chi.URLParam(r, "surface")
 	surf, ok := s.surfaces[surfName]
-	if !ok || surf.Identity != "user" || s.mint == nil || s.mint.Store == nil {
+	if !ok || !handshakeSurface(surf) || s.mint == nil || s.mint.Store == nil {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"unknown surface"}`))
 		return
 	}
 	_ = r.ParseForm()
-	if subtle.ConstantTimeCompare([]byte(r.PostFormValue("auth_secret")), []byte(surf.Secret)) != 1 {
+	if !secretMatches(surf, r.PostFormValue("auth_secret")) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
 		return
@@ -257,6 +304,14 @@ func (s *Service) handleComplete(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"invalid or expired consent"}`))
 		return
 	}
+	// The grant the human consented to must still be the grant we are about to
+	// issue. A surface reconfigured between consent and completion invalidates
+	// the challenge rather than silently upgrading it.
+	if p.Purpose != challengePurpose(surf) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"consent was for a different grant"}`))
+		return
+	}
 	if !auth.IsAllowed(p.Email) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
@@ -264,7 +319,13 @@ func (s *Service) handleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	// Re-check read access + surface allowlist at completion (defense in depth;
 	// a public endpoint shouldn't lean only on the challenge's issue-time gate).
-	_, slug, err := s.mint.Minter.EmbedUserApp(r.Context(), p.App, p.Email)
+	var slug string
+	var err error
+	if surf.Identity == "viewer" {
+		_, slug, _, _, err = s.mint.Minter.EmbedViewerArtifact(r.Context(), p.App, nil, p.Email)
+	} else {
+		_, slug, err = s.mint.Minter.EmbedUserApp(r.Context(), p.App, p.Email)
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"not found"}`))
@@ -275,7 +336,12 @@ func (s *Service) handleComplete(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"app not allowed for this surface"}`))
 		return
 	}
-	tok, err := s.mint.Minter.MintEmbedUserToken(r.Context(), p.App, p.Email)
+	var tok string
+	if surf.Identity == "viewer" {
+		tok, err = s.mint.Minter.MintEmbedViewerToken(r.Context(), p.App, p.Email)
+	} else {
+		tok, err = s.mint.Minter.MintEmbedUserToken(r.Context(), p.App, p.Email)
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":"mint failed"}`))
@@ -295,8 +361,15 @@ func (s *Service) handleComplete(w http.ResponseWriter, r *http.Request) {
 // ─── consent challenge (proof the human clicked) ─────────────────────
 
 type challengePayload struct {
-	Email   string `json:"e"`
-	App     string `json:"a"`
+	Email string `json:"e"`
+	App   string `json:"a"`
+	// Purpose binds the challenge to the grant it was shown for: "user" (mint an
+	// APP tool token) or "viewer" (render one document). Without it the two flows
+	// are distinguished only by the surface's CURRENT identity, so a surface
+	// flipped viewer→user inside challengeTTL would let a consent the human read
+	// as "view this document" complete as a tool-token mint. Verified at
+	// completion against the surface's identity.
+	Purpose string `json:"p"`
 	Surface string `json:"s"`
 	State   string `json:"t"`
 	Exp     int64  `json:"x"`
@@ -353,10 +426,28 @@ func setMintPageHeaders(w http.ResponseWriter) {
 // JS) but NOT allow-forms (which a sandboxed popup like Front's does not), so
 // it works where a form submit doesn't. On success the app's poll picks up the
 // token; this window just closes.
-func (s *Service) writeConsentPage(w http.ResponseWriter, surfName string, surf Surface, appID, state, email, title, challenge string) {
+func (s *Service) writeConsentPage(w http.ResponseWriter, surfName string, surf Surface, appID, state, email, title, challenge string, isApp bool) {
 	setMintPageHeaders(w)
+	viewerMode := surf.Identity == "viewer"
 	if title == "" {
-		title = "this app"
+		if viewerMode {
+			title = "this document"
+		} else {
+			title = "this app"
+		}
+	}
+	// The copy must describe the grant the token ACTUALLY carries, which depends on
+	// the artifact type and not only the mode. A viewer token minted for a document
+	// grants a read. A viewer token minted for an APP also authorizes that app's
+	// tool calls through the apps proxy (the deliberate asymmetry in
+	// embedViewerScope), so claiming "nothing else is granted" there would
+	// understate it at the load-bearing click.
+	grant := "The embedded app <b>%s</b> will be able to call its allowlisted tools <b>as you</b> while this connection lasts. Only continue if you opened it yourself."
+	switch {
+	case viewerMode && !isApp:
+		grant = "You will be shown <b>%s</b>, and only if your account already has access to it. Nothing else is granted. Only continue if you opened it yourself."
+	case viewerMode && isApp:
+		grant = "You will be shown <b>%s</b>, and only if your account already has access to it. Because it is an app, it will also be able to call its allowlisted tools <b>as you</b> while it is open. Only continue if you opened it yourself."
 	}
 	// All values are JSON-encoded into a JS object literal; json.Marshal
 	// escapes </script> and quotes so nothing breaks out.
@@ -372,7 +463,7 @@ h1{font-size:1.15em;font-weight:600}p{color:#555;font-size:.92em}
 button{font:inherit;padding:8px 18px;border-radius:6px;border:1px solid #ccc;background:#fff;cursor:pointer}
 button.go{background:#2563eb;border-color:#2563eb;color:#fff}#s{color:#888}</style></head><body>
 <h1>Continue as %s?</h1>
-<p>The embedded app <b>%s</b> will be able to call its allowlisted tools <b>as you</b> while this connection lasts. Only continue if you opened it yourself.</p>
+<p>`+grant+`</p>
 <p><button id="go" class="go">Continue</button> <button id="no">Cancel</button></p>
 <p id="s"></p>
 <script>(function(){

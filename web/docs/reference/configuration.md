@@ -110,7 +110,7 @@ The governed proxy for APP artifacts and the upstream MCP servers they may reach
 | Variable | Default | Meaning |
 |---|---|---|
 | `ARTI_APP_MCP_SERVERS` | `""` | JSON map `name → { resource_url, auth, scope }` of upstream MCP servers, merged over the built-in defaults (`arti-self`, `llm`). A bad value fails startup. |
-| `ARTI_APP_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` source list for served APP HTML — which origins may iframe an arti app (runtime, arti-server). Other artifact types keep `X-Frame-Options: SAMEORIGIN`. Kept in sync with `ARTI_CATALOG_FRAME_ANCESTORS` (the build-time catalog-viewer default). |
+| `ARTI_APP_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` source list for served APP HTML **and for served artifact HTML bodies** — which origins may iframe an arti app, or the full-page viewer's nested content frame (`X-Frame-Options` is dropped for those responses so this list is authoritative; it is checked against every ancestor, so the inner frame needs it whenever the viewer itself is embedded). Non-HTML bodies keep `X-Frame-Options: SAMEORIGIN`. Kept in sync with `ARTI_CATALOG_FRAME_ANCESTORS` (the build-time catalog-viewer default). |
 
 ## OBO broker
 
@@ -146,7 +146,7 @@ shared secrets. Empty disables the `/embed/*` routes. See
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ARTI_EMBED_SURFACES` | `""` | JSON map `name → surface` (`{ secret, origin, identity, email, slug_allow, shell, shell_slug }`). `origin` is a string or a list of ancestor origins. `identity` is `"service"` (default; `email` required) or `"user"` (tool calls run as the real viewer via a consent handshake; `email` must be omitted). A malformed surface fails startup. See [Embed surfaces](../architecture/front-embed.md). |
+| `ARTI_EMBED_SURFACES` | `""` | JSON map `name → surface` (`{ secret, origin, identity, email, slug_allow, shell, shell_slug }`). `origin` is a string or a list of ancestor origins. `identity` is `"service"` (default; `email` required), `"user"` (tool calls run as the real viewer via a consent handshake; `email` must be omitted) or `"viewer"` (the document render itself is gated on the real viewer's ACL; `email` must be omitted, `shell` is rejected, and `secret` is optional because the URL is not a credential). A malformed surface fails startup. See [Embed surfaces](../architecture/front-embed.md). |
 
 ## Notifications
 
@@ -160,7 +160,7 @@ Read by the Next.js app, not `arti-server`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ARTI_API_URL` | `http://localhost:8095` | Server-only base URL the FE proxies/SSR-fetches to (the Go binary). `web/next.config.ts`, `web/lib/arti.ts`. |
+| `ARTI_API_URL` | `http://localhost:8095` | Server-only base URL the FE proxies/SSR-fetches to (the Go binary). **Runtime**, not build-time: `web/middleware.ts` resolves it per request via `web/lib/proxy-target.ts`. It used to be a `next.config.ts` rewrite, which froze it at `next build` and pinned every image to the local-dev default — see [#222](https://github.com/angellist/arti-oss/pull/225). Also read by `web/lib/arti.ts` for SSR fetches. In-cluster the value is the **bare Service name** (`http://arti-server`), which resolves through the pod's own DNS search path and so always means "the arti-server in my namespace" — a fully-qualified `.arti.svc.cluster.local` would point a preview or rig namespace at the shared deployment. |
 | `ARTI_CATALOG_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` for catalog/viewer pages — which origins may iframe the viewer (e.g. an internal tool's side panel embedding `/s/<slug>?v=full`). **Build-time only**: Next bakes `headers()` into the build, so this is read at `next build`, not on the running pod — set it as a build arg to override; the baked fallback lives in `web/tenant-defaults.ts`. Kept in sync with `ARTI_APP_FRAME_ANCESTORS` (the runtime arti-server knob). `web/next.config.ts`. |
 | `NEXT_PUBLIC_ARTI_AUTH_DISABLED` | unset | When `true`, the FE skips the login redirect (pairs with `ARTI_AUTH_DISABLED` for local UI testing). `web/middleware.ts`. |
 

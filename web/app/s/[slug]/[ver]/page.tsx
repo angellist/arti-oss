@@ -4,8 +4,7 @@ import ArtifactViewer from "@/components/ArtifactViewer";
 import FullPageView from "@/components/FullPageView";
 import StaleVersionBanner from "@/components/StaleVersionBanner";
 import { ArtiError, fetchContent, fetchPackageFile, getBySlug, getMe, listPackageFiles } from "@/lib/arti";
-import { fullPageKind, isFullPageView, isTextualContentType, resolvePackageEntry } from "@/lib/viewer";
-import { TEXT_SCALE } from "@/components/ViewerToolbar";
+import { fullPageKind, isFullPageView, isTextualContentType, resolvePackageEntry, textScaleFromParam } from "@/lib/viewer";
 import { PackageRailProvider, SearchRailProvider } from "@/lib/rail-context";
 
 export const dynamic = "force-dynamic";
@@ -119,12 +118,11 @@ export default async function BySlugVersion({
         ? (await fetchPackageFile(info.artifact_id, filePath, cookie)).body
         : (await fetchContent(info.artifact_id, cookie)).body
       : "";
-    const tsParam = (Array.isArray(sp.ts) ? sp.ts[0] : sp.ts) ?? "md";
-    const textScale = TEXT_SCALE[tsParam as keyof typeof TEXT_SCALE] ?? 1;
+    const textScale = textScaleFromParam(sp);
     return (
       <>
         {staleBanner}
-        <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} textScale={textScale} />
+        <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />
       </>
     );
   }

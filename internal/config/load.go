@@ -58,6 +58,12 @@ func Defaults() *Config {
 				MintRPM: 10,
 			},
 		},
+		Share: Share{
+			Enabled: false,
+			MaxTTL:  Duration(720 * time.Hour), // 30d
+			OpenRPM: 120,
+			MintRPM: 30,
+		},
 		// No default administrators: admin capability is granted only by
 		// explicit configuration (or existing DB role assignments).
 		Admin: Admin{},
@@ -257,6 +263,11 @@ func bindings(c *Config) []binding {
 		duration("ARTI_IDP_GROUPS_MAX_AGE", &c.Auth.IdPGroupsMaxAge),
 		duration("ARTI_API_KEY_MAX_TTL", &c.Auth.APIKeys.MaxTTL),
 		integer("ARTI_API_KEY_RPM", &c.Auth.APIKeys.MintRPM),
+		// Share links
+		boolean("ARTI_SHARE_ENABLED", &c.Share.Enabled),
+		duration("ARTI_SHARE_MAX_TTL", &c.Share.MaxTTL),
+		integer("ARTI_SHARE_OPEN_RPM", &c.Share.OpenRPM),
+		integer("ARTI_SHARE_MINT_RPM", &c.Share.MintRPM),
 		str("ARTI_OBO_CALLBACK_BASE", &c.Auth.OBO.CallbackBase),
 		str("ARTI_OBO_ENC_KEY", &c.Auth.OBO.EncKey),
 

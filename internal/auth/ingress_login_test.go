@@ -169,3 +169,45 @@ func TestIngressApproveUserCodeDomainRejected(t *testing.T) {
 		t.Fatalf("expected status 'pending' after domain rejection, got %q", grant.Status)
 	}
 }
+
+// sanitizeReturnTo decides where a user lands straight after logging in, so
+// anything it lets through is a place an attacker can put them at their most
+// trusting moment. The cases that matter are the ones that look same-site as
+// written and stop being same-site once http.Redirect path.Cleans them.
+func TestSanitizeReturnTo(t *testing.T) {
+	offSite := []string{
+		"//evil.test/phish",
+		`/\evil.test/phish`,
+		`/../\evil.test/phish`,
+		`/./\evil.test/phish`,
+		`/a/../../\evil.test/phish`,
+		"https://evil.test/phish",
+		"http://evil.test",
+		`\\evil.test/phish`,
+		"javascript:alert(1)",
+		"mailto:a@b.test",
+		"",
+	}
+	for _, in := range offSite {
+		if got := sanitizeReturnTo(in); got != "/" {
+			t.Errorf("sanitizeReturnTo(%q) = %q, want %q — this leaves the site", in, got, "/")
+		}
+	}
+
+	// The whole point of return_to is to come back to where you were, so a
+	// same-site path and its query must survive intact. Without these a
+	// helper that returned "/" unconditionally would pass the cases above.
+	sameSite := map[string]string{
+		"/":                        "/",
+		"/s/some-doc":              "/s/some-doc",
+		"/oauth/authorize?a=b&c=d": "/oauth/authorize?a=b&c=d",
+		"/app/demo?view=full":      "/app/demo?view=full",
+		"/a/../s/doc":              "/s/doc",
+		"/s/a%2Fb":                 "/s/a%2Fb",
+	}
+	for in, want := range sameSite {
+		if got := sanitizeReturnTo(in); got != want {
+			t.Errorf("sanitizeReturnTo(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

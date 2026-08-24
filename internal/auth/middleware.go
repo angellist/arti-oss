@@ -89,6 +89,7 @@ const (
 	ctxClaims
 	ctxName
 	ctxPicture
+	ctxPeerAddr
 )
 
 // EmailFromContext returns the authenticated caller's email, or "".

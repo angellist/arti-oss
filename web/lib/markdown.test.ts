@@ -64,6 +64,54 @@ describe("renderMarkdown", () => {
     expect(html).toContain("~approx~");
   });
 
+  // Emphasis delimiters can be the ONLY separator between two words (an email
+  // subject quoted verbatim). The parser eats them, so the renderer has to put
+  // the gap back — otherwise "PAST DUE" and "Document" render fused.
+  it("adds an optical gap where emphasis abuts a word", () => {
+    const { html } = renderMarkdown("Re: ***PAST DUE***Document Request\n");
+    expect(html).toContain('</em><span class="arti-emph-gap"></span>Document');
+  });
+
+  it("adds the gap on the opening side too", () => {
+    const { html } = renderMarkdown("Re:Subject**PAST DUE** here\n");
+    expect(html).toContain('<span class="arti-emph-gap"></span><strong>');
+  });
+
+  // Same delimiter-eating shape for strikethrough; inline code is excluded on
+  // purpose (its chip padding already separates it).
+  it("covers strikethrough but not inline code", () => {
+    expect(renderMarkdown("~~struck~~text\n").html).toContain(
+      '</del><span class="arti-emph-gap"></span>text',
+    );
+    expect(renderMarkdown("`code`text\n").html).not.toContain("arti-emph-gap");
+  });
+
+  // Scripts without inter-word spaces write emphasis flush against the next
+  // character by design — a gap there invents a word break.
+  it("leaves scriptio-continua scripts alone", () => {
+    for (const src of ["**粗体**文字\n", "**太字**です\n", "**볼드**텍스트\n", "**หนา**ตัวอักษร\n"]) {
+      expect(renderMarkdown(src).html).not.toContain("arti-emph-gap");
+    }
+    // …but a Latin word after CJK emphasis still separates.
+    expect(renderMarkdown("**粗体**text\n").html).toContain("arti-emph-gap");
+  });
+
+  // The gap element carries no text, so the document still reads as one
+  // continuous string for copy/paste and find-in-page.
+  it("keeps the gap text-free", () => {
+    const { html } = renderMarkdown("Re: ***PAST DUE***Document\n");
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.body.textContent).toContain("PAST DUEDocument");
+  });
+
+  // Punctuation and real spaces already separate the words — no marker there,
+  // or every `*word*.` in every doc grows a gap before the period.
+  it("leaves emphasis followed by punctuation or space alone", () => {
+    for (const src of ["a *word*, b\n", "a *word*. b\n", "a *word* b\n", "(*word*)\n"]) {
+      expect(renderMarkdown(src).html).not.toContain("arti-emph-gap");
+    }
+  });
+
   it("renders Mermaid fences as sanitized placeholders", () => {
     const { html } = renderMarkdown('```mermaid\nflowchart TD\n  A["<script>"] --> B\n```\n');
     const doc = new DOMParser().parseFromString(html, "text/html");

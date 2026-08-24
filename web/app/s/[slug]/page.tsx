@@ -3,8 +3,7 @@ import { notFound } from "next/navigation";
 import ArtifactViewer from "@/components/ArtifactViewer";
 import FullPageView from "@/components/FullPageView";
 import { ArtiError, fetchContent, fetchPackageFile, getBySlug, getMe, listPackageFiles } from "@/lib/arti";
-import { fullPageKind, isFullPageView, resolvePackageEntry } from "@/lib/viewer";
-import { TEXT_SCALE } from "@/components/ViewerToolbar";
+import { fullPageKind, isFullPageView, resolvePackageEntry, textScaleFromParam } from "@/lib/viewer";
 import { PackageRailProvider, SearchRailProvider } from "@/lib/rail-context";
 
 export const dynamic = "force-dynamic";
@@ -77,9 +76,8 @@ export default async function BySlug({
         ? (await fetchPackageFile(info.artifact_id, filePath, cookie)).body
         : (await fetchContent(info.artifact_id, cookie)).body
       : "";
-    const tsParam = (Array.isArray(sp.ts) ? sp.ts[0] : sp.ts) ?? "md";
-    const textScale = TEXT_SCALE[tsParam as keyof typeof TEXT_SCALE] ?? 1;
-    return <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} textScale={textScale} />;
+    const textScale = textScaleFromParam(sp);
+    return <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />;
   }
 
   if (info.artifact_type === "PACKAGE" || info.artifact_type === "APP") {

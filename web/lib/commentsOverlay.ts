@@ -20,8 +20,12 @@ import {
 } from "./arti";
 import {
   computeShift as computeShiftFrom,
+  minMarkerLeft,
+  railTop,
   CARD_RIGHT,
   CARD_WIDTH,
+  RAIL_RIGHT,
+  RAIL_WIDTH,
   type Shift,
 } from "./commentsGeometry";
 
@@ -67,11 +71,36 @@ const ICON_PATHS = {
   link: `<path d="M10.3 13.7a3.75 3.75 0 0 0 5.3 0l2.4-2.4a3.75 3.75 0 0 0-5.3-5.3l-1.2 1.2"/><path d="M13.7 10.3a3.75 3.75 0 0 0-5.3 0L6 12.7a3.75 3.75 0 0 0 5.3 5.3l1.2-1.2"/>`,
   min: `<path d="M5.6 12h12.8"/>`,
   ok: `<path d="M5.4 12.6l4.3 4.3 8.9-9.5"/>`,
+  // Shared by the rail's comments toggle, the minimized-thread marker and the
+  // selection's floating Comment button — one bubble, drawn once. Its y values
+  // are the drawn shape's, lifted 0.75 units from the obvious ones (12.5 /
+  // 20.5): the tail hangs below the balloon, so the ink of the naive path
+  // straddles y=12.75 rather than the box's own center, and every site that
+  // pairs this glyph with text rendered it a fraction low.
+  bubble: `<path d="M20 11.75a7.5 7.5 0 0 1-10.6 6.8L4.5 19.75l1.3-4.6A7.5 7.5 0 1 1 20 11.75Z"/>`,
+  pin: `<path d="M12 21s6.2-6 6.2-10.2A6.2 6.2 0 0 0 5.8 10.8C5.8 15 12 21 12 21Z"/><circle cx="12" cy="10.6" r="2.1"/>`,
+  list: `<path d="M5 7h14M5 12h14M5 17h9"/>`,
+  // Six dots — the rail's drag handle. Drawn as zero-length round-capped
+  // strokes so it inherits the same 1.6 stroke language as the rest.
+  grip: `<path d="M9.5 7h.01M14.5 7h.01M9.5 12h.01M14.5 12h.01M9.5 17h.01M14.5 17h.01" stroke-width="2.4"/>`,
 };
 const icon = (k: keyof typeof ICON_PATHS) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICON_PATHS[k]}</svg>`;
 
 const CSS = `
+/* The overlay is injected into WHATEVER page is being commented on — the Next
+   app (Tailwind preflight → border-box) but also a served HTML artifact, which
+   is arbitrary author markup with the CSS default of content-box. Every fixed
+   width in here is written as a border-box total: .ac-card/.ac-panel are
+   CARD_WIDTH *including* their padding and border, which is the width
+   commentsGeometry.ts computes the doc shift from, and .ac-edit-input is
+   width:100% *plus* padding, which under content-box grew 18px wider than the
+   card's text column and hung its border out over the card's own. So the reset
+   is not cosmetic — without it the card renders 26px wider than the shift
+   compensates for and the composer spills past the border. Scoped to our own
+   roots: the document's .ac-hl marks live in the host's DOM and are left alone. */
+.ac-layer,.ac-fabs,.ac-float,.ac-lb,.ac-toast,
+.ac-layer *,.ac-fabs *,.ac-float *,.ac-lb *,.ac-toast *{box-sizing:border-box}
 .ac-hl{background:rgba(250,204,21,.28);border-radius:2px;cursor:pointer;transition:background .12s}
 .ac-hl.ac-resolved{background:rgba(120,120,110,.16)}
 .ac-hl.ac-active{background:rgba(250,204,21,.92);box-shadow:0 0 0 1px rgba(202,138,4,.85)}
@@ -95,13 +124,18 @@ const CSS = `
 .ac-ico:hover{color:#33332e;background:rgba(40,40,30,.07)}
 .ac-ico:focus-visible{outline:2px solid rgba(40,40,30,.22);outline-offset:0}
 .ac-ico.ac-copied{color:#4f7a63}
-/* Per-comment actions sit as one row in the row's top-right corner, so they
-   line up with the card-level minimize button next to them. */
+/* Per-comment actions sit as one row in the row's top-right corner. The FIRST
+   comment's row hosts the card-level controls too (.ac-lead — see the block
+   near .ac-card-acts), so a card has exactly one control cluster rather than
+   two that merely line up. */
 .ac-cmt-acts{position:absolute;top:-2px;right:0;display:flex;align-items:center;gap:1px;opacity:0;transition:opacity .12s}
-.ac-cmt:hover .ac-cmt-acts,.ac-card:hover>.ac-cmt:first-of-type .ac-cmt-acts,.ac-cmt-acts:focus-within{opacity:1}
-/* Keep the cluster up while the "copied" tick is showing, even if the pointer
+.ac-cmt:hover .ac-cmt-acts,.ac-cmt-acts:focus-within{opacity:1}
+/* The lead cluster carries always-visible card-level controls, so the cluster
+   itself never fades — only its comment-level .ac-grp does. */
+.ac-cmt-acts.ac-lead{opacity:1}
+/* Keep a cluster up while the "copied" tick is showing, even if the pointer
    has already left (Safari doesn't focus a button on click). */
-.ac-cmt-acts:has(.ac-copied){opacity:1}
+.ac-cmt-acts:has(.ac-copied),.ac-grp:has(.ac-copied){opacity:1}
 .ac-cmt.ac-flash{border-radius:6px;animation:ac-flash 1.7s ease-out}
 @keyframes ac-flash{0%,25%{background:rgba(250,204,21,.45)}100%{background:transparent}}
 .ac-edit-input{font:inherit;font-size:12.5px;width:100%;border:1px solid #2563eb;border-radius:6px;padding:5px 8px;background:#fff;resize:none;min-height:32px}
@@ -114,36 +148,78 @@ const CSS = `
 .ac-prow.ac-res{opacity:.65}
 .ac-prow .ac-pbody{flex:1;min-width:0}
 .ac-prow .ac-pmeta{font-size:10px;color:#9b9b95;font-weight:600;margin-bottom:2px}
+.ac-panel .ac-pmeta,.ac-prow .ac-pmeta{display:flex;align-items:center;gap:4px}
+.ac-pmeta svg{display:block;width:11px;height:11px;flex:0 0 11px}
 .ac-prow .ac-psnip{font-size:12px;color:#33332e;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ac-prow .ac-pacts{display:flex;gap:4px;flex-shrink:0}
 .ac-card.ac-active{border-color:#2563eb;box-shadow:0 0 0 3px #eff4ff,0 10px 30px -12px rgba(40,40,30,.35)}
 .ac-card.ac-resolved{opacity:.6}
 .ac-card.ac-draft{border-color:#2563eb;box-shadow:0 0 0 3px #eff4ff;cursor:default}
 .ac-chip{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;line-height:1.4;max-height:22px;font-weight:600;color:#6b6b66;background:#f6f5f2;border:1px solid #efeeea;border-radius:6px;padding:2px 7px;margin-bottom:8px;max-width:100%;overflow:hidden}
+.ac-chip svg{display:block;width:12px;height:12px;flex:0 0 12px;color:#9b9b95}
 .ac-chip .ac-q{color:#9b9b95;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px}
-.ac-cmt{display:flex;gap:9px;margin:7px 0}
+/* Vertical rhythm inside a thread: each row gets air above its name and below
+   its body, and consecutive messages get a little more so a multi-message
+   thread reads as separate messages rather than one block. */
+.ac-cmt{display:flex;gap:9px;margin:10px 0}
+.ac-cmt+.ac-cmt{margin-top:12px}
 .ac-av{position:relative;overflow:hidden;flex:0 0 24px;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:700;color:#fff;background:#2563eb}
 .ac-av img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .ac-who{font-size:12px;font-weight:600;color:#1c1c1a}
 .ac-when{font-size:10.5px;color:#9b9b95;margin-left:6px}
-.ac-text{font-size:12.5px;color:#33332e;margin-top:1px;white-space:pre-wrap;word-wrap:break-word}
-.ac-snip{font-size:12.5px;color:#44443e;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;padding-right:16px}
-.ac-more{font-size:11px;color:#2563eb;font-weight:600;margin-top:4px}
-.ac-reply{display:flex;margin-top:8px}
+.ac-text{font-size:12.5px;color:#33332e;margin-top:3px;white-space:pre-wrap;word-wrap:break-word}
+/* The composer is a separate object from the discussion above it, so it sits
+   further away than two messages sit from each other. */
+.ac-reply{display:flex;margin-top:16px}
 .ac-reply textarea{flex:1;min-width:0;font:inherit;font-size:12.5px;line-height:1.45;border:1px solid #e6e5e1;border-radius:8px;padding:7px 10px;background:#f6f5f2;resize:none;box-sizing:border-box;min-height:34px;max-height:160px;overflow-y:auto}
 .ac-reply textarea:focus{outline:none;border-color:#2563eb;background:#fff}
-.ac-acts{display:flex;gap:6px;margin-top:9px;padding-top:9px;border-top:1px solid #efeeea}
+/* No rule above the buttons — spacing alone separates them from the composer. */
+.ac-acts{display:flex;gap:6px;margin-top:10px}
+/* A reply/comment composer's button row is revealed only once the composer is
+   engaged (focused, or holding text): see wireComposer. */
+.ac-acts.ac-onfocus{display:none}
+.ac-composing>.ac-acts.ac-onfocus{display:flex}
 .ac-mini{font:inherit;font-size:11.5px;font-weight:600;border-radius:7px;padding:5px 9px;cursor:pointer;border:1px solid #e6e5e1;background:#fff;color:#6b6b66}
 .ac-mini.ac-primary{background:#2563eb;border-color:#2563eb;color:#fff}
-.ac-mini.ac-done{background:#ecfdf3;border-color:#bbf7d0;color:#15803d}
+/* Nothing typed yet → the send button is inert AND looks it. */
+.ac-mini:disabled{cursor:not-allowed}
+.ac-mini.ac-primary:disabled{background:#e8e7e3;border-color:#e2e1dd;color:#a9a8a3;box-shadow:none}
 .ac-empty{font-size:12px;color:#9b9b95;font-style:italic}
-.ac-fabs{position:fixed;right:18px;bottom:18px;z-index:70;display:flex;flex-direction:column;gap:10px;font-family:Inter,system-ui,sans-serif}
-.ac-fab{position:relative;width:46px;height:46px;border-radius:50%;border:1px solid rgba(230,229,225,.7);background:rgba(255,255,255,.58);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);color:#6b6b66;font-size:18px;line-height:1;cursor:pointer;box-shadow:0 6px 20px -8px rgba(40,40,30,.34);display:grid;place-items:center}
-.ac-fab[aria-pressed=true]{background:rgba(37,99,235,.82);border-color:rgba(37,99,235,.82);color:#fff}
-.ac-fab .ac-badge{position:absolute;top:-3px;right:-3px;background:#2563eb;color:#fff;font-size:9.5px;font-weight:700;font-style:normal;border-radius:9px;min-width:16px;height:16px;display:grid;place-items:center;padding:0 3px;border:2px solid #fff}
+/* The comment rail: one 26px-wide segmented capsule pinned to the right edge,
+   vertically centered. It replaces the old stack of 46px circles — same
+   controls at a third of the mass, and it never collides with the card column
+   (CARD_RIGHT=78) or with a served page's own bottom-right chrome. Segments
+   are divided by hairlines so it reads as ONE object; the count is a quiet
+   footer segment instead of a floating badge. */
+.ac-fabs{position:fixed;right:${RAIL_RIGHT}px;top:50%;transform:translateY(-50%);z-index:70;display:flex;flex-direction:column;width:${RAIL_WIDTH}px;background:rgba(255,255,255,.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.9);border-radius:13px;box-shadow:0 2px 10px -6px rgba(40,40,30,.4);overflow:hidden;font-family:Inter,system-ui,sans-serif}
+.ac-fab{position:relative;width:100%;height:28px;padding:0;border:none;background:transparent;color:#9b9b95;cursor:pointer;display:grid;place-items:center;transition:color .12s,background-color .12s}
+.ac-fab+.ac-fab{border-top:1px solid #efeeea}
+.ac-fab svg{display:block;width:15px;height:15px}
+.ac-fab:hover{color:#33332e;background:#f6f5f2}
+.ac-fab:focus-visible{outline:2px solid rgba(37,99,235,.5);outline-offset:-2px}
+.ac-fab[aria-pressed=true]{background:#2563eb;color:#fff}
+/* Drag handle. The rail sits vertically centered by default, which is exactly
+   where a comment chip or the page's own chrome may want to be — so the whole
+   capsule can be pulled up or down and remembers where you left it (globally,
+   across artifacts). touch-action:none so a touch drag moves the rail instead
+   of scrolling the page. */
+.ac-grip{width:100%;height:15px;flex:0 0 15px;padding:0;border:none;border-bottom:1px solid #efeeea;background:transparent;color:#cfcec9;display:grid;place-items:center;cursor:grab;touch-action:none;transition:color .12s,background-color .12s}
+.ac-grip svg{display:block;width:13px;height:13px}
+.ac-grip:hover{color:#6b6b66;background:#f6f5f2}
+.ac-grip:focus-visible{outline:2px solid rgba(37,99,235,.5);outline-offset:-2px}
+.ac-fabs.ac-dragging{user-select:none}
+.ac-fabs.ac-dragging .ac-grip{cursor:grabbing;color:#33332e}
+/* Thread count, shown only when there is one (JS toggles ac-has). */
+.ac-badge{display:none;height:22px;font-size:9.5px;font-weight:700;font-style:normal;color:#9b9b95;background:#f6f5f2;border-top:1px solid #efeeea;place-items:center}
+.ac-fabs.ac-has .ac-badge{display:grid}
 .ac-float{position:fixed;z-index:80;transform:translateX(-100%);display:none;font-family:Inter,system-ui,sans-serif}
 .ac-float.ac-show{display:block}
-.ac-float button{font:inherit;font-size:12px;font-weight:600;color:#fff;background:rgba(37,99,235,.86);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:none;border-radius:8px;padding:7px 12px;cursor:pointer;box-shadow:0 4px 14px -4px rgba(37,99,235,.5)}
+.ac-float button{font:inherit;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px;color:#fff;background:rgba(37,99,235,.86);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:none;border-radius:8px;padding:7px 12px;cursor:pointer;box-shadow:0 4px 14px -4px rgba(37,99,235,.5)}
+/* Size the bubble like every other icon site — an inline \`icon()\` SVG carries
+   no intrinsic width, so without this it collapses (Chromium) or renders at the
+   300x150 replaced-element default (Firefox). 13px matches .ac-min, the other
+   bubble-beside-text control. */
+.ac-float svg{display:block;width:13px;height:13px}
 .ac-zoomable{cursor:zoom-in}
 .ac-zoomable:hover{outline:2px solid rgba(37,99,235,.45);outline-offset:2px}
 .ac-lb{position:fixed;inset:0;z-index:90;background:rgba(22,22,20,.74);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:grid;place-items:center;pointer-events:auto;font-family:Inter,system-ui,sans-serif}
@@ -151,8 +227,9 @@ const CSS = `
 .ac-lb-vwrap{position:relative;display:inline-block;line-height:0}
 .ac-lb.ac-pinning .ac-lb-vwrap,.ac-lb.ac-pinning .ac-lb-vwrap *{cursor:crosshair}
 .ac-lb-close{position:fixed;top:16px;right:18px;width:38px;height:38px;border-radius:50%;border:none;background:rgba(255,255,255,.92);color:#33332e;font-size:17px;cursor:pointer;display:grid;place-items:center;box-shadow:0 6px 18px -6px rgba(0,0,0,.5)}
-.ac-lb-cmt{position:fixed;top:19px;right:66px;height:34px;padding:0 13px;border-radius:17px;border:none;background:rgba(255,255,255,.92);color:#33332e;font:600 12px Inter,system-ui,sans-serif;cursor:pointer;box-shadow:0 6px 18px -6px rgba(0,0,0,.5)}
+.ac-lb-cmt{position:fixed;top:19px;right:66px;height:34px;padding:0 13px;display:inline-flex;align-items:center;gap:6px;border-radius:17px;border:none;background:rgba(255,255,255,.92);color:#33332e;font:600 12px Inter,system-ui,sans-serif;cursor:pointer;box-shadow:0 6px 18px -6px rgba(0,0,0,.5)}
 .ac-lb-cmt.ac-on{background:#2563eb;color:#fff}
+.ac-lb-cmt svg{display:block;width:14px;height:14px}
 .ac-lb-hint{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.55);color:#fff;font-size:11.5px;padding:6px 12px;border-radius:8px;pointer-events:none}
 .ac-lb-card{position:fixed;width:300px;max-height:76vh;overflow:auto;background:#fff;border-radius:12px;box-shadow:0 16px 44px -16px rgba(0,0,0,.5);padding:12px}
 .ac-lb-pin{position:absolute;transform:translate(-50%,-100%);width:22px;height:28px;display:grid;place-items:center;pointer-events:auto;cursor:pointer}
@@ -161,19 +238,47 @@ const CSS = `
 .ac-lb-pin .ac-n{transform:rotate(-45deg);color:#fff;font-size:10px;font-weight:700}
 .ac-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:95;background:rgba(22,22,20,.9);color:#fff;font:500 12.5px Inter,system-ui,sans-serif;padding:9px 15px;border-radius:9px;box-shadow:0 8px 24px -8px rgba(0,0,0,.5);opacity:0;transition:opacity .25s}
 .ac-toast.ac-show{opacity:1}
-.ac-min{position:fixed;pointer-events:auto;cursor:pointer;display:inline-flex;align-items:center;gap:3px;height:26px;padding:0 9px;border-radius:13px;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);box-shadow:0 4px 16px -8px rgba(40,40,30,.3);font-size:12px;line-height:1;color:#6b6b66;font-weight:600;white-space:nowrap}
+.ac-min{position:fixed;pointer-events:auto;cursor:pointer;display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 8px;border-radius:13px;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);box-shadow:0 4px 16px -8px rgba(40,40,30,.3);font-size:12px;line-height:1;color:#6b6b66;font-weight:600;white-space:nowrap}
 .ac-min:hover{border-color:#c9c8c3;color:#33332e;box-shadow:0 7px 20px -8px rgba(40,40,30,.42)}
-.ac-min .ac-min-n{font-size:11px;color:#9b9b95;font-weight:700}
-/* Card-level minimize. Its top (16px) = card padding-top (11px) + the first
-   .ac-cmt's margin-top (7px) + the cluster's own -2px nudge, so it sits on the
-   same baseline as that row's actions and the four controls read as one strip. */
-.ac-min-btn{position:absolute;top:16px;right:12px;z-index:2}
-/* The first comment's actions share that corner with the minimize button —
-   shift THEM left by one control. Padding on the row can't do it: the cluster
-   is absolutely positioned off the padding-box edge, which padding doesn't
-   move. Only the first row reaches the corner. */
-.ac-card.ac-hasmin>.ac-cmt:first-of-type .ac-cmt-acts{right:23px}
-.ac-card.ac-hasmin .ac-snip{padding-right:28px}
+/* Optical centering, not geometric: a digit's ink is cap height only — all of
+   its slack sits below the baseline — so centering the count's em box leaves
+   the number riding ~1px above the bubble's ink. margin-top pushes it back
+   (flex centering centers the MARGIN box, so N moves the content down by N/2);
+   3px is the value to keep, not 1.6px: text paints on whole CSS pixels, so
+   sub-pixel nudges round away to nothing, and 3px is the one in its landing
+   band that puts the box on an integer offset (7.5 + 1.5 = 9) — which is why
+   it holds at 1x, 2x and 3x instead of only at the DPR it was tuned on. */
+.ac-min .ac-min-n{font-size:11px;color:#9b9b95;font-weight:700;margin-top:3px}
+/* Same bubble as the rail's comments toggle, at the card-chrome icon size —
+   the minimized thread reads as "this is a comment", in the same hand. */
+.ac-min svg{display:block;width:13px;height:13px}
+/* The card's ONE control cluster: the first comment's own actions (edit /
+   delete / link), a hairline, then the card-level ones (resolve ✓, minimize –).
+   Everything is a child of the same flex line, so the controls are aligned and
+   evenly spaced by construction — two separately positioned clusters could only
+   ever be *nearly* aligned, and read as two groups of chrome instead of one.
+   Card-level controls are always visible (resolve is one click from any open
+   state of the card); the comment-level .ac-grp fades in on card hover, like
+   every other row's does.
+   The cluster rides the FIRST COMMENT'S ROW (.ac-cmt-acts.ac-lead), not the
+   card — anchoring it to the card meant hardcoding an offset to that row, which
+   only held for text cards: a pin card renders an .ac-chip band first, so the
+   controls landed on the chip instead of the comment they act on. On the row it
+   aligns itself on every card shape.
+   .ac-card-acts is the fallback for the two cards with no first-row cluster to
+   ride: one whose first comment is mid-edit, and the lightbox pin card (whose
+   comments carry no per-comment actions at all). */
+.ac-card-acts{position:absolute;top:19px;right:12px;z-index:2;display:flex;align-items:center;gap:1px}
+.ac-lb-card .ac-card-acts{top:14px}
+.ac-grp{display:flex;align-items:center;gap:1px;opacity:0;transition:opacity .12s}
+.ac-card:hover .ac-grp,.ac-grp:focus-within{opacity:1}
+/* Hairline between the two groups — the same device the rail capsule uses to
+   read as one segmented object. It belongs to the comment group, so it fades
+   with it instead of floating beside the ✓ on its own. */
+.ac-sep{flex:0 0 1px;width:1px;height:13px;margin:0 4px;background:#e6e5e1}
+/* Resolve is the one chrome icon that carries a color — green on hover, so it
+   reads as the affirmative action without shouting at rest. */
+.ac-ico.ac-resolve:hover{color:#15803d;background:#ecfdf3}
 /* Left-bias the document + toolbar content so the fixed comment column clears
    the text (see applyDocShift). The header BAR stays full-bleed; only its inner
    content shifts. --ac-shift is computed per doc/viewport. */
@@ -214,11 +319,13 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   const layer = el("div", "ac-layer");
   const fabs = el("div", "ac-fabs");
   const floatEl = el("div", "ac-float");
-  floatEl.innerHTML = `<button>💬 Comment</button>`;
+  floatEl.innerHTML = `<button>${icon("bubble")}<span>Comment</span></button>`;
   fabs.innerHTML =
-    `<button class="ac-fab" data-fab="comments" aria-pressed="false" title="Show / hide comments"><span>💬</span><i class="ac-badge" data-badge>0</i></button>` +
-    (allowPin ? `<button class="ac-fab" data-fab="pin" title="Pin a spot (HTML only)"><span>📍</span></button>` : "") +
-    `<button class="ac-fab" data-fab="panel" title="All comments"><span>📋</span></button>`;
+    `<button class="ac-grip" data-rail-grip type="button" title="Drag to move · double-click to recenter" aria-label="Move comment controls: drag, or focus and use the arrow keys; Enter recenters">${icon("grip")}</button>` +
+    `<button class="ac-fab" data-fab="comments" aria-pressed="false" title="Show / hide comments" aria-label="Show or hide comments">${icon("bubble")}</button>` +
+    (allowPin ? `<button class="ac-fab" data-fab="pin" title="Pin a spot (HTML only)" aria-label="Pin a spot">${icon("pin")}</button>` : "") +
+    `<button class="ac-fab" data-fab="panel" title="All comments" aria-label="All comments">${icon("list")}</button>` +
+    `<i class="ac-badge" data-badge title="Open threads">0</i>`;
   // Append the floating chrome to <html>, NOT <body>: a served page whose
   // <body> carries a transform/filter/animation (e.g. `body{animation:…}` with
   // a translateY keyframe) makes <body> the containing block for our
@@ -229,8 +336,13 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   let threads: ThreadDTO[] = [];
   let mode: "pin" | null = null;
   let active: string | null = null;
-  let commentsOn = false; // start with comments hidden; the 💬 FAB toggles them on
+  let commentsOn = false; // start with comments hidden; the rail's bubble toggles them on
   let panelOpen = false;
+  // Remembered vertical position of the control rail (see applyRailY); null =
+  // the CSS default of vertically centered. Declared with the rest of the
+  // state because place() reads it on every scroll, which can run before the
+  // rail's own setup block below.
+  let railY: number | null = null;
   let draft: Draft | null = null;
   let pendingRange: Range | null = null;
   let floatArmed = false; // a selection has a live Comment button that must track scroll
@@ -240,7 +352,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
 
   // ── per-thread "minimize" ───────────────────────────────────────────
   // A text thread can be tucked from its full margin card down to a tiny
-  // marker (💬 n) in the same column, independent of the global 💬 show/hide.
+  // marker (bubble icon + n) in the same column, independent of the global 💬 show/hide.
   // The minimized-thread IDs persist per artifact in localStorage so a
   // tidied-up review view survives reloads. (In the sandboxed served-page
   // embed the document has an opaque origin, so localStorage throws — the
@@ -529,48 +641,82 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   function wireAvatars(root: ParentNode) {
     root.querySelectorAll<HTMLImageElement>(".ac-av img").forEach((im) => { im.onerror = () => im.remove(); });
   }
-  function cmtHTML(c: CommentDTO, tid: string) {
-    const name = displayName(c.author, c.author_name);
-    const edited = c.edited_at ? ` <span class="ac-when">(edited)</span>` : "";
+  // The buttons a single comment offers, as a bare list — the caller decides
+  // whether they live on the row (any comment but the first) or hoisted into
+  // the card's corner strip (the first one). You can only delete or edit your
+  // own comments — never anyone else's. The permalink, by contrast, is
+  // available to anyone who can see the comment.
+  function cmtActs(c: CommentDTO, tid: string): string {
     const own = me && c.author === me.email;
-    if (editing && editing.tid === tid && editing.cid === c.id) {
-      return `<div class="ac-cmt">${avatar(c.author, c.author_name, c.author_picture)}<div style="flex:1;min-width:0"><div><span class="ac-who">${AV(name)}</span></div><textarea class="ac-edit-input" data-editinput="${tid}|${c.id}">${AV(c.body)}</textarea><div class="ac-edit-acts"><button class="ac-mini ac-primary" data-editsave="${tid}|${c.id}">Save</button><button class="ac-mini" data-editcancel="1">Cancel</button></div></div></div>`;
-    }
-    // You can only delete or edit your own comments — never anyone else's.
-    // The permalink, by contrast, is available to anyone who can see the comment.
     const del = own ? `<button class="ac-ico ac-del" data-delc="${tid}|${c.id}" title="Delete your comment" aria-label="Delete comment">${icon("del")}</button>` : "";
     const edit = own ? `<button class="ac-ico ac-edit" data-editc="${tid}|${c.id}" title="Edit your comment" aria-label="Edit comment">${icon("edit")}</button>` : "";
     const link = `<button class="ac-ico ac-link" data-permalink="${c.id}" title="Copy link to this comment" aria-label="Copy link to comment">${icon("link")}</button>`;
-    const acts = `<div class="ac-cmt-acts">${edit}${del}${link}</div>`;
+    return `${edit}${del}${link}`;
+  }
+  // `lead` = this is the card's FIRST row, so its cluster also hosts the
+  // card-level controls passed in (resolve / minimize): comment actions, a
+  // hairline, then those. One flex line, so everything aligns by construction.
+  // null = an ordinary row, which draws only its own actions.
+  function cmtHTML(c: CommentDTO, tid: string, lead: string | null = null) {
+    const name = displayName(c.author, c.author_name);
+    const edited = c.edited_at ? ` <span class="ac-when">(edited)</span>` : "";
+    if (editing && editing.tid === tid && editing.cid === c.id) {
+      return `<div class="ac-cmt">${avatar(c.author, c.author_name, c.author_picture)}<div style="flex:1;min-width:0"><div><span class="ac-who">${AV(name)}</span></div><textarea class="ac-edit-input" data-editinput="${tid}|${c.id}">${AV(c.body)}</textarea><div class="ac-edit-acts"><button class="ac-mini ac-primary" data-editsave="${tid}|${c.id}">Save</button><button class="ac-mini" data-editcancel="1">Cancel</button></div></div></div>`;
+    }
+    const acts =
+      lead === null
+        ? `<div class="ac-cmt-acts">${cmtActs(c, tid)}</div>`
+        : `<div class="ac-cmt-acts ac-lead"><div class="ac-grp">${cmtActs(c, tid)}${lead ? `<span class="ac-sep"></span>` : ""}</div>${lead}</div>`;
     return `<div class="ac-cmt" data-cid="${c.id}">${avatar(c.author, c.author_name, c.author_picture)}<div><div><span class="ac-who">${AV(name)}</span>${edited}</div><div class="ac-text">${AV(c.body)}</div></div>${acts}</div>`;
   }
+  // A thread's card has two rendered forms, and they differ by ONE thing: the
+  // open ("full") form carries a reply composer, the collapsed ("concise") form
+  // doesn't. Both show the WHOLE thread — a collapsed card is not a preview, so
+  // there's no snippet clamp and no "+n more" to click through. The third state
+  // of the cycle is the margin bubble (minMarker), which is the only form that
+  // reduces the thread to a count.
+  //
+  // Text threads carry no excerpt/quote header — the highlight in the prose
+  // (brighter when this thread is active) already shows what's being discussed.
+  // Pins keep a tiny label since they have no highlight.
   function anchoredCard(t: ThreadDTO): string {
     const expanded = active === t.id;
-    // Text threads no longer carry the excerpt/quote header — the highlight in
-    // the prose (brighter when this thread is active) already shows what's being
-    // discussed, so the card stays compact in both the small (collapsed) and
-    // large (open) states. All that remains is a small "–" minimize control in
-    // the top-right corner. Pins keep a tiny label since they have no highlight.
     const canMin = t.anchor.type === "text" && t.status !== "resolved";
-    const minBtn = canMin
-      ? `<button class="ac-ico ac-min-btn" data-min="${t.id}" title="Minimize to margin" aria-label="Minimize comment">${icon("min")}</button>`
-      : "";
-    // ac-hasmin nudges the first row's action cluster left so it lands beside
-    // the minimize button rather than under it.
-    const hasMin = canMin ? " ac-hasmin" : "";
-    const header = t.anchor.type === "pin" ? `<span class="ac-chip">📍 pin</span>` : "";
-    if (!expanded) {
-      const c = t.comments[0];
-      const body = c ? `<div class="ac-cmt">${avatar(c.author, c.author_name, c.author_picture)}<div><div class="ac-snip">${AV(c.body)}</div></div></div>` : `<div class="ac-empty">No comments</div>`;
-      const more = t.comments.length > 1 ? `<div class="ac-more">+${t.comments.length - 1} more</div>` : "";
-      return `<div class="ac-card${hasMin}${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${minBtn}${header}${body}${more}</div>`;
-    }
-    const cmts = t.comments.map((c) => cmtHTML(c, t.id)).join("");
+    // One control cluster per card, riding the first comment's row: that
+    // comment's own actions, a hairline, then the card-level ones (resolve ✓,
+    // then minimize –). Resolve lives here rather than in the composer's button
+    // row so it's reachable from both the concise and the full card. A resolved
+    // card offers neither — it has ↩ Reopen in its action row instead.
+    const cardCtrls = [
+      t.status !== "resolved"
+        ? `<button class="ac-ico ac-resolve" data-resolve="${t.id}" title="Resolve thread" aria-label="Resolve thread">${icon("ok")}</button>`
+        : "",
+      canMin
+        ? `<button class="ac-ico" data-min="${t.id}" title="Minimize to margin" aria-label="Minimize comment">${icon("min")}</button>`
+        : "",
+    ].join("");
+    // The first row can't host the cluster while it's being edited — it shows
+    // Save/Cancel instead of its actions — so that card falls back to a
+    // card-anchored strip holding the card-level controls alone.
+    const first = t.comments[0];
+    const hoistFirst = !!first && !!cardCtrls && !(editing && editing.tid === t.id && editing.cid === first.id);
+    // Rendered LAST so it doesn't become the card's `:first-of-type` div, which
+    // the row-level rules key off.
+    const strip = !hoistFirst && cardCtrls ? `<div class="ac-card-acts">${cardCtrls}</div>` : "";
+    const resolvedCls = t.status === "resolved" ? " ac-resolved" : "";
+    const header = t.anchor.type === "pin" ? `<span class="ac-chip">${icon("pin")} pin</span>` : "";
+    const cmts = t.comments.length
+      ? t.comments.map((c, i) => cmtHTML(c, t.id, i === 0 && hoistFirst ? cardCtrls : null)).join("")
+      : `<div class="ac-empty">No comments</div>`;
+    if (!expanded) return `<div class="ac-card${resolvedCls}" data-tid="${t.id}">${header}${cmts}${strip}</div>`;
+    // ac-onfocus keeps the button row out of the card until the composer is
+    // engaged (wireComposer), so an untouched full card is the concise card
+    // plus an empty box — nothing to press yet.
     const acts =
       t.status === "resolved"
         ? `<div class="ac-acts"><button class="ac-mini" data-reopen="${t.id}">↩ Reopen</button></div>`
-        : `<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-reply="${t.id}"></textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-send="${t.id}">Reply</button><button class="ac-mini ac-done" data-resolve="${t.id}">✓ Resolve</button></div>`;
-    return `<div class="ac-card ac-active${hasMin}${t.status === "resolved" ? " ac-resolved" : ""}" data-tid="${t.id}">${minBtn}${header}${cmts}${acts}</div>`;
+        : `<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-reply="${t.id}"></textarea></div><div class="ac-acts ac-onfocus"><button class="ac-mini ac-primary" data-send="${t.id}" disabled>Reply</button></div>`;
+    return `<div class="ac-card ac-active${resolvedCls}" data-tid="${t.id}">${header}${cmts}${acts}${strip}</div>`;
   }
   // Minimized text thread: a compact pill in the column; click restores the card.
   function minMarker(t: ThreadDTO): string {
@@ -578,15 +724,18 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // (e.g. `&quot;` → `&quot`), which the browser decodes back to `"` and that
     // would terminate the title attribute early and corrupt the element.
     const tip = t.comments[0] ? AV(t.comments[0].body.slice(0, 140)) : "";
-    return `<div class="ac-min" data-mintid="${t.id}" title="${tip}">💬<span class="ac-min-n">${t.comments.length}</span></div>`;
+    return `<div class="ac-min" data-mintid="${t.id}" title="${tip}">${icon("bubble")}<span class="ac-min-n">${t.comments.length}</span></div>`;
   }
   function draftCard(): string {
     // Show the quoted snippet from the start (same chip as a saved card), not a
     // generic "new comment" — so you can see exactly what you're commenting on.
     const chip = draft!.type === "text"
-      ? `<span class="ac-chip">💬 <span class="ac-q">“${AV(String(draft!.anchor.quote || ""))}”</span></span>`
-      : `<span class="ac-chip">📍 new pin</span>`;
-    return `<div class="ac-card ac-draft" data-draft="1">${chip}<div class="ac-reply"><textarea rows="1" placeholder="Write a comment…" data-draftinput autofocus>${AV(draft!.text || "")}</textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-draftsend>Comment</button><button class="ac-mini" data-draftcancel>Cancel</button></div></div>`;
+      ? `<span class="ac-chip">${icon("bubble")}<span class="ac-q">“${AV(String(draft!.anchor.quote || ""))}”</span></span>`
+      : `<span class="ac-chip">${icon("pin")} new pin</span>`;
+    // The draft card is born focused, so its buttons show from the start — but
+    // Comment stays disabled until there's something to post (wireComposer).
+    const empty = !(draft!.text || "").trim();
+    return `<div class="ac-card ac-draft ac-composing" data-draft="1">${chip}<div class="ac-reply"><textarea rows="1" placeholder="Write a comment…" data-draftinput autofocus>${AV(draft!.text || "")}</textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-draftsend${empty ? " disabled" : ""}>Comment</button><button class="ac-mini" data-draftcancel>Cancel</button></div></div>`;
   }
   function render() {
     // Recompute the left-bias on every render — INCLUDING the comments-hidden
@@ -597,6 +746,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     const badge = fabs.querySelector("[data-badge]")!;
     const openCount = threads.filter((t) => t.anchor.type !== "doc" && t.status !== "resolved").length;
     badge.textContent = String(openCount);
+    fabs.classList.toggle("ac-has", openCount > 0); // no threads → no count segment
     layer.classList.toggle("ac-hidden", !commentsOn);
     if (!commentsOn) {
       layer.innerHTML = "";
@@ -636,7 +786,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     const open = live.filter((t) => t.status !== "resolved");
     const resolved = live.filter((t) => t.status === "resolved");
     const row = (t: ThreadDTO) => {
-      const label = t.anchor.type === "pin" ? "📍 pin" : `💬 “${AV(String(t.anchor.quote || "")).slice(0, 28)}”`;
+      const label = t.anchor.type === "pin" ? `${icon("pin")} pin` : `${icon("bubble")} “${AV(String(t.anchor.quote || "")).slice(0, 28)}”`;
       const snip = t.comments[0] ? AV(t.comments[0].body) : "(no comments)";
       const acts = t.status === "resolved" ? `<button class="ac-mini" data-preopen="${t.id}">↩</button>` : "";
       return `<div class="ac-prow${t.status === "resolved" ? " ac-res" : ""}" data-pjump="${t.id}"><div class="ac-pbody"><div class="ac-pmeta">${label}</div><div class="ac-psnip">${snip}</div></div><div class="ac-pacts">${acts}</div></div>`;
@@ -733,7 +883,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     const hint = el("div", "ac-lb-hint"); hint.textContent = "Esc to close";
     lb.append(stage, close, hint);
     let cmtBtn: HTMLElement | null = null;
-    if (allowPin) { cmtBtn = el("button", "ac-lb-cmt"); cmtBtn.textContent = "📍 Comment on a spot"; lb.appendChild(cmtBtn); }
+    if (allowPin) { cmtBtn = el("button", "ac-lb-cmt"); cmtBtn.innerHTML = `${icon("pin")}<span>Comment on a spot</span>`; lb.appendChild(cmtBtn); }
     document.documentElement.appendChild(lb);
     stage.addEventListener("scroll", repositionCard); // keep the card on its pin
     window.addEventListener("resize", repositionCard);
@@ -823,9 +973,14 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       const num = pinNo(t); // universal, stable pin number across the doc
       card = el("div", "ac-lb-card");
       const cmts = t.comments.map((c) => `<div class="ac-cmt">${avatar(c.author, c.author_name, c.author_picture)}<div style="flex:1;min-width:0"><div><span class="ac-who">${AV(displayName(c.author, c.author_name))}</span></div><div class="ac-text">${AV(c.body)}</div></div></div>`).join("");
-      card.innerHTML = `<span class="ac-chip">📍 pin ${num}</span>${cmts}<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-r></textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-rs>Reply</button><button class="ac-mini ac-done" data-rv>✓ Resolve</button></div>`;
+      // Same control language as the margin card: resolve is a ✓ in the corner,
+      // and Reply only appears (enabled) once the composer holds text.
+      card.innerHTML = `<span class="ac-chip">${icon("pin")} pin ${num}</span>${cmts}<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-r></textarea></div><div class="ac-acts ac-onfocus"><button class="ac-mini ac-primary" data-rs disabled>Reply</button></div><div class="ac-card-acts"><button class="ac-ico ac-resolve" data-rv title="Resolve thread" aria-label="Resolve thread">${icon("ok")}</button></div>`;
       const inp = card.querySelector<HTMLTextAreaElement>("[data-r]")!;
-      autosize(inp); inp.addEventListener("input", () => autosize(inp));
+      autosize(inp); inp.addEventListener("input", () => { if (autosize(inp)) repositionCard(); });
+      // This card is clamped to its pin, not stacked in the margin — so the
+      // button row's reveal must re-clamp it, not restack the hidden layer.
+      wireComposer(inp, card, card.querySelector<HTMLButtonElement>("[data-rs]"), repositionCard);
       const send = async () => { const v = inp.value.trim(); if (!v) return; try { const c = await api.reply(t.id, v); t.comments.push(c); showThreadCard(t, anchorEl); } catch { /* ignore */ } };
       card.querySelector("[data-rs]")!.addEventListener("click", send);
       inp.onkeydown = (e) => { const k = e as KeyboardEvent; if (k.key === "Enter" && !k.shiftKey) { k.preventDefault(); send(); } };
@@ -843,7 +998,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     function showDraftCard(rx: number, ry: number, dp: HTMLElement) {
       clearCard();
       card = el("div", "ac-lb-card");
-      card.innerHTML = `<span class="ac-chip">📍 new pin</span><div class="ac-reply"><textarea rows="1" placeholder="Write a comment…" data-i></textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-c>Comment</button><button class="ac-mini" data-x>Cancel</button></div>`;
+      card.innerHTML = `<span class="ac-chip">${icon("pin")} new pin</span><div class="ac-reply"><textarea rows="1" placeholder="Write a comment…" data-i></textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-c disabled>Comment</button><button class="ac-mini" data-x>Cancel</button></div>`;
       const inp = card.querySelector<HTMLTextAreaElement>("[data-i]")!;
       let committing = false;
       const commit = async () => {
@@ -862,6 +1017,9 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       inp.onkeydown = (e) => { const k = e as KeyboardEvent; if (k.key === "Enter" && !k.shiftKey) { k.preventDefault(); commit(); } };
       inp.addEventListener("input", () => autosize(inp));
       card.querySelector("[data-x]")!.addEventListener("click", () => { dp.remove(); clearCard(); });
+      // Card is null: this draft's buttons stay put (Cancel must remain
+      // reachable) — only Comment's disabled state tracks the text.
+      wireComposer(inp, null, card.querySelector<HTMLButtonElement>("[data-c]"));
       lb.appendChild(card);
       cardAnchor = dp;
       positionCard(dp);
@@ -964,6 +1122,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
 
   function place() {
     applyDocShift();
+    applyRailY(); // re-clamp the (draggable) rail against the current viewport / header
     const right = CARD_RIGHT, vw = window.innerWidth, vh = window.innerHeight, gap = 10;
     const top0 = topGuard();
     // panel pinned just below the toolbar
@@ -1066,8 +1225,10 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
         if (c.dataset.mintid) {
           // Collapsed bubbles hug the text: park them just past the doc's
           // (possibly left-shifted) right edge — the left side of the comment
-          // gutter — instead of way out at the card column.
-          c.style.left = Math.round(Math.min(containerRight + 8, vw - (c.offsetWidth || 44) - 8)) + "px";
+          // gutter — instead of way out at the card column, and never further
+          // right than the cards themselves (which would put them off-screen
+          // under the rail on a full-width doc). See minMarkerLeft.
+          c.style.left = minMarkerLeft({ containerRight, viewportWidth: vw, markerWidth: c.offsetWidth || 44 }) + "px";
           c.style.right = "auto";
         } else {
           c.style.right = right + "px";
@@ -1096,6 +1257,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   function openThread(id: string) {
     if (draft) return;
     editing = null;
+    cancelCollapse(); // re-focusing a thread outranks a pending collapse of it
     if (minimized.delete(id)) saveMinimized(); // opening a thread un-tucks it
     commentsOn = true;
     panelOpen = false;
@@ -1184,14 +1346,129 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     return ta.style.height !== before;
   }
 
+  // How long a click on comment TEXT waits before collapsing the card, so a
+  // double-click can claim it as a word selection instead. This must cover a
+  // real OS double-click interval, not a snappy-feeling guess: macOS and
+  // Windows both default to 500ms, and a shorter window collapses the card out
+  // from under a deliberate, slightly slow double-click. (A previous overlay
+  // change shipped 250ms here and that was exactly the bug.) Only clicks on
+  // text pay this wait; anywhere else on the card collapses at once.
+  const COLLAPSE_DELAY = 500;
+  let collapseTimer: number | null = null;
+  function cancelCollapse() {
+    if (collapseTimer != null) { clearTimeout(collapseTimer); collapseTimer = null; }
+  }
+  // full → icon: tuck a text thread into the margin (pins and resolved threads
+  // have no marker, so for them this just closes the card).
+  function collapseThread(id: string) {
+    const t = find(id);
+    if (t && t.anchor.type === "text" && t.status !== "resolved") setMinimized(id, true);
+    active = null;
+    reseed();
+    render();
+  }
+
+  // True when there's a live (non-empty) text selection sitting inside `el` —
+  // used to tell "the user clicked the card" apart from "the user just finished
+  // selecting some of its text".
+  function selectionInside(el: HTMLElement): boolean {
+    const sel = typeof window.getSelection === "function" ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+    const node = sel.getRangeAt(0).commonAncestorContainer;
+    const host = node.nodeType === Node.ELEMENT_NODE ? (node as HTMLElement) : node.parentElement;
+    return !!host && el.contains(host);
+  }
+
+  // Progressive disclosure for a composer: its button row appears only once the
+  // box is engaged (focused, or already holding text), and the send button stays
+  // disabled — and visibly gray — until there is something to send. `card` is
+  // the element carrying `.ac-composing` (the card, or the lightbox pin card).
+  // Blur with text keeps the row up, which is what lets the click that blurred
+  // the box land on the button.
+  // `reflow` re-lays-out whatever positions `card`, since showing/hiding the
+  // button row changes its height: margin cards are stacked by place(), but the
+  // lightbox pin card is clamped to its pin by repositionCard — calling place()
+  // for that one would restack the margin layer (hidden behind the lightbox) and
+  // leave the pin card itself unclamped, so it can grow off the viewport.
+  function wireComposer(
+    ta: HTMLTextAreaElement,
+    card: HTMLElement | null,
+    send: HTMLButtonElement | null,
+    reflow: () => void = place,
+  ) {
+    const sync = () => {
+      const has = ta.value.trim().length > 0;
+      if (send) send.disabled = !has;
+      const shown = has || document.activeElement === ta;
+      if (card && card.classList.contains("ac-composing") !== shown) {
+        card.classList.toggle("ac-composing", shown);
+        reflow(); // the row appearing/vanishing changes the card's height
+      }
+    };
+    ta.addEventListener("input", sync);
+    ta.addEventListener("focus", sync);
+    ta.addEventListener("blur", sync);
+    sync();
+  }
+
   function wire() {
     layer.querySelectorAll<HTMLTextAreaElement>(".ac-reply textarea, .ac-edit-input").forEach((ta) => {
       autosize(ta);
       // As the card grows taller, restack the margin cards so they don't overlap.
       ta.addEventListener("input", () => { if (autosize(ta)) place(); });
     });
+    // Reply composers: buttons on engage, send disabled while empty.
+    layer.querySelectorAll<HTMLTextAreaElement>("[data-reply]").forEach((ta) => {
+      const card = ta.closest<HTMLElement>(".ac-card");
+      wireComposer(ta, card, card?.querySelector<HTMLButtonElement>("[data-send]") ?? null);
+    });
+    // Clicking the body of a card (anywhere that isn't a control) walks the
+    // thread around its three states:
+    //   lean (collapsed card, no reply box) → full (open card) → icon (margin
+    //   marker) → lean …
+    // This handler supplies the first two steps; the [data-mintid] handler
+    // below closes the cycle by restoring the lean card from the icon. Same
+    // rule as clicking the highlight in the prose (see wireMarks). Threads
+    // with no margin marker — pins, and resolved cards — just close, since
+    // their pin/highlight already plays the "icon" role.
     layer.querySelectorAll<HTMLElement>(".ac-card").forEach((c) => {
-      c.onclick = (e) => { if ((e.target as HTMLElement).closest("input,button,textarea")) return; if (editing) return; if (c.dataset.tid) openThread(c.dataset.tid); };
+      c.onclick = (e) => {
+        // FIRST, before any early return: any further click inside this card —
+        // on a control, mid-edit, or the second click of a double-click —
+        // abandons a collapse that an earlier text click armed. Otherwise the
+        // card could tuck itself away half a second into typing a reply.
+        cancelCollapse();
+        if ((e.target as HTMLElement).closest("input,button,textarea,a")) return;
+        if (editing) return;
+        // Don't cycle on the click that ends a text selection inside the card —
+        // people copy comment text, and collapsing it mid-drag is maddening.
+        if (selectionInside(c)) return;
+        const id = c.dataset.tid;
+        if (!id) return;
+        if (active !== id) { openThread(id); return; }
+        // Collapsing is the one step that takes the card away, and it competes
+        // with double-click-to-select-a-word: the FIRST click of a double-click
+        // carries no selection yet, so collapsing on it would eat the word you
+        // were trying to select. A click on selectable comment text therefore
+        // waits one double-click interval and re-checks; anywhere else on the
+        // card (padding, chip, avatar, the "+n more" line) collapses at once.
+        if ((e.target as HTMLElement).closest(".ac-text,.ac-who,.ac-when,.ac-q")) {
+          collapseTimer = window.setTimeout(() => {
+            collapseTimer = null;
+            // Bail if the wait changed the answer: the thread moved on, the
+            // overlay was torn down, or a word got selected. Re-query the card
+            // rather than trusting the captured node — a re-render during the
+            // wait replaces it, and a selection would then be inside the NEW
+            // element while the old one is detached.
+            if (dead || active !== id) return;
+            const cur = layer.querySelector<HTMLElement>(`.ac-card[data-tid="${id}"]`);
+            if (!cur || selectionInside(cur)) return;
+            collapseThread(id);
+          }, COLLAPSE_DELAY);
+          return;
+        }
+        collapseThread(id);
+      };
     });
     // "–" minimizes a text card down to its margin marker.
     layer.querySelectorAll<HTMLElement>("[data-min]").forEach((b) => (b.onclick = (e) => {
@@ -1201,7 +1478,8 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       if (active === id) active = null;
       render();
     }));
-    // Clicking a margin marker restores its compact card (does not open it).
+    // Clicking a margin marker restores its lean card (does not open it) —
+    // the icon → lean step of the click cycle above.
     layer.querySelectorAll<HTMLElement>("[data-mintid]").forEach((m) => (m.onclick = (e) => {
       e.stopPropagation();
       setMinimized(m.dataset.mintid!, false);
@@ -1217,7 +1495,12 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     });
     layer.querySelectorAll<HTMLElement>("[data-send]").forEach((b) => (b.onclick = () => doReply(b.dataset.send!)));
     layer.querySelectorAll<HTMLTextAreaElement>("[data-reply]").forEach((i) => (i.onkeydown = (e) => { const k = e as KeyboardEvent; if (k.key === "Enter" && !k.shiftKey) { k.preventDefault(); doReply(i.dataset.reply!); } }));
-    layer.querySelectorAll<HTMLElement>("[data-resolve]").forEach((b) => (b.onclick = () => doResolve(b.dataset.resolve!, true)));
+    // ✓ in the card's corner strip — reachable from the concise and the full
+    // card alike. stopPropagation so it doesn't also cycle the card's state.
+    layer.querySelectorAll<HTMLElement>("[data-resolve]").forEach((b) => (b.onclick = (e) => {
+      e.stopPropagation();
+      doResolve(b.dataset.resolve!, true);
+    }));
     layer.querySelectorAll<HTMLElement>("[data-reopen]").forEach((b) => (b.onclick = () => doResolve(b.dataset.reopen!, false)));
     const ds = layer.querySelector<HTMLElement>("[data-draftsend]");
     if (ds) ds.onclick = () => commitDraft();
@@ -1225,6 +1508,9 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     if (dc) dc.onclick = () => cancelDraft();
     const dInput = layer.querySelector<HTMLTextAreaElement>("[data-draftinput]");
     if (dInput) {
+      // Card is null: a draft's buttons stay put (Cancel has to remain
+      // reachable) — only Comment's disabled state tracks the text.
+      wireComposer(dInput, null, layer.querySelector<HTMLButtonElement>("[data-draftsend]"));
       dInput.oninput = () => { if (draft) draft.text = dInput.value; }; // survive a re-render mid-compose
       dInput.onkeydown = (e) => { const k = e as KeyboardEvent; if (k.key === "Enter" && !k.shiftKey) { k.preventDefault(); commitDraft(); } };
     }
@@ -1448,7 +1734,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     if (mode !== "pin" || draft || !container) return;
     // The overlay's own chrome lives inside container (=== document.body for
     // injected HTML). Never treat a click on it as a pin placement — that's
-    // what made the 📍 FAB and the draft's Cancel button drop stray pins.
+    // what made the pin control and the draft's Cancel button drop stray pins.
     const tgt = e.target as HTMLElement | null;
     if (tgt && tgt.closest(".ac-fabs, .ac-layer, .ac-float")) return;
     // In pin mode this click only drops a pin: swallow it so the page doesn't
@@ -1473,6 +1759,95 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     panelOpen = false;
     render();
   }
+
+  // ── the rail's vertical position ────────────────────────────────────
+  // Remembered GLOBALLY (one key, not per artifact): where you like the
+  // controls is a preference about your screen, not about a document. Stored
+  // as the capsule's center as a share of viewport height so it survives a
+  // resize or a different monitor; railTop() re-clamps it on every place().
+  // null = the CSS default (vertically centered).
+  const RAIL_KEY = "arti-cmt-rail-y";
+  railY = loadRailY();
+  function loadRailY(): number | null {
+    try {
+      const v = Number(localStorage.getItem(RAIL_KEY));
+      return Number.isFinite(v) && v > 0 && v < 1 ? v : null;
+    } catch {
+      return null; // storage unavailable (opaque origin in the served-page embed)
+    }
+  }
+  function saveRailY() {
+    try {
+      if (railY == null) localStorage.removeItem(RAIL_KEY);
+      else localStorage.setItem(RAIL_KEY, String(railY));
+    } catch { /* stay in-memory */ }
+  }
+  function applyRailY() {
+    if (railY == null) { fabs.style.top = ""; fabs.style.transform = ""; return; }
+    const top = railTop({
+      viewportHeight: window.innerHeight,
+      railHeight: fabs.offsetHeight || 100,
+      minTop: topGuard(),
+      fraction: railY,
+    });
+    fabs.style.top = top + "px";
+    fabs.style.transform = "none"; // the default rule centers with translateY(-50%)
+  }
+  // Move the rail so its top lands at `top` (viewport px).
+  //
+  // The fraction is derived from the CLAMPED top, not the raw one: a drag can
+  // run past the header or below the bottom edge, and storing that raw position
+  // yields a fraction outside (0,1) — which loadRailY rejects, so the rail
+  // would silently snap back to center on the next mount. Clamping here means
+  // what you see after releasing is exactly what gets remembered.
+  function setRailTop(top: number) {
+    const h = fabs.offsetHeight || 100;
+    const vh = window.innerHeight;
+    const clamped = railTop({ viewportHeight: vh, railHeight: h, minTop: topGuard(), fraction: (top + h / 2) / vh });
+    // Final belt-and-braces clamp: on a viewport shorter than the rail itself
+    // even the clamped top can sit past the bottom, and a stored 0 or 1 is
+    // indistinguishable from "never set".
+    railY = Math.min(0.999, Math.max(0.001, (clamped + h / 2) / vh));
+    applyRailY();
+  }
+  const grip = fabs.querySelector<HTMLElement>("[data-rail-grip]")!;
+  let dragAbort: AbortController | null = null;
+  grip.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); // don't start a text selection while dragging
+    const startY = e.clientY;
+    const startTop = fabs.getBoundingClientRect().top;
+    dragAbort?.abort();
+    const ac = new AbortController();
+    dragAbort = ac;
+    fabs.classList.add("ac-dragging");
+    grip.setPointerCapture?.(e.pointerId);
+    window.addEventListener("pointermove", (m: PointerEvent) => setRailTop(startTop + (m.clientY - startY)), { signal: ac.signal });
+    const end = () => { fabs.classList.remove("ac-dragging"); saveRailY(); ac.abort(); if (dragAbort === ac) dragAbort = null; };
+    window.addEventListener("pointerup", end, { signal: ac.signal });
+    window.addEventListener("pointercancel", end, { signal: ac.signal });
+  });
+  const recenter = () => { railY = null; saveRailY(); applyRailY(); };
+  // Double-click the grip → back to the vertically centered default.
+  grip.addEventListener("dblclick", recenter);
+  // Same, from the keyboard: Enter/Space on the focused handle. A pointer click
+  // carries detail>=1, so this fires ONLY for keyboard activation — the click
+  // that ends a mouse drag can't recenter the rail you just placed.
+  grip.addEventListener("click", (e) => { if (e.detail === 0) recenter(); });
+  // Arrow-key nudge — the keyboard equivalent of the drag. The listener is on
+  // the HANDLE, so it only runs while the handle itself has focus (reachable by
+  // Tab); anywhere else Up/Down scroll the page exactly as before. The
+  // preventDefault suppresses the focused-element default (page scroll) for
+  // those two keys only while the handle holds focus, which is the point — the
+  // arrows are driving the rail then, not the page. Home/PageUp/etc. are left
+  // alone so the usual scroll shortcuts still work even with the handle focused.
+  grip.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    const step = (e.shiftKey ? 64 : 16) * (e.key === "ArrowUp" ? -1 : 1);
+    setRailTop(fabs.getBoundingClientRect().top + step);
+    saveRailY();
+  });
+  applyRailY();
 
   // fabs
   fabs.querySelector('[data-fab="comments"]')!.addEventListener("click", () => {
@@ -1610,6 +1985,8 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
 
   return () => {
     dead = true;
+    cancelCollapse();
+    dragAbort?.abort(); // drop a rail drag still holding window listeners
     reseedObserver.disconnect();
     sizeObserver.disconnect();
     if (reseedTimer) clearTimeout(reseedTimer);

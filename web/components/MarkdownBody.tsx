@@ -19,9 +19,17 @@ import { renderMermaidIn } from "@/lib/mermaid";
 const MarkdownBody = memo(function MarkdownBody({
   body,
   debounceMermaid = false,
+  docKey,
 }: {
   body: string;
   debounceMermaid?: boolean;
+  // Identity of the document being rendered (artifact version id, plus the file
+  // path inside a PACKAGE). Used only to key the frontmatter disclosure, whose
+  // open/closed state lives in the DOM: the viewer stays mounted across
+  // artifact→artifact and file→file navigation, so without this a block
+  // expanded on one document would still be expanded on the next. Omitted by
+  // the editor preview, which renders one document the whole time.
+  docKey?: string;
 }) {
   // renderMarkdown is the shared "render markdown safely" chain
   // (splitFrontmatter → marked → heading ids → DOMPurify) — the same one
@@ -67,7 +75,7 @@ const MarkdownBody = memo(function MarkdownBody({
         prose-code:before:content-none prose-code:after:content-none
       "
     >
-      {frontmatter !== null ? <Frontmatter raw={frontmatter} /> : null}
+      {frontmatter !== null ? <Frontmatter key={docKey} raw={frontmatter} /> : null}
       <div dangerouslySetInnerHTML={{ __html: html }} />
     </article>
   );

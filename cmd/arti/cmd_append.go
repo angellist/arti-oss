@@ -41,7 +41,12 @@ type AppendCmd struct {
 	// Metadata overrides for the new version. Mirror `arti add`.
 	Scope  []string `help:"scope (repeatable). Inherited from prior version if omitted."`
 	Label  []string `help:"label (repeatable). Inherited from prior version if omitted."`
-	Access []string `help:"access pattern (repeatable; glob-on-email; '*' = everyone). Inherited if omitted."`
+	Access []string `help:"access pattern (repeatable; glob-on-email / 'group:<name>'; '*' = everyone). Inherited if omitted."`
+	// Private / write flags mirror `arti add`; note an ACL that differs from
+	// the slug's current pair applies to ALL versions (owner/admin only).
+	Private      bool     `help:"creator-only reads (explicit empty list). Mutually exclusive with --access."`
+	WriteAccess  []string `name:"write-access" help:"write-access pattern (repeatable; subset of readers). Inherited if omitted."`
+	WritePrivate bool     `name:"write-private" help:"creator-only writes; readers stay read-only. Mutually exclusive with --write-access."`
 }
 
 func (a *AppendCmd) Run(cli *CLI) error {
@@ -104,8 +109,23 @@ func (a *AppendCmd) Run(cli *CLI) error {
 	if len(a.Label) > 0 {
 		payload["labels"] = a.Label
 	}
-	if len(a.Access) > 0 {
+	switch {
+	case a.Private:
+		if len(a.Access) > 0 {
+			return fmt.Errorf("--private and --access are mutually exclusive")
+		}
+		payload["allowed_access"] = []string{} // creator-only
+	case len(a.Access) > 0:
 		payload["allowed_access"] = a.Access
+	}
+	switch {
+	case a.WritePrivate:
+		if len(a.WriteAccess) > 0 {
+			return fmt.Errorf("--write-private and --write-access are mutually exclusive")
+		}
+		payload["allowed_write"] = []string{} // creator-only writes
+	case len(a.WriteAccess) > 0:
+		payload["allowed_write"] = a.WriteAccess
 	}
 
 	var resp map[string]any
