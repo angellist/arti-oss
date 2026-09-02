@@ -168,6 +168,17 @@ type CreateRequest struct {
 	// don't accidentally append v2 onto someone else's slug. Default
 	// false preserves the existing auto-version-up behavior.
 	EnsureNew bool `json:"ensure_new"`
+	// ExpectedLatestVersion, when set with NamedSlug, asserts which version
+	// this publish builds on. The server compares it against the fresh read
+	// inside the write transaction and rejects (409) if the slug has moved
+	// past it, so a concurrent publish can't be silently overwritten.
+	// nil skips the check.
+	ExpectedLatestVersion *int32 `json:"expected_latest_version"`
+	// AllowTypeChange opts in to a publish that changes what the document
+	// IS — its artifact_type (TEXT → PACKAGE) or the base of its
+	// content_type (text/html → text/markdown, which renders the page as
+	// source). Both are rejected (409) without it.
+	AllowTypeChange bool `json:"allow_type_change"`
 	// AllowedAccess — glob-on-email patterns that gate read access.
 	// nil (field absent) → inherit from prior version if any, else
 	// server default `['*']` (everyone authenticated). Empty slice

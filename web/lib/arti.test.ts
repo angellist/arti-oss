@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { ArtiError, buildListQS, fetchContent } from "./arti";
+import { ArtiError, buildListQS, fetchContent, shouldGzipUpload, createArtifact } from "./arti";
 
 describe("buildListQS all_versions", () => {
   it("sets all_versions=true when requested", () => {
@@ -149,5 +149,65 @@ describe("failed requests surface the server's detail, never the raw envelope", 
     const err = await failure();
     expect(err.message).toBe("Internal Server Error");
     expect(err.message).not.toContain("object");
+  });
+});
+
+describe("shouldGzipUpload", () => {
+  it("compresses textual content the WAF <script> rule can false-match", () => {
+    for (const ct of [
+      "text/html",
+      "text/html; charset=utf-8",
+      "application/javascript",
+      "text/markdown",
+      "application/json",
+      "image/svg+xml",
+    ]) {
+      expect(shouldGzipUpload(ct)).toBe(true);
+    }
+  });
+
+  it("leaves already-compressed or binary uploads uncompressed", () => {
+    for (const ct of ["application/zip", "image/png", "application/pdf"]) {
+      expect(shouldGzipUpload(ct)).toBe(false);
+    }
+  });
+});
+
+describe("createArtifact gzips textual uploads", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("sends Content-Encoding: gzip and a gzip-magic body for HTML", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ artifact_id: "x" }), { status: 201 }),
+    );
+    await createArtifact({
+      title: "t",
+      content_type: "text/html",
+      artifact_type: "TEXT",
+      content_base64: btoa("<script>alert(1)</script>"),
+    });
+    const init = spy.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers["Content-Encoding"]).toBe("gzip");
+    const bytes = new Uint8Array(init.body as ArrayBuffer);
+    // gzip magic number 0x1f 0x8b
+    expect(bytes[0]).toBe(0x1f);
+    expect(bytes[1]).toBe(0x8b);
+  });
+
+  it("sends a plain JSON body (no Content-Encoding) for a zip package", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ artifact_id: "x" }), { status: 201 }),
+    );
+    await createArtifact({
+      title: "t",
+      content_type: "application/zip",
+      artifact_type: "PACKAGE",
+      content_base64: "UEsDBA==",
+    });
+    const init = spy.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers["Content-Encoding"]).toBeUndefined();
+    expect(typeof init.body).toBe("string");
   });
 });

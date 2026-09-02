@@ -33,7 +33,7 @@ If your agent has the **arti** MCP connector, call its tools directly. Major met
 | `list_artifacts` / `list_artifact_versions` | enumerate the catalog / a slug's versions |
 | `list_package_files` / `read_package_file` | entries of / one file inside a PACKAGE |
 | `get_artifact` | cheap metadata + `size_bytes` (poll before reading a big one) |
-| `update_artifact` | edit **metadata only** (title/description/labels/access) — NOT content (content change = `add_artifact` with the same slug). Access edits (`allowed_access`, `allowed_write`) are per-DOCUMENT: they apply to every version of the slug, owner/admin only |
+| `update_artifact` | edit **metadata only** (title/description/labels/scopes/access/comments_enabled) — NOT content (content change = `add_artifact` with the same slug). Access edits (`allowed_access`, `allowed_write`) are per-DOCUMENT: they apply to every version of the slug, owner/admin only |
 | `archive_artifact` | soft-delete |
 
 **Key limit — never push large/binary content through MCP.** `add_artifact` takes
@@ -60,7 +60,18 @@ curl -sS -XPOST "$ARTI/api/artifacts" \
 ```
 
 - **Endpoint is `/api/artifacts`** — there is **no** `/api/v1/artifacts` (a wrong path 500s, not 404s).
-- `-F file=@<path>` streams raw bytes — never base64/inline the file.
+- **Uploading HTML or JavaScript? Gzip the body — always, even one file.** Cloudflare's WAF inspects request bodies and false-matches its `<script>` rule on inline HTML/JS, so a plain upload can `403` before it reaches arti. Send the JSON body gzipped with `Content-Encoding: gzip` (the server decompresses it; the `413` cap is on the decompressed size). PACKAGE/APP zips are already compressed — no need.
+
+  ```bash
+  # HTML/JS: gzip the JSON body so the WAF can't match <script>
+  jq -n --arg c "$(base64 < /tmp/workspace/report.html)" \
+    '{artifact_type:"TEXT",content_type:"text/html",named_slug:"q3-report",title:"Q3 Report",labels:["report"],content_base64:$c}' \
+    | gzip | curl -sS -XPOST "$ARTI/api/artifacts" \
+        -H "Authorization: Bearer $ARTI_API_KEY" \
+        -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' \
+        --data-binary @-
+  ```
+- `-F file=@<path>` streams raw bytes — never base64/inline the file. (For **HTML/JS**, prefer the gzipped-JSON form above; the multipart body carries the raw `<script>` and can trip the WAF.)
 - `artifact_type`: `TEXT` (text file + a `text/*` `content_type`) · `ATTACHMENT` (binary: PDF/image/…) · `PACKAGE` (a `.zip`) · `APP` (a zip with `arti-app.json`).
 - `named_slug` → stable `/s/<slug>` URL + auto-versions on re-upload; omit for a one-off `/a/<uuid>`.
 - **Read / list** the same way: `GET /api/artifacts/<uuid>` or `/api/artifacts/by-slug/<slug>[/raw]` (content) · `…/<uuid>/meta` (metadata) · `…/<uuid>/files/<path>` (a PACKAGE file) · `GET /api/artifacts/search?q=…`.
@@ -98,6 +109,7 @@ label vocabulary to your team.
 
 ## Don'ts
 
+- **Don't** upload HTML/JS with a plain (uncompressed) body — the Cloudflare WAF `403`s inline `<script>`. Gzip the body (`Content-Encoding: gzip`), always. (MCP `add_artifact` is exempt — it goes through the OBO proxy, not the public WAF — but is small-text-only anyway.)
 - **Don't** base64 a large/binary file through an MCP `add_artifact` call — use `ARTI_API_KEY` + `curl` (streams from disk).
 - **Don't** hit `/api/v1/artifacts` — it's `/api/artifacts`.
 - **Don't** upload unlabeled, and **never** echo the key.

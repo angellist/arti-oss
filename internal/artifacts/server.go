@@ -191,6 +191,23 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 				"Upload it as an ATTACHMENT, or inside a PACKAGE.", req.ContentType))
 	}
 
+	// ATTACHMENT is slugless by default (pgstore.applyAttachmentInvariants):
+	// couch posts chat files through this endpoint, and those must never pick
+	// up a document's ACL by landing on a slug. A person naming a slug means
+	// it — that is the viewer's drop-to-version path — so their upload keeps
+	// the slug and versions like any other document. Refuse rather than drop
+	// the slug silently, which is how a caller ends up with a mystery slugless
+	// artifact and no idea why.
+	keepAttachmentSlug := false
+	if at == pgstore.TypeAttachment && req.NamedSlug != nil && *req.NamedSlug != "" {
+		if !interactiveCaller(ctx) {
+			return ArtifactInfo{}, errBadRequest(
+				"ATTACHMENT uploads from a service credential are slugless and creator-only; drop named_slug, " +
+					"or upload the file from the web UI to publish it as a versioned document")
+		}
+		keepAttachmentSlug = true
+	}
+
 	var content []byte
 	switch {
 	case req.rawContent != nil:
@@ -309,9 +326,21 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 			// The ACL-change authority check runs in the CheckAccess hook below
 			// (against a FRESH prev, so a concurrent version can't be straddled),
 			// validating the resolved access/write we're about to persist.
+		} else if !errors.Is(err, pgstore.ErrNotFound) {
+			// A read that failed for any other reason (timeout, datastore
+			// error) is not evidence about the slug: swallowing it here would
+			// drop the inherit path silently, and reporting it as a version
+			// conflict would tell the caller to re-aim at a version this
+			// request never managed to read.
+			return ArtifactInfo{}, fmt.Errorf("create: read slug %q: %w", *req.NamedSlug, err)
+		} else if req.ExpectedLatestVersion != nil {
+			// The slug genuinely has no live version to build on — archived,
+			// or it never existed. Report it rather than quietly opening a new
+			// lineage at v1.
+			return ArtifactInfo{}, staleBaseVersion{slug: *req.NamedSlug, expected: *req.ExpectedLatestVersion}
 		}
-		// Errors (e.g. no prior version) leave nil-as-nil and proceed;
-		// Store.Put normalizes labels to empty and access to ['*'].
+		// A missing slug leaves nil-as-nil and proceeds; Store.Put normalizes
+		// labels to empty and access to ['*'].
 	}
 
 	// Skill artifacts (kind:skill) are write-guarded — create or version only by
@@ -328,18 +357,21 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 	// refresh THEIR index docs too, not just the new row's.
 	var aclFanout bool
 	row, err := s.store.Put(ctx, pgstore.PutInput{
-		ArtifactType:  at,
-		NamedSlug:     req.NamedSlug,
-		Title:         req.Title,
-		Description:   req.Description,
-		ContentType:   req.ContentType,
-		Content:       content,
-		Creator:       creator,
-		Scopes:        scopes,
-		Labels:        labels,
-		Metadata:      meta,
-		AllowedAccess: access,
-		AllowedWrite:  write,
+		ArtifactType: at,
+		NamedSlug:    req.NamedSlug,
+		// Set only for a person publishing an ATTACHMENT under a slug they
+		// named; every other attachment stays slugless and creator-only.
+		KeepAttachmentSlug: keepAttachmentSlug,
+		Title:              req.Title,
+		Description:        req.Description,
+		ContentType:        req.ContentType,
+		Content:            content,
+		Creator:            creator,
+		Scopes:             scopes,
+		Labels:             labels,
+		Metadata:           meta,
+		AllowedAccess:      access,
+		AllowedWrite:       write,
 		// An omitted ACL is an INHERIT, not a value: Put re-resolves it from
 		// the fresh prior version inside its critical section, so a publish
 		// racing an ACL change can't persist (let alone fan out) this
@@ -352,6 +384,13 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 		// access itself against a fresh read taken right before it writes.
 		CheckAccess: func(ctx context.Context, prev sqlc.Artifact) error {
 			if err := s.checkWriteAccess(ctx, prev, creator); err != nil {
+				return err
+			}
+			// Same fresh prev, so the base-version and type checks see what
+			// this publish will actually land on top of — a version that
+			// arrived while the caller was filling in the form is caught here,
+			// not silently overwritten.
+			if err := versionGuard(req, at, prev); err != nil {
 				return err
 			}
 			// Resolve the pair against THIS fresh prev — mirroring Put's
@@ -809,32 +848,14 @@ func (s *Service) canMintShare(ctx context.Context, row sqlc.Artifact, caller st
 // delegated writer could publish a content-only version and inherit the
 // switch. Slugless artifacts have no lineage, so their creator is the owner.
 func (s *Service) isDocOwner(ctx context.Context, row sqlc.Artifact, caller string) error {
-	if caller == "" {
-		return errForbidden("only the artifact's owner or an admin may change this")
-	}
-	admin, err := s.canManageArtifacts(ctx, caller)
+	ok, err := s.store.IsDocOwner(ctx, row, caller)
 	if err != nil {
 		return err
 	}
-	if admin {
-		return nil
+	if !ok {
+		return errForbidden("only the artifact's owner or an admin may change this")
 	}
-	if row.NamedSlug != nil && *row.NamedSlug != "" {
-		owner, oerr := s.store.SlugCreator(ctx, *row.NamedSlug)
-		if oerr != nil && !errors.Is(oerr, pgstore.ErrNotFound) {
-			return oerr
-		}
-		if owner != "" {
-			if strings.EqualFold(owner, caller) {
-				return nil
-			}
-			return errForbidden("only the artifact's owner or an admin may change this")
-		}
-	}
-	if strings.EqualFold(row.Creator, caller) {
-		return nil
-	}
-	return errForbidden("only the artifact's owner or an admin may change this")
+	return nil
 }
 
 // GetBySlug returns the metadata DTO for the slug. For non-admin callers
@@ -1446,6 +1467,7 @@ func Mount(r chi.Router, svc *Service) {
 	// routes once both are registered, so ordering is not strictly
 	// required, but we list specific first for clarity.
 	r.Get("/api/artifacts/{id}/meta", svc.httpGetMeta)
+	r.Post("/api/artifacts/{id}/access/grant-read", svc.httpGrantRead)
 	r.Get("/api/artifacts/{id}/files", svc.httpFilesByID)
 	r.Get("/api/artifacts/{id}/files/*", svc.httpFileByID)
 	r.Get("/api/artifacts/{id}", svc.httpGetContent)
@@ -1499,31 +1521,48 @@ func (s *Service) httpCreate(w http.ResponseWriter, r *http.Request) {
 	email := auth.EmailFromContext(r.Context())
 	info, err := s.Create(r.Context(), body, email)
 	if err != nil {
-		var br badRequest
-		if errors.As(err, &br) {
-			writeError(w, http.StatusBadRequest, "bad-request", br.msg)
-			return
-		}
-		var fb forbidden
-		if errors.As(err, &fb) {
-			writeError(w, http.StatusForbidden, "forbidden", fb.msg)
-			return
-		}
-		var sc slugConflict
-		if errors.As(err, &sc) {
-			writeError(w, http.StatusConflict, "slug-exists", sc.Error())
-			return
-		}
-		if errors.Is(err, pgstore.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not-found", "not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeCreateError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(info)
+}
+
+// writeCreateError maps a Create failure to its HTTP status. Shared by the
+// JSON and multipart handlers so the two front doors can't drift — a 409 the
+// web modal recovers from must not arrive as a 500 through the other one.
+func writeCreateError(w http.ResponseWriter, err error) {
+	var br badRequest
+	if errors.As(err, &br) {
+		writeError(w, http.StatusBadRequest, "bad-request", br.msg)
+		return
+	}
+	var fb forbidden
+	if errors.As(err, &fb) {
+		writeError(w, http.StatusForbidden, "forbidden", fb.msg)
+		return
+	}
+	var sc slugConflict
+	if errors.As(err, &sc) {
+		writeError(w, http.StatusConflict, "slug-exists", sc.Error())
+		return
+	}
+	var sv staleBaseVersion
+	if errors.As(err, &sv) {
+		writeError(w, http.StatusConflict, "stale-base-version", sv.Error())
+		return
+	}
+	var tc typeChange
+	if errors.As(err, &tc) {
+		writeError(w, http.StatusConflict, "type-change", tc.Error())
+		return
+	}
+	if errors.Is(err, pgstore.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not-found", "not found")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "internal", err.Error())
 }
 
 // httpCreateMultipart handles a multipart/form-data POST /api/artifacts:
@@ -1568,6 +1607,26 @@ func (s *Service) httpCreateMultipart(w http.ResponseWriter, r *http.Request) {
 	if v := r.FormValue("description"); v != "" {
 		req.Description = &v
 	}
+	// Same version controls as the JSON front door. Without them a multipart
+	// caller cannot acknowledge a type change, so Create's 409 would be a dead
+	// end on this door only.
+	if v := r.FormValue("allow_type_change"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad-request", "allow_type_change must be a boolean")
+			return
+		}
+		req.AllowTypeChange = b
+	}
+	if v := r.FormValue("expected_latest_version"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad-request", "expected_latest_version must be an integer")
+			return
+		}
+		n32 := int32(n)
+		req.ExpectedLatestVersion = &n32
+	}
 	if !isValidContentType(req.ContentType) {
 		writeError(w, http.StatusBadRequest, "bad-request",
 			"content_type must look like type/subtype (e.g. image/png)")
@@ -1575,26 +1634,7 @@ func (s *Service) httpCreateMultipart(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := s.Create(r.Context(), req, auth.EmailFromContext(r.Context()))
 	if err != nil {
-		var br badRequest
-		if errors.As(err, &br) {
-			writeError(w, http.StatusBadRequest, "bad-request", br.msg)
-			return
-		}
-		var fb forbidden
-		if errors.As(err, &fb) {
-			writeError(w, http.StatusForbidden, "forbidden", fb.msg)
-			return
-		}
-		var sc slugConflict
-		if errors.As(err, &sc) {
-			writeError(w, http.StatusConflict, "slug-exists", sc.Error())
-			return
-		}
-		if errors.Is(err, pgstore.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not-found", "not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeCreateError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -2003,6 +2043,17 @@ type UpdateMetadataRequest struct {
 	// here it applies to the whole DOCUMENT: setting it writes every version
 	// of the slug, and only the slug's owner (or an admin) may set it.
 	CommentsEnabled *bool `json:"comments_enabled"`
+	// GrantAccess ADDS one address to allowed_access, unioned against the
+	// snapshot this call reads rather than one the caller read earlier. That is
+	// the whole reason it exists: a client computing the union itself would be
+	// writing a list assembled before a concurrent grant or revoke landed, and
+	// the replace below would undo that change — resurrecting an address
+	// somebody had just removed.
+	//
+	// `json:"-"` on purpose. This is an internal field for the grant-read
+	// endpoint, not part of the PATCH body: an ACL change through PATCH states
+	// the whole list, which is what makes it reviewable in the access editor.
+	GrantAccess *string `json:"-"`
 }
 
 // cleanStringSlice trims each element, drops empties, and dedupes
@@ -2060,8 +2111,10 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 	// creator must not gain doc-level authority (isDocOwner resolves it to
 	// the earliest version's creator).
 	commentsOnly := req.CommentsEnabled != nil && req.Title == nil && req.Description == nil &&
-		req.Scopes == nil && req.Labels == nil && req.AllowedAccess == nil && req.AllowedWrite == nil
-	docSettingsOnly := (req.CommentsEnabled != nil || req.AllowedAccess != nil || req.AllowedWrite != nil) &&
+		req.Scopes == nil && req.Labels == nil && req.AllowedAccess == nil && req.AllowedWrite == nil &&
+		req.GrantAccess == nil
+	docSettingsOnly := (req.CommentsEnabled != nil || req.AllowedAccess != nil || req.AllowedWrite != nil ||
+		req.GrantAccess != nil) &&
 		req.Title == nil && req.Description == nil && req.Scopes == nil && req.Labels == nil
 	if !admin && !docSettingsOnly && !strings.EqualFold(existing.Creator, caller) {
 		return ArtifactInfo{}, errForbidden("only the creator or an admin may edit")
@@ -2111,7 +2164,7 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 	// check must never convert an unauthorized caller's NotFound into
 	// metadata.
 	var authorizedDocWrite bool
-	if req.AllowedAccess != nil || req.AllowedWrite != nil {
+	if req.AllowedAccess != nil || req.AllowedWrite != nil || req.GrantAccess != nil {
 		// Compute the final (access, write) pair from the request overlaid on
 		// the current row (DD-0055 D7), then write both together. The store
 		// enforces the ⊆ invariant (unions write into access). Omitting one
@@ -2120,6 +2173,9 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 		access := existing.AllowedAccess
 		if req.AllowedAccess != nil {
 			access = cleanStringSlice(*req.AllowedAccess)
+		}
+		if req.GrantAccess != nil {
+			access = unionAccessToken(access, *req.GrantAccess)
 		}
 		write := existing.AllowedWrite
 		if req.AllowedWrite != nil {
@@ -2295,6 +2351,97 @@ func (s *Service) httpPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+// grantReadRequest is the body of POST /api/artifacts/{id}/access/grant-read.
+type grantReadRequest struct {
+	Email string `json:"email"`
+}
+
+// httpGrantRead adds ONE address to an artifact's allowed_access. It exists for
+// the comment composer's "you mentioned someone who can't read this doc"
+// affordance. The alternative — handing the client the current ACL so it can
+// PATCH back the union — would let a stale browser tab resurrect a grant
+// somebody revoked in the meantime.
+//
+// The union itself is computed by UpdateMetadata against the snapshot IT reads
+// (UpdateMetadataRequest.GrantAccess), not against the row read here: this
+// handler's snapshot is already one read old by the time the write runs, and
+// unioning onto it would replace the ACL with a list assembled before any
+// concurrent change landed.
+//
+// It is strictly additive (never removes a token, never touches allowed_write)
+// and carries no authority of its own: UpdateMetadata applies the same
+// owner/admin ACL gate as every other access change. The isDocOwner check here
+// is the affordance's own gate, so an unauthorized caller gets one clear 403
+// instead of a partial PATCH.
+func (s *Service) httpGrantRead(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseUUIDParam(w, r, "id")
+	if !ok {
+		return
+	}
+	var body grantReadRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", "invalid JSON")
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(body.Email))
+	// A pattern (`*`, `*@corp.com`, `group:eng`) would widen the grant far past
+	// the one person named in a comment, so this door takes an address and
+	// nothing else. Patterns still go through the access editor, where the
+	// person doing it can see the whole list they are changing.
+	if email == "" || strings.ContainsAny(email, "*?") || strings.HasPrefix(email, "group:") ||
+		strings.Count(email, "@") != 1 || strings.HasPrefix(email, "@") || strings.HasSuffix(email, "@") {
+		writeError(w, http.StatusBadRequest, "bad-request", "email must be a single address")
+		return
+	}
+	caller := auth.EmailFromContext(r.Context())
+	row, err := s.store.GetByID(r.Context(), id)
+	if writeMaybeNotFound(w, err) {
+		return
+	}
+	// Read access first, so a caller who cannot see the artifact gets the same
+	// 404 every other read does rather than learning it exists from a 403.
+	if writeMaybeNotFound(w, s.checkAccess(r.Context(), row, caller)) {
+		return
+	}
+	if err := s.isDocOwner(r.Context(), row, caller); err != nil {
+		writeAclError(w, err)
+		return
+	}
+	// An address that is already granted needs no special case here: the union
+	// below is a no-op on it, and an owner's identical ACL resend is a
+	// supported write (it is how a drifted slug heals). Short-circuiting on
+	// this handler's own snapshot would just be one more stale read.
+	info, err := s.UpdateMetadata(r.Context(), id, UpdateMetadataRequest{GrantAccess: &email}, caller)
+	if err != nil {
+		writeAclError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+// unionAccessToken returns access with tok appended, or access unchanged when
+// it already grants that exact address. Matching is case-insensitive, the same
+// way every other access comparison in this package is.
+func unionAccessToken(access []string, tok string) []string {
+	for _, t := range access {
+		if strings.EqualFold(t, tok) {
+			return access
+		}
+	}
+	return append(append([]string{}, access...), tok)
+}
+
+// writeAclError maps an ACL-authority failure to 403 and anything else to
+// 404/500, the same way httpPatch does.
+func writeAclError(w http.ResponseWriter, err error) {
+	var fb forbidden
+	if errors.As(err, &fb) {
+		writeError(w, http.StatusForbidden, "forbidden", fb.msg)
+		return
+	}
+	writeMaybeNotFound(w, err)
 }
 
 func (s *Service) httpFilesByID(w http.ResponseWriter, r *http.Request) {
@@ -3813,6 +3960,91 @@ type slugConflict struct {
 func (e slugConflict) Error() string {
 	return fmt.Sprintf("slug %q already exists (v%d by %s); drop --ensure-new or pick a different slug",
 		e.slug, e.existingVersion, e.creator)
+}
+
+// staleBaseVersion is returned from Create when the caller pinned
+// ExpectedLatestVersion and the slug has moved past it — someone published
+// while this upload was being prepared. HTTP maps it to 409 so the client can
+// re-read the slug and republish against the version that is actually there.
+type staleBaseVersion struct {
+	slug     string
+	expected int32
+	actual   int32 // 0 when the slug has no live version at all
+	creator  string
+}
+
+func (e staleBaseVersion) Error() string {
+	if e.actual == 0 {
+		return fmt.Sprintf("slug %q has no live version to build on (expected v%d); re-read the slug and publish again",
+			e.slug, e.expected)
+	}
+	return fmt.Sprintf("slug %q is now at v%d (published by %s); you were building on v%d — re-read the latest version and publish again",
+		e.slug, e.actual, e.creator, e.expected)
+}
+
+// typeChange is returned from Create when a publish would change what the
+// document IS: its artifact_type, or the base of its content_type (a
+// text/html doc republished as text/markdown renders as source, which breaks
+// the page as thoroughly as a TEXT → PACKAGE switch). Opt in with
+// allow_type_change; the web modal makes the user acknowledge it first.
+type typeChange struct {
+	slug     string
+	from, to string // "TEXT (text/html)"
+}
+
+func (e typeChange) Error() string {
+	return fmt.Sprintf("publishing to slug %q would change it from %s to %s; pass allow_type_change to confirm",
+		e.slug, e.from, e.to)
+}
+
+// baseContentType strips parameters and case from a content type, so
+// `text/html; charset=utf-8` and `text/html` are the same document kind.
+func baseContentType(ct string) string {
+	return strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
+}
+
+// versionGuard runs the two checks a publish onto an existing slug needs
+// beyond write access, both against the slug's FRESH latest version: the
+// caller is building on the version it thinks it is, and it isn't changing
+// what the document is without saying so.
+func versionGuard(req CreateRequest, at string, prev sqlc.Artifact) error {
+	slug := ""
+	if req.NamedSlug != nil {
+		slug = *req.NamedSlug
+	}
+	if req.ExpectedLatestVersion != nil {
+		var actual int32
+		if prev.Version != nil {
+			actual = *prev.Version
+		}
+		if actual != *req.ExpectedLatestVersion {
+			return staleBaseVersion{slug: slug, expected: *req.ExpectedLatestVersion, actual: actual, creator: prev.Creator}
+		}
+	}
+	if req.AllowTypeChange {
+		return nil
+	}
+	if at == prev.ArtifactType && baseContentType(req.ContentType) == baseContentType(prev.ContentType) {
+		return nil
+	}
+	return typeChange{
+		slug: slug,
+		from: fmt.Sprintf("%s (%s)", prev.ArtifactType, baseContentType(prev.ContentType)),
+		to:   fmt.Sprintf("%s (%s)", at, baseContentType(req.ContentType)),
+	}
+}
+
+// interactiveCaller reports whether the request carries a person's own
+// credential (browser session, their CLI, their MCP client) rather than a
+// service one. API keys and device-flow upload tokens are how another app —
+// couch — posts files on a user's behalf, and those keep the stricter
+// ATTACHMENT invariants. Fails closed when no claims are present.
+func interactiveCaller(ctx context.Context) bool {
+	c, ok := auth.ClaimsFromContext(ctx)
+	if !ok {
+		return false
+	}
+	return c.Typ != auth.TokenTypeAPIKey && !c.IsUploadScoped()
 }
 
 // fieldSyntax recognizes search tokens like `slug:smoke-test` or

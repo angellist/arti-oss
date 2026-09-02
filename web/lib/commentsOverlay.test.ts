@@ -531,3 +531,328 @@ describe("comments overlay pin card chrome", () => {
     dispose();
   });
 });
+
+// A served HTML page keeps its own key bindings — a deck pages on Space, an
+// editor moves on ArrowDown — and the overlay is injected INTO that page, so
+// without isolation those bindings fire while the reader is typing a comment
+// (and a page handler that calls preventDefault eats the character outright).
+describe("comments overlay keyboard isolation", () => {
+  afterEach(() => {
+    document.documentElement.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  const mount = (api: CommentsApi) => {
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const doc = document.createElement("article");
+    doc.dataset.artiDoc = "";
+    doc.innerHTML = "<p>Quoted text</p>";
+    document.body.append(doc);
+    const dispose = mountCommentsOverlay({
+      container: doc,
+      artifactId: "artifact",
+      me: { email: "test@example.com", name: "Test", is_admin: false },
+      api,
+    });
+    return { dispose, doc };
+  };
+
+  const api = (over: Partial<CommentsApi> = {}): CommentsApi => ({
+    list: async () => ({ threads: [thread({ type: "text", quote: "Quoted text" }, "text-thread")] }),
+    create: vi.fn(), reply: vi.fn(), resolve: vi.fn(), reopen: vi.fn(), del: vi.fn(), edit: vi.fn(),
+    ...over,
+  });
+
+  // The page's bindings, in every place a page actually puts them: bubble and
+  // capture on document, and both phases on window. Registered after the
+  // overlay mounts, which is the hard case — a window/capture listener sits on
+  // the same node and phase as the shield, so only stopImmediatePropagation
+  // keeps it from running.
+  const pageKeys = () => {
+    const seen: string[] = [];
+    const bubble = (e: Event) => seen.push(`doc-bubble:${(e as KeyboardEvent).key}`);
+    const capture = (e: Event) => seen.push(`doc-capture:${(e as KeyboardEvent).key}`);
+    const win = (e: Event) => seen.push(`win:${(e as KeyboardEvent).key}`);
+    const winCapture = (e: Event) => seen.push(`win-capture:${(e as KeyboardEvent).key}`);
+    document.addEventListener("keydown", bubble);
+    document.addEventListener("keydown", capture, true);
+    window.addEventListener("keydown", win);
+    window.addEventListener("keydown", winCapture, true);
+    return {
+      seen,
+      off: () => {
+        document.removeEventListener("keydown", bubble);
+        document.removeEventListener("keydown", capture, true);
+        window.removeEventListener("keydown", win);
+        window.removeEventListener("keydown", winCapture, true);
+      },
+    };
+  };
+
+  const openComposer = async () => {
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+    document.querySelector<HTMLElement>("[data-tid='text-thread'] .ac-text")!.click();
+    return document.querySelector<HTMLTextAreaElement>("[data-reply]")!;
+  };
+
+  // The @-menu is consulted by the keyboard shield, not by each composer's own
+  // handler, because the shield is the only node every composer keystroke is
+  // guaranteed to reach and the only one that runs BEFORE the two handlers it
+  // re-delivers to. Consulted lower down, Enter picked a suggestion and then
+  // also sent the comment, and Escape closed the menu and then cancelled the
+  // draft behind it.
+  const withPeople = (over: Partial<CommentsApi> = {}) =>
+    api({
+      people: async () => ({ people: [{ email: "alice@x.com", can_read: true }], can_grant: false, min_query: 2 }),
+      ...over,
+    });
+
+  const openMenu = async (ta: HTMLTextAreaElement, text = "hi @ali") => {
+    ta.focus();
+    ta.value = text;
+    ta.setSelectionRange(text.length, text.length);
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 260)); // the menu's own debounce
+    return document.querySelectorAll(".ac-mm-row").length;
+  };
+
+  it("lets the @-menu take Enter without also sending the comment", async () => {
+    const reply = vi.fn(async () => ({
+      id: "new", author: "test@example.com", author_name: "Test", body: "sent", created_at: "2026-01-01T00:10:00Z",
+    }));
+    const { dispose } = mount(withPeople({ reply }));
+    await Promise.resolve();
+    const ta = await openComposer();
+    expect(await openMenu(ta)).toBe(1);
+
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    expect(reply).not.toHaveBeenCalled();
+    expect(ta.value).toBe("hi @alice@x.com ");
+
+    // Menu closed: the same key now belongs to the composer again.
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    expect(reply).toHaveBeenCalledTimes(1);
+    dispose();
+  });
+
+  it("lets the @-menu take Escape without it reaching the overlay behind it", async () => {
+    // Escape is the key with a second owner: the overlay spends it cancelling
+    // a draft or leaving pin mode. Pin mode is the observable stand-in here —
+    // with the menu open, the key must not reach that handler at all.
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const doc = document.createElement("article");
+    doc.dataset.artiDoc = "";
+    doc.innerHTML = "<p>Quoted text</p>";
+    document.body.append(doc);
+    const dispose = mountCommentsOverlay({
+      container: doc,
+      artifactId: "artifact",
+      me: { email: "test@example.com", name: "Test", is_admin: false },
+      allowPin: true,
+      api: withPeople(),
+    });
+    await Promise.resolve();
+
+    const pinFab = () => document.querySelector<HTMLElement>("[data-fab='pin']")!;
+    const ta = await openComposer();
+    pinFab().click();
+    expect(pinFab().getAttribute("aria-pressed")).toBe("true");
+    expect(await openMenu(ta)).toBe(1);
+
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect(document.querySelectorAll(".ac-mm-row")).toHaveLength(0); // the menu closed
+    expect(pinFab().getAttribute("aria-pressed")).toBe("true"); // and nothing else did
+    expect(ta.value).toBe("hi @ali");
+
+    // Menu closed: the same key now belongs to the overlay again.
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect(pinFab().getAttribute("aria-pressed")).toBe("false");
+    dispose();
+  });
+
+  it("hides keystrokes typed into a comment box from the page's own handlers", async () => {
+    const { dispose } = mount(api());
+    await Promise.resolve();
+    const ta = await openComposer();
+    const page = pageKeys();
+
+    for (const key of [" ", "ArrowDown", "ArrowUp", "PageDown", "k"]) {
+      const e = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      ta.dispatchEvent(e);
+      // Not merely unhandled — uncancelled, so the character still reaches the
+      // textarea. A page handler is what used to swallow it.
+      expect(e.defaultPrevented).toBe(false);
+    }
+    expect(page.seen).toEqual([]);
+
+    page.off();
+    dispose();
+  });
+
+  it("still delivers the composer's own Enter-to-send while the page is shut out", async () => {
+    const reply = vi.fn(async () => ({
+      id: "new", author: "test@example.com", author_name: "Test", body: "Sent", created_at: "2026-01-01T00:10:00Z",
+    }));
+    const { dispose } = mount(api({ reply }));
+    await Promise.resolve();
+    const ta = await openComposer();
+    const page = pageKeys();
+
+    ta.value = "A reply";
+    ta.dispatchEvent(new Event("input"));
+    const e = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    ta.dispatchEvent(e);
+
+    expect(reply).toHaveBeenCalledWith("text-thread", "A reply");
+    expect(e.defaultPrevented).toBe(true); // no stray newline in the box
+    expect(page.seen).toEqual([]); // and the page never saw Enter either
+
+    page.off();
+    dispose();
+  });
+
+  it("leaves keys typed outside the overlay to the page", async () => {
+    const { dispose, doc } = mount(api());
+    await Promise.resolve();
+    const page = pageKeys();
+
+    doc.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
+
+    expect(page.seen).toEqual(["win-capture: ", "doc-capture: ", "doc-bubble: ", "win: "]);
+    page.off();
+    dispose();
+  });
+
+  it("nudges the rail from the focused grip without the page seeing the arrows", async () => {
+    const { dispose } = mount(api());
+    await Promise.resolve();
+    const fabs = document.querySelector<HTMLElement>(".ac-fabs")!;
+    vi.spyOn(fabs, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 400, 44, 100));
+    const grip = document.querySelector<HTMLElement>("[data-rail-grip]")!;
+    const page = pageKeys();
+
+    grip.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+
+    expect(fabs.style.top).toBe("384px"); // 400 − one 16px step
+    expect(page.seen).toEqual([]);
+    page.off();
+    dispose();
+  });
+
+  it("stops shielding after teardown", async () => {
+    const { dispose } = mount(api());
+    await Promise.resolve();
+    await openComposer();
+    dispose();
+    // Teardown removes the real chrome from the DOM, so dispatch from a stand-in
+    // that still matches the chrome selector: if the window-capture listener had
+    // outlived the overlay, it would swallow this too.
+    const ghost = document.createElement("div");
+    ghost.className = "ac-layer";
+    ghost.innerHTML = "<textarea></textarea>";
+    document.documentElement.append(ghost);
+    const page = pageKeys();
+
+    ghost.querySelector("textarea")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
+    );
+
+    expect(page.seen).toEqual(["win-capture: ", "doc-capture: ", "doc-bubble: ", "win: "]);
+    page.off();
+  });
+});
+
+// The overlay's chrome is drawn light — translucent white cards over near-black
+// text — and it is injected into whatever page is being commented on. Over a
+// dark served artifact the blur mixes that dark page into the white, so the
+// card lands as a flat gray slab with washed-out text; `ac-dark` on <html>
+// swaps the palette. It must key off the HOST page, not the OS preference:
+// arti's own viewer is light-only and has to stay light on a dark machine.
+describe("comments overlay host theme", () => {
+  afterEach(() => {
+    document.documentElement.innerHTML = "";
+    document.documentElement.className = "";
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const mount = (paint: (body: HTMLElement) => void) => {
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
+    const doc = document.createElement("article");
+    doc.dataset.artiDoc = "";
+    doc.innerHTML = "<p>Quoted text</p>";
+    document.body.append(doc);
+    paint(document.body);
+    return mountCommentsOverlay({
+      container: doc,
+      artifactId: "artifact",
+      me: { email: "test@example.com", name: "Test", is_admin: false },
+      api: {
+        list: async () => ({ threads: [thread({ type: "text", quote: "Quoted text" }, "text-thread")] }),
+        create: vi.fn(), reply: vi.fn(), resolve: vi.fn(), reopen: vi.fn(), del: vi.fn(), edit: vi.fn(),
+      },
+    });
+  };
+
+  it("switches to the dark palette on a dark page and reverts on teardown", async () => {
+    const dispose = mount((body) => { body.style.background = "#1a1a1a"; });
+    await Promise.resolve();
+
+    expect(document.documentElement.classList.contains("ac-dark")).toBe(true);
+
+    dispose();
+    // The flag lives on the shared <html>, so a disposed overlay must not leave
+    // the page (or the overlay that replaces it) wearing it.
+    expect(document.documentElement.classList.contains("ac-dark")).toBe(false);
+  });
+
+  it("stays light on a light page even when the OS prefers dark", async () => {
+    // arti's viewer is light-only, so the OS preference must not get a vote:
+    // the page's own white background is the answer.
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+    const dispose = mount((body) => { body.style.background = "#ffffff"; });
+    await Promise.resolve();
+
+    expect(document.documentElement.classList.contains("ac-dark")).toBe(false);
+    dispose();
+  });
+
+  it("ignores a dark OS on a page that never declared a color scheme", async () => {
+    // Nothing painted, default ink: what shows through is the UA canvas, and
+    // the canvas stays WHITE on a dark machine for a page that never opted in.
+    // Reading the preference here would put dark chrome on a white page.
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+    const dispose = mount(() => {});
+    await Promise.resolve();
+
+    expect(document.documentElement.classList.contains("ac-dark")).toBe(false);
+    dispose();
+  });
+
+  it("follows a dark OS once the page has opted into both schemes", async () => {
+    // `color-scheme: light dark` is arti's own served-markdown stylesheet: the
+    // page hands the canvas to the OS preference, so the overlay follows it.
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+    const dispose = mount(() => { document.documentElement.style.colorScheme = "light dark"; });
+    await Promise.resolve();
+
+    expect(document.documentElement.classList.contains("ac-dark")).toBe(true);
+    dispose();
+    document.documentElement.style.colorScheme = "";
+  });
+
+  it("reads the page's text color when nothing paints a background", async () => {
+    // An app that backgrounds a full-bleed wrapper leaves body/html transparent,
+    // so the background says nothing — but light ink still means a dark page.
+    const dispose = mount((body) => { body.style.color = "#e6e6e6"; });
+    await Promise.resolve();
+
+    expect(document.documentElement.classList.contains("ac-dark")).toBe(true);
+    dispose();
+  });
+});

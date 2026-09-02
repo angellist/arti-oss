@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/rbac"
 	"github.com/angellist/arti-oss/internal/store/blob"
 )
 
@@ -160,6 +161,12 @@ type PutInput struct {
 	InheritAccess bool
 	InheritWrite  bool
 
+	// KeepAttachmentSlug exempts this write from the slugless/creator-only
+	// ATTACHMENT clamp below, for the one case that isn't a chat file: a
+	// person publishing a binary under a slug they named, which is a
+	// versioned document. See applyAttachmentInvariants.
+	KeepAttachmentSlug bool
+
 	// NOTE: there is deliberately no CommentsEnabled field. The per-doc comment
 	// switch is resolved by Put itself from a fresh read of the slug's latest
 	// version, so no caller can pass a value it read earlier and re-open
@@ -179,14 +186,24 @@ type PutInput struct {
 // applyAttachmentInvariants forces the rules that make ATTACHMENT rows safe
 // regardless of caller input or the server's slug-inherit path (which copies
 // allowed_access from a prior version under the same slug): attachments are
-// always slugless (so single-version, and no slug to inherit access from) and
+// slugless (so single-version, and no slug to inherit access from) and
 // creator-only. No-op for other types.
+//
+// KeepAttachmentSlug is the one exemption, and it is a different situation:
+// a person publishing a file under a slug they named is publishing a
+// document, so it versions and carries that document's ACL like any other
+// type. Only the artifacts service sets it, and only for an interactive
+// caller — couch's chat uploads never reach this branch.
 func applyAttachmentInvariants(in PutInput) PutInput {
-	if in.ArtifactType == TypeAttachment {
-		in.NamedSlug = nil
-		in.AllowedAccess = []string{} // empty (not nil) == creator-only
-		in.AllowedWrite = []string{}  // creator-only writes too
+	if in.ArtifactType != TypeAttachment {
+		return in
 	}
+	if in.KeepAttachmentSlug && in.NamedSlug != nil && *in.NamedSlug != "" {
+		return in
+	}
+	in.NamedSlug = nil
+	in.AllowedAccess = []string{} // empty (not nil) == creator-only
+	in.AllowedWrite = []string{}  // creator-only writes too
 	return in
 }
 
@@ -1346,10 +1363,13 @@ func (s *Store) UpdateScopes(ctx context.Context, id uuid.UUID, scopes []string)
 // when write is non-nil it is unioned into access so read paths stay a
 // superset. Permission enforced at the HTTP layer; per-version, not per-slug.
 func (s *Store) UpdateAccess(ctx context.Context, id uuid.UUID, access []string, write []string) (int64, error) {
-	// Attachments stay creator-only — an access update must never widen them.
-	// Enforced here (the single update chokepoint) so every caller is covered,
-	// mirroring applyAttachmentInvariants on create.
-	if row, err := s.GetByID(ctx, id); err == nil && row.ArtifactType == TypeAttachment {
+	// Slugless attachments stay creator-only — an access update must never
+	// widen them. Enforced here (the single update chokepoint) so every caller
+	// is covered, mirroring applyAttachmentInvariants on create. A SLUGGED
+	// attachment is a document a person published, so its access is editable
+	// like any other document's; the same exemption applies in both places or
+	// such a document could never be shared at all.
+	if row, err := s.GetByID(ctx, id); err == nil && row.ArtifactType == TypeAttachment && row.NamedSlug == nil {
 		access, write = []string{}, []string{}
 	}
 	if access == nil {
@@ -1426,6 +1446,42 @@ func CanAccess(row sqlc.Artifact, caller string, callerGroups []string) bool {
 		return true
 	}
 	return matchPatterns(row.AllowedAccess, caller, callerGroups)
+}
+
+// IsDocOwner reports whether `caller` holds DOCUMENT-level authority over
+// `row`: an admin (MANAGE_ARTIFACTS), or the slug's OWNER — the creator of its
+// EARLIEST version. It is deliberately NOT row.Creator: versioning reassigns
+// each version's creator to whoever pushed it, so a delegated writer could
+// publish a content-only version and inherit the owner's powers. Slugless
+// artifacts have no lineage, so their creator is the owner.
+//
+// This is the single definition of that rule. artifacts.Service.isDocOwner (the
+// comment switch, the share control, ACL changes) and the comment composer's
+// mention-grant affordance both call it, so no surface can offer an action the
+// write path will refuse.
+func (s *Store) IsDocOwner(ctx context.Context, row sqlc.Artifact, caller string) (bool, error) {
+	if caller == "" {
+		return false, nil
+	}
+	admin, err := s.HasPermission(ctx, caller, rbac.ManageArtifacts)
+	if err != nil {
+		return false, err
+	}
+	if admin {
+		return true, nil
+	}
+	if row.NamedSlug != nil && *row.NamedSlug != "" {
+		owner, oerr := s.SlugCreator(ctx, *row.NamedSlug)
+		if oerr != nil && !errors.Is(oerr, ErrNotFound) {
+			return false, oerr
+		}
+		if owner != "" {
+			// The slug's owner is authoritative: this version's own creator
+			// does not get a second chance below.
+			return strings.EqualFold(owner, caller), nil
+		}
+	}
+	return strings.EqualFold(row.Creator, caller), nil
 }
 
 // matchPatterns reports whether caller (or one of callerGroups) is granted by

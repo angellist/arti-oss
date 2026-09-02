@@ -111,7 +111,7 @@ schemas live in the [MCP tools reference](../reference/mcp-tools.md); the shape:
 |---|---|
 | `add_artifact` | Create or version an artifact (TEXT by default). |
 | `append_artifact` | Atomically append to a slug; supports an idempotency key. |
-| `update_artifact` | Edit metadata (title/scopes/labels/access) in place; no new version. |
+| `update_artifact` | Edit metadata (title/description/scopes/labels/access/comments) in place; no new version. |
 | `get_artifact` | Fetch metadata by UUID or slug (incl. `size_bytes` — a cheap size check). |
 | `read_artifact` | Fetch the content (base64 for binary); `max_bytes` peeks a prefix. |
 | `list_artifacts` | List/filter the catalog (type, creator, scope, labels). |

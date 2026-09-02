@@ -4,7 +4,8 @@ description: >-
   Use the local `arti` command-line tool to upload, append to, fetch, list, search,
   version, or archive arti artifacts from a LOCAL machine (dev box) — "arti up",
   "publish/upload this", "append this to X", "get/download artifact X",
-  "list/search my artifacts", "shareable arti URL", "who can see this artifact".
+  "list/search my artifacts", "shareable arti URL", "who can see this artifact",
+  "relabel/rename/re-describe an artifact without re-publishing it".
   This is the CLI path ONLY; on a hosted agent without the binary, use
   arti-usage-guide (MCP tools or an API key + curl).
 ---
@@ -35,6 +36,8 @@ arti add    [FILE|DIR|-] [--slug NAME] [--title T] [--description D]
 arti append --slug NAME [FILE|-] [--separator S] [--idempotency-key K | --auto-key]
                          [--title T] [--content-type MIME] [--scope S] [--label L ...]
                          [--access GLOB ... | --private] [--write-access GLOB ... | --write-private]
+arti edit   <UUID|SLUG> [-v N] [--title T] [--description D] [--label L ... | --clear-labels]
+                         [--scope S ... | --clear-scopes] [--comments | --no-comments]
 arti access <UUID|SLUG> [--access GLOB ... | --private] [--write-access GLOB ... | --write-private]
 arti get    <UUID|SLUG> [-v N] [-q | -m] [--extract DIR]
 arti ls     [UUID] [--type …] [--creator EMAIL] [--label L ...] [--limit N] [--include-archived]
@@ -47,6 +50,7 @@ arti login | logout | whoami · arti version | update
 - `--slug NAME` = stable URL; re-uploading the same slug **auto-bumps the version**.
 - `--type app` uploads a governed APP (dir/zip must contain `arti-app.json`) — to *build* one, see **create-arti-app-artifact**.
 - **Output:** URL → stdout; `artifact_id`/slug/version → stderr. `URL=$(arti add f.md --slug s)` captures just the URL.
+- **Compression is automatic.** `--compress auto` (the default) gzips textual uploads — HTML, JS, JSON, markdown, plain text — so Cloudflare's WAF can't false-match its `<script>` rule and `403` an HTML upload; already-compressed uploads (zip PACKAGE/APP, images, PDFs) are sent as-is. Force with `--compress gzip`, or disable with `--compress none` (both `add` and `append`). You normally never touch this.
 
 ### append — add to an existing slug without re-uploading the whole body
 Use for accumulating logs, running notes, or per-event records under one URL. The
@@ -63,6 +67,24 @@ writers, unlike `get` → edit → `add`. Text only (`text/*` and structured tex
   dedups identical bodies but *not* re-sends of a changed body; the two are mutually
   exclusive. This matters more for agents than for humans: an interrupted run that
   re-executes will otherwise append twice.
+
+### edit — fix metadata in place, no new version
+`arti edit <slug>` PATCHes title, description, labels, scopes and the per-document
+comment switch on an already-published artifact — the CLI half of the same call the
+web editor and the MCP `update_artifact` tool make. Use it instead of re-publishing
+when the *content* is fine and only the metadata is wrong (a bare description, a
+missing label): re-versioning would mint a pointless version and, for a PACKAGE or
+ATTACHMENT, need the original bytes.
+- `--label` / `--scope` **replace** the whole set (there is no add/remove verb), so
+  pass every value you want to keep — including a structural label like `skill` or
+  `kind:*` that type-scoped listings filter on. `--clear-labels` / `--clear-scopes`
+  empty them; `--description ''` clears the description.
+- Title/description/labels/scopes are **per-version** (a slug resolves to its latest
+  version, or `-v N`); `--comments` / `--no-comments` is **per-document** and
+  owner/admin only.
+- Content and artifact type are immutable — change the body with `arti add --slug`.
+- With no flags it prints the editable fields and writes nothing.
+- Access is NOT here — it has its own command, below.
 
 ### Access control (`add`, `append`, and the `access` command)
 Patterns match reader email or a group: `--access '*@example.com'`,

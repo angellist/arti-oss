@@ -55,6 +55,13 @@ paths:
       responses: { "200": { description: ok } }
     post:
       summary: Create / version an artifact
+      description: >
+        Accepts application/json or multipart/form-data. A request body sent with
+        `Content-Encoding: gzip` is decompressed transparently (the size cap
+        applies to the decompressed size) — gzip HTML/JS uploads so Cloudflare's
+        WAF can't false-match its `<script>` rule and 403 the request.
+      parameters:
+        - { in: header, name: Content-Encoding, required: false, schema: { type: string, enum: [gzip] } }
       responses: { "201": { description: created } }
   /api/artifacts/search:
     get:

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,16 @@ func fakeArti(t *testing.T, meta map[string]any) (*httptest.Server, func() map[s
 	t.Helper()
 	var patched map[string]json.RawMessage
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Mirror the server: decompress a gzip upload body before decoding, so
+		// the CLI's automatic gzip on textual create/append is exercised here.
+		if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+			zr, err := gzip.NewReader(r.Body)
+			if err != nil {
+				http.Error(w, "bad gzip", http.StatusBadRequest)
+				return
+			}
+			r.Body = zr
+		}
 		switch {
 		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/artifacts/"):
 			_ = json.NewDecoder(r.Body).Decode(&patched)

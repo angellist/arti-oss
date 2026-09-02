@@ -82,6 +82,16 @@ version's content and is safe to retry. Want to assert "this is brand new, don't
 silently version onto an existing slug"? Add `--ensure-new` and you'll get an
 error instead if the slug is taken.
 
+From a browser, open the document and **drop the new file on the page** (or use
+**Upload new version…** in the ⋯ menu): the modal locks the slug, inherits the
+title, labels and scopes, and publishes the next version. See
+[Versions](../guides/web-ui.md#versions).
+
+A version keeps the document's kind. Publishing a zip onto a text document, or
+the same document as a different content type, is refused unless you say you mean
+it — `--allow-type-change` on the CLI, a checkbox in the modal. Getting this
+wrong is how an HTML page ends up rendered as its own source.
+
 ## Share
 
 `arti url <slug>` (or the **Copy link** action in the web UI) gives the canonical

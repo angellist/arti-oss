@@ -524,6 +524,10 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	}
 
 	root.Group(func(r chi.Router) {
+		// Decompress `Content-Encoding: gzip` upload bodies before auth and the
+		// upload-scope cap, so the cap lands on the decompressed size. Lets
+		// clients gzip HTML/JS uploads past the Cloudflare WAF's <script> rule.
+		r.Use(gzipRequestBody(int64(artifacts.MaxUploadBytes)))
 		r.Use(authMiddleware)
 		r.Use(auth.EnforceUploadScope(pgstoreInst, int64(cfg.Auth.Device.MaxUploadBytes)))
 		r.Post("/auth/device/revoke", auth.DeviceRevokeHandler(devCfg))

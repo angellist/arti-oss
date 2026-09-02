@@ -72,10 +72,17 @@ Create (or version) an artifact.
 | `labels` | string[] | no | |
 | `entry_point` | string | no | PACKAGE/APP launch file |
 | `ensure_new` | boolean | no | 409 if the slug exists |
+| `expected_latest_version` | int | no | publish only if the slug is still at this version (409 `stale-base-version`) |
+| `allow_type_change` | boolean | no | permit a version that changes `artifact_type` or the base of `content_type` (409 `type-change` without it) |
 | `allowed_access` | string[] | no | glob-on-email; `["*"]` any reader, `[]` creator-only |
 | `allowed_write` | string[] | no | subset of readers allowed to write; omit = writers follow readers, `[]` = creator-only writes |
 
 **Returns:** `ArtifactInfo` (see [REST API](rest-api.md#artifactinfo)).
+
+Versioning a slug keeps the document's kind: send its current `content_type`
+unless you mean to change it. Republishing an HTML document as `text/markdown`
+renders the page as its own source, so that is a `409 type-change` rather than a
+silent re-render.
 
 ### `append_artifact`
 
@@ -100,8 +107,8 @@ caches the response 24h per `(key, creator)` and replays it.
 
 ### `update_artifact`
 
-Update an existing artifact's **metadata** in place — `title`, `scopes`, `labels`,
-and/or `allowed_access` — **without** creating a new version. Content and
+Update an existing artifact's **metadata** in place — `title`, `description`, `scopes`,
+`labels`, and/or `allowed_access` — **without** creating a new version. Content and
 `artifact_type` are immutable: to change the body, call `add_artifact` with the same
 `named_slug` to publish a new version. Only the fields you pass change; omit a field to
 leave it untouched, or pass an empty array to clear it (e.g. `allowed_access: []` →
@@ -114,6 +121,7 @@ only; editing a `kind:skill` artifact also requires `MANAGE_SKILLS`.
 | `ident` | string | yes | UUID (that version) or slug (latest readable version) |
 | `version` | integer | no | pin a slug to a specific version |
 | `title` | string | no | non-empty when present |
+| `description` | string | no | `""` clears it |
 | `scopes` | string[] | no | replaces the set; `[]` clears |
 | `labels` | string[] | no | replaces the set; `[]` clears |
 | `allowed_access` | string[] | no | glob-on-email; `[]` → creator-only |

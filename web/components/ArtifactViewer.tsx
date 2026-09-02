@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ArtifactInfo, Me, PackageManifest } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
@@ -25,6 +25,8 @@ import DiagramView from "./DiagramView";
 import DiagramArtifactEditor from "./DiagramArtifactEditor";
 import { isDiagramContentType } from "@/lib/diagram";
 import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
+import { useUpload } from "@/lib/upload-context";
+import { targetFromInfo } from "@/lib/upload-target";
 
 // BackButton — small left-chevron that pops one step in browser history
 // if there is one, falling back to the catalog root. Lives at the very
@@ -467,6 +469,7 @@ function ThreeDotsMenu({
   archiveTitle,
   onEdit,
   editTitle,
+  onUploadVersion,
   onCompare,
   commentsOn,
   canManageComments,
@@ -488,6 +491,12 @@ function ThreeDotsMenu({
   // editTitle overrides the Edit item tooltip — a diagram opens a canvas,
   // not the raw source, and the tooltip should not claim otherwise.
   editTitle?: string;
+  // Upload a file as the next version of this document. Offered on the same
+  // terms as the page-wide drop (a writable, live, slugged document) and is
+  // the discoverable half of it: an HTML or APP body renders in a sandboxed
+  // iframe, whose drag events never reach the parent window, so on those the
+  // menu is the only way in.
+  onUploadVersion?: () => void;
   onCompare?: () => void;
   // Comments row: shown to everyone who can see the menu (the dot is the
   // answer to "why is there nowhere to comment?"), but only the owner —
@@ -572,6 +581,23 @@ function ThreeDotsMenu({
                 </svg>
               </MenuIcon>
               Edit
+            </button>
+          ) : null}
+          {onUploadVersion ? (
+            <button
+              type="button"
+              onClick={() => { onUploadVersion(); setOpen(false); }}
+              className={`${MENU_ROW} hover:bg-neutral-50`}
+              title="upload a file as the next version of this document"
+            >
+              <MenuIcon>
+                <svg {...MENU_SVG}>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 9 12 4 17 9" />
+                  <line x1="12" y1="4" x2="12" y2="16" />
+                </svg>
+              </MenuIcon>
+              Upload new version…
             </button>
           ) : null}
           {onCompare ? (
@@ -883,6 +909,17 @@ export default function ArtifactViewer({
   }
   const mode = useRailMode();
   const router = useRouter();
+  // Register this document as the drop target, so a file dropped anywhere on
+  // the page publishes a new version of it instead of a new document. Null for
+  // anything with no version lineage to extend — see targetFromInfo.
+  const upload = useUpload();
+  const uploadTarget = useMemo(() => targetFromInfo(info), [info]);
+  const { setTarget, clearTarget } = upload;
+  useEffect(() => {
+    if (!uploadTarget) return;
+    setTarget(uploadTarget);
+    return () => clearTarget(uploadTarget);
+  }, [uploadTarget, setTarget, clearTarget]);
   const canEdit = !!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(me.email, info.creator));
   const isArchived = !!info.deleted_at;
   // Comments only attach to documents you can annotate: TEXT with textual
@@ -1170,6 +1207,7 @@ export default function ArtifactViewer({
                       ? (isArchived ? "unarchive (admin override)" : "archive (admin override)")
                       : (isArchived ? "unarchive" : "archive")
                   }
+                  onUploadVersion={uploadTarget ? () => upload.open() : undefined}
                   onEdit={editable ? () => { setComparing(false); setEditing(true); } : undefined}
                   editTitle={
                     isDiagram

@@ -59,6 +59,13 @@ func withAccess(emails ...string) artOpt {
 	return func(r *artifacts.CreateRequest) { r.AllowedAccess = &emails }
 }
 
+// allowTypeChange opts a fixture into a version that changes the slug's type.
+// Create refuses that by default, so any fixture deliberately turning a TEXT
+// document into an APP has to say so.
+func allowTypeChange() artOpt {
+	return func(r *artifacts.CreateRequest) { r.AllowTypeChange = true }
+}
+
 // withZipType makes the artifact a package-like type (PACKAGE or APP), whose
 // content must be a real zip — the create path validates the archive, so a
 // plain string body is rejected.
@@ -117,8 +124,7 @@ func createArtifact(t *testing.T, svc *artifacts.Service, creator, slugPrefix st
 
 // publishVersion pushes another version onto an existing slug as `who`,
 // optionally changing the artifact type — which is what the APP-at-serve case
-// needs, and which the create path permits because it never compares the
-// requested type to the previous version.
+// needs, and which requires allowTypeChange() alongside withZipType().
 func publishVersion(t *testing.T, svc *artifacts.Service, slug, who string, opts ...artOpt) artifacts.ArtifactInfo {
 	t.Helper()
 	req := artifacts.CreateRequest{
@@ -373,7 +379,8 @@ func TestResolveShare_AllRefusalsAreIdentical(t *testing.T) {
 			}
 			r := mint(t, svc, a.ArtifactID, owner, "slug")
 			publishVersion(t, svc, slug, writer,
-				withZipType(t, pgstore.TypeApp, map[string]string{"index.html": "<html>app</html>"}))
+				withZipType(t, pgstore.TypeApp, map[string]string{"index.html": "<html>app</html>"}),
+				allowTypeChange())
 			return tokenOf(r)
 		},
 	}

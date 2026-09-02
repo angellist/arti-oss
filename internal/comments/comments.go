@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -121,6 +122,7 @@ type editReq struct {
 // Mount attaches comment routes. Auth middleware is applied at a higher level.
 func (s *Service) Mount(r chi.Router) {
 	r.Get("/api/artifacts/{id}/comments", s.list)
+	r.Get("/api/artifacts/{id}/comments/people", s.mentionPeople)
 	r.Post("/api/artifacts/{id}/comments", s.create)
 	r.Post("/api/comments/{threadID}/replies", s.reply)
 	r.Post("/api/comments/{threadID}/resolve", s.resolve)
@@ -141,6 +143,7 @@ func (s *Service) MountEmbed(r chi.Router) {
 		})
 		g.Use(s.embedAuth)
 		g.Get("/api/embed/artifacts/{id}/comments", s.list)
+		g.Get("/api/embed/artifacts/{id}/comments/people", s.mentionPeople)
 		g.Post("/api/embed/artifacts/{id}/comments", s.create)
 		g.Post("/api/embed/comments/{threadID}/replies", s.reply)
 		g.Post("/api/embed/comments/{threadID}/resolve", s.resolve)
@@ -190,19 +193,32 @@ func (s *Service) canRead(ctx context.Context, artifactID uuid.UUID, caller stri
 	if err != nil {
 		return sqlc.Artifact{}, false, err
 	}
-	if ok, err := s.art.HasPermission(ctx, caller, rbac.ManageArtifacts); err != nil {
-		return sqlc.Artifact{}, false, err
-	} else if ok {
-		return row, true, nil
-	}
-	if row.DeletedAt.Valid && !strings.EqualFold(row.Creator, caller) {
-		return row, false, nil
-	}
-	groups, err := s.art.CallerGroups(ctx, caller)
+	ok, err := s.canReadRow(ctx, row, caller)
 	if err != nil {
 		return sqlc.Artifact{}, false, err
 	}
-	return row, pgstore.CanAccess(row, caller, groups), nil
+	return row, ok, nil
+}
+
+// canReadRow is the read rule itself, for a row already in hand. It is split
+// out because the mention paths ask it about somebody OTHER than the caller —
+// "may this person be told what this comment says?" — and that question must be
+// answered by the same rule that guards the read, not by a second one that can
+// drift from it.
+func (s *Service) canReadRow(ctx context.Context, row sqlc.Artifact, email string) (bool, error) {
+	if ok, err := s.art.HasPermission(ctx, email, rbac.ManageArtifacts); err != nil {
+		return false, err
+	} else if ok {
+		return true, nil
+	}
+	if row.DeletedAt.Valid && !strings.EqualFold(row.Creator, email) {
+		return false, nil
+	}
+	groups, err := s.art.CallerGroups(ctx, email)
+	if err != nil {
+		return false, err
+	}
+	return pgstore.CanAccess(row, email, groups), nil
 }
 
 // ─── handlers ────────────────────────────────────────────────────────
@@ -419,6 +435,106 @@ func (s *Service) setStatus(w http.ResponseWriter, r *http.Request, status strin
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ─── mention typeahead ───────────────────────────────────────────────
+
+// mentionPeopleLimit is how many suggestions the composer's @-menu shows.
+const mentionPeopleLimit = 10
+
+type mentionPerson struct {
+	Email string `json:"email"`
+	// CanRead is why this endpoint exists rather than the composer reusing
+	// GET /api/people: a suggestion that cannot read the document is a mention
+	// that will never be delivered, and the menu has to be able to say so.
+	CanRead bool `json:"can_read"`
+}
+
+type mentionPeopleResponse struct {
+	People []mentionPerson `json:"people"`
+	// CanGrant reports whether THIS caller, on THIS surface, may widen the
+	// document's access from the composer. It is computed server-side and is
+	// the only thing the client consults — the client never re-derives "am I
+	// the owner" from anything it happens to know.
+	CanGrant bool `json:"can_grant"`
+	MinQuery int  `json:"min_query"`
+}
+
+// mentionPeople answers the composer's @-menu: known addresses matching a
+// partial query, each flagged with whether it can read this document.
+//
+// Who sees what is decided here, not in the browser:
+//
+//   - A caller who cannot widen access is offered ONLY addresses that can
+//     already read the doc. Nothing is hidden from them that GET /api/people
+//     would not also return — the point is not to offer a mention that would
+//     silently go nowhere.
+//   - A caller who CAN widen access (the doc owner, or an admin) also sees the
+//     ones who cannot read it, flagged, so the composer can offer to grant.
+//   - On the embed surface CanGrant is always false. The embed token lives in
+//     `window.__ARTI_COMMENTS__` inside a SANDBOXED page of author-supplied
+//     HTML; that page can read it and call this API itself. Commenting on its
+//     own artifact is all that token has ever authorized, and an ACL change is
+//     not something a served page should be able to make on its viewer's
+//     behalf. Granting stays on the cookie-authed app surface, next to the
+//     access editor that does the same thing.
+func (s *Service) mentionPeople(w http.ResponseWriter, r *http.Request) {
+	_, row, caller, ok := s.gateArtifact(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	out := mentionPeopleResponse{People: []mentionPerson{}, MinQuery: pgstore.MinPeopleQuery}
+	// Commenting closed → there is no composer to feed, and no reason to answer
+	// a directory query through a document that isn't taking comments.
+	if !row.CommentsEnabled {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
+	_, embed := ctx.Value(embedArtifactKey{}).(string)
+	if !embed {
+		canGrant, err := s.art.IsDocOwner(ctx, row, caller)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out.CanGrant = canGrant
+	}
+
+	// Over-fetch: when the caller can't grant, non-readers are dropped below,
+	// and asking for exactly the display count would return a short menu on a
+	// restricted doc.
+	people, err := s.art.SearchKnownPeople(ctx, r.URL.Query().Get("q"), mentionPeopleLimit*2)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// A doc granted to `*` is readable by everyone, so the per-address check is
+	// skipped — that is the default for new artifacts, i.e. nearly every doc.
+	// An archived version is the exception: it narrows to its creator whatever
+	// the access list says, so it still goes the long way round.
+	openToAll := !row.DeletedAt.Valid && slices.Contains(row.AllowedAccess, "*")
+	for _, p := range people {
+		if len(out.People) == mentionPeopleLimit {
+			break
+		}
+		if strings.EqualFold(p.Email, caller) {
+			continue // mentioning yourself notifies nobody
+		}
+		canRead := openToAll
+		if !openToAll {
+			if canRead, err = s.canReadRow(ctx, row, p.Email); err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if !canRead && !out.CanGrant {
+			continue
+		}
+		out.People = append(out.People, mentionPerson{Email: p.Email, CanRead: canRead})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // ─── slack notifications ─────────────────────────────────────────────
 
 // fireNotify dispatches a Slack notification for a comment event AFTER the
@@ -486,6 +602,15 @@ func (s *Service) buildEvent(ctx context.Context, action slacknotify.Action, art
 		url += "#comment-" + linkComment.String()
 	}
 
+	// Mentions are read off the body that was just written, and split by the
+	// artifact's own read rule: a mention of somebody who cannot open the
+	// document is not notified (the DM quotes the document), only reported to
+	// the owner so the request reaches the one person who can act on it.
+	mentioned, unreachable, err := s.splitMentions(ctx, art, actor, body)
+	if err != nil {
+		return slacknotify.Event{}, err
+	}
+
 	kind, quote := anchorKindQuote(thread.Anchor)
 	pin := 0
 	if kind == "pin" {
@@ -501,13 +626,31 @@ func (s *Service) buildEvent(ctx context.Context, action slacknotify.Action, art
 		ArtifactTitle: art.Title,
 		ActorName:     actorName,
 		Actor:         actor,
-		Owner:         art.Creator,
+		Owner:         s.docOwner(ctx, art),
 		Participants:  participants,
+		Mentions:      mentioned,
+		Unreachable:   unreachable,
 		AnchorKind:    kind,
 		AnchorQuote:   quote,
 		PinNumber:     pin,
 		Body:          body,
 	}, nil
+}
+
+// docOwner returns the address that OWNS the document: the creator of the
+// slug's EARLIEST version, mirroring pgstore.IsDocOwner, falling back to this
+// row's creator for a slugless artifact (which has no lineage) or when the
+// lookup fails. Not row.Creator, which versioning reassigns to whoever pushed
+// the latest version — a delegated writer publishing v2 should not inherit the
+// owner's notifications, and the "somebody was mentioned who can't read this"
+// line is only actionable in the inbox of the person who can widen access.
+func (s *Service) docOwner(ctx context.Context, art sqlc.Artifact) string {
+	if art.NamedSlug != nil && *art.NamedSlug != "" {
+		if owner, err := s.art.SlugCreator(ctx, *art.NamedSlug); err == nil && owner != "" {
+			return owner
+		}
+	}
+	return art.Creator
 }
 
 // artifactURL builds the canonical viewer URL for an artifact row, mirroring

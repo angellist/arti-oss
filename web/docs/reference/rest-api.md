@@ -111,11 +111,49 @@ JSON body (`CreateRequest`, `internal/artifacts/dto.go:96`):
 | `metadata` | object | arbitrary |
 | `entry_point` | string | PACKAGE/APP launch file |
 | `ensure_new` | boolean | with `named_slug`: 409 if the slug already exists (no auto-version) |
+| `expected_latest_version` | int | with `named_slug`: publish only if the slug is still at this version (409 `stale-base-version` otherwise) |
+| `allow_type_change` | boolean | permit a version that changes `artifact_type` or the base of `content_type` (409 `type-change` without it) |
 | `allowed_access` | string[] | omit → inherit-from-prior or default `["*"]`; `[]` → creator-only |
 | `allowed_write` | string[] | omit → write follows read (or inherit); `[]` → creator-only writes. Unioned into `allowed_access` server-side |
 
-Response: `201` + `ArtifactInfo`. `409` if `ensure_new` and the slug exists; `413` if the
-body exceeds the size cap.
+Response: `201` + `ArtifactInfo`; `413` if the body exceeds the size cap. Three
+`409`s, distinguished by the envelope's `code`:
+
+| `code` | Meaning |
+|---|---|
+| `slug-exists` | `ensure_new` was set and the slug already has a version |
+| `stale-base-version` | the slug moved past `expected_latest_version` — re-read it and publish again |
+| `type-change` | this version would change the document's `artifact_type` or the base of its `content_type`; re-send with `allow_type_change` if that is the intent |
+
+Both new checks run against a fresh read inside the write transaction, so a
+publish that races another one is refused rather than silently layered on top of
+a version the caller never saw.
+
+**ATTACHMENT and slugs.** An `ATTACHMENT` posted with a `named_slug` by a person
+(browser session, their own CLI or MCP client) is a versioned document like any
+other type. From a **service credential** (an `arti_` API key, or a device-flow
+upload token) the same request is a `400`: those uploads are another app's files,
+and they stay slugless and creator-only. Omit `named_slug` and they always have.
+
+**Compressed bodies (`Content-Encoding: gzip`).** This endpoint and `/append`
+accept a gzip-compressed request body — gzip the JSON (or multipart) payload and
+send `Content-Encoding: gzip`; the server decompresses transparently before
+decoding. **Always use this for HTML or JavaScript uploads, even a single file:**
+Cloudflare's WAF inspects request bodies and false-matches its `<script>` rule on
+inline markup, returning `403` before the request reaches arti; a gzipped body
+carries no matchable markup. The `413` size cap applies to the **decompressed**
+size. PACKAGE/APP uploads are zip already, so they need no extra compression. The
+`arti` CLI and the web upload do this automatically for textual content; over raw
+`curl`, gzip the body yourself:
+
+```sh
+jq -n --arg c "$(base64 < report.html)" \
+  '{artifact_type:"TEXT",content_type:"text/html",named_slug:"q3-report",title:"Q3 Report",content_base64:$c}' \
+  | gzip | curl -sX POST https://arti.example.com/api/artifacts \
+      -H "Authorization: Bearer $ARTI_TOKEN" \
+      -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' \
+      --data-binary @-
+```
 
 ### POST `/api/artifacts/by-slug/{slug}/append`
 
@@ -127,7 +165,9 @@ Body (`AppendRequest`, `internal/artifacts/dto.go:146`): `content` (required),
 `separator` (default `"\n\n"`, `""` for none), `idempotency_key` (24h dedup per
 `(key, creator)`), `title`/`description`/`content_type`/`scopes`/`labels`/`allowed_access`
 (optional overrides; nil inherits). Response `200` + `ArtifactInfo`; replays carry
-`X-Arti-Idempotent-Replay: true`.
+`X-Arti-Idempotent-Replay: true`. Accepts a `Content-Encoding: gzip` body — gzip
+appended HTML/JS so the WAF can't false-match its `<script>` rule (see the create
+endpoint above).
 
 ### POST `/api/artifacts/suggest-metadata`
 

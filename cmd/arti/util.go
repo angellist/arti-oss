@@ -113,6 +113,26 @@ func isTextualCT(ct string) bool {
 	return false
 }
 
+// gzipUpload decides whether to gzip an upload body given the --compress flag
+// value ("auto"|"gzip"|"none") and the resolved content type. "auto" (the
+// default) compresses textual content — HTML, JS, JSON, plain text, SVG —
+// which is exactly what the Cloudflare WAF's <script> rule false-matches;
+// it leaves already-compressed uploads (zip PACKAGE/APP, images, PDFs) alone.
+func gzipUpload(compress, contentType string) bool {
+	switch compress {
+	case "none":
+		return false
+	case "gzip":
+		return true
+	default: // "auto" (and any unexpected value, treated as auto)
+		base := strings.ToLower(strings.TrimSpace(contentType))
+		if i := strings.IndexByte(base, ';'); i >= 0 {
+			base = strings.TrimSpace(base[:i])
+		}
+		return isTextualCT(contentType) || base == "image/svg+xml"
+	}
+}
+
 // markdownLine matches a line that carries a strong, unambiguous markdown
 // signal: an ATX heading (`# `), an unordered (`- `/`* `/`+ `) or ordered
 // (`1. `) list item, or a blockquote (`> `). The trailing space matters — it's

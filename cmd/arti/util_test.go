@@ -86,3 +86,33 @@ func TestIsTextualCT(t *testing.T) {
 		}
 	}
 }
+
+func TestGzipUpload(t *testing.T) {
+	cases := []struct {
+		compress string
+		ct       string
+		want     bool
+	}{
+		// auto: compress textual content (what the WAF <script> rule hits)
+		{"auto", "text/html", true},
+		{"auto", "text/html; charset=utf-8", true},
+		{"auto", "application/javascript", true},
+		{"auto", "text/markdown", true},
+		{"auto", "application/json", true},
+		{"auto", "image/svg+xml", true},
+		// auto: leave already-compressed / binary uploads alone
+		{"auto", "application/zip", false},
+		{"auto", "image/png", false},
+		{"auto", "application/pdf", false},
+		// explicit overrides win regardless of content type
+		{"gzip", "application/zip", true},
+		{"gzip", "image/png", true},
+		{"none", "text/html", false},
+		{"none", "application/javascript", false},
+	}
+	for _, c := range cases {
+		if got := gzipUpload(c.compress, c.ct); got != c.want {
+			t.Errorf("gzipUpload(%q, %q) = %v, want %v", c.compress, c.ct, got, c.want)
+		}
+	}
+}

@@ -36,6 +36,14 @@ if (cfg && cfg.artifactId && cfg.token) {
     reopen: (tid) => call<void>("POST", `/comments/${tid}/reopen`),
     del: (tid, cid) => call<void>("DELETE", `/comments/${tid}/comments/${cid}`),
     edit: (tid, cid, b) => call("PUT", `/comments/${tid}/comments/${cid}`, { body: b }),
+    people: (id, q) => call("GET", `/artifacts/${id}/comments/people?q=${encodeURIComponent(q)}`),
+    // No grantRead: this bundle runs INSIDE the sandboxed page it comments on,
+    // and that page can read the token above out of window.__ARTI_COMMENTS__.
+    // Commenting on its own artifact is all that token has ever authorized —
+    // changing who can read the doc is not something author-supplied HTML gets
+    // to do on its viewer's behalf. The server refuses it on this surface too
+    // (can_grant is false for every embed caller), so the menu simply never
+    // offers a no-access suggestion here.
   };
 
   const start = () =>

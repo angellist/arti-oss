@@ -37,6 +37,7 @@ type CLI struct {
 	Whoami   WhoamiCmd   `cmd:"" help:"print logged-in email"`
 	Add      AddCmd      `cmd:"" help:"create or version an artifact"`
 	Append   AppendCmd   `cmd:"" help:"append text to a slug (atomic; auto-creates v1 if absent)"`
+	Edit     EditCmd     `cmd:"" help:"edit metadata in place (title/description/labels/scopes/comments; no new version)"`
 	Access   AccessCmd   `cmd:"" help:"show or edit access control (applies to all versions of the document)"`
 	Get      GetCmd      `cmd:"" help:"fetch by UUID or slug (UUID/path/in/zip for one file)"`
 	Rm       RmCmd       `cmd:"" help:"archive by UUID or slug"`

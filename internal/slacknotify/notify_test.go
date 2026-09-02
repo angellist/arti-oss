@@ -95,7 +95,7 @@ func TestRender(t *testing.T) {
 		ev.AnchorKind = "text"
 		ev.AnchorQuote = "the quoted text"
 		ev.Body = "line one\nline two"
-		got := render(ev)
+		got := render(ev, false, false)
 		want := "*Tian* replied on <https://arti/s/doc#comment-abc|My Doc>\n" +
 			"> _the quoted text_\n💬 line one\nline two"
 		if got != want {
@@ -109,7 +109,7 @@ func TestRender(t *testing.T) {
 		ev.AnchorKind = "pin"
 		ev.PinNumber = 3
 		ev.Body = "look here"
-		if got := render(ev); !strings.Contains(got, "📍 Pin #3") || !strings.Contains(got, "💬 look here") {
+		if got := render(ev, false, false); !strings.Contains(got, "📍 Pin #3") || !strings.Contains(got, "💬 look here") {
 			t.Fatalf("pin render missing parts: %q", got)
 		}
 	})
@@ -119,7 +119,7 @@ func TestRender(t *testing.T) {
 		ev.Action = ActionResolve
 		ev.AnchorKind = "doc"
 		ev.Body = "" // resolve/reopen carry no new comment text
-		got := render(ev)
+		got := render(ev, false, false)
 		if strings.Contains(got, "💬") {
 			t.Fatalf("resolve should have no comment body, got: %q", got)
 		}
@@ -134,7 +134,7 @@ func TestRender(t *testing.T) {
 		ev.ArtifactTitle = "A < B & C"
 		ev.AnchorKind = "doc"
 		ev.Body = "x < y"
-		got := render(ev)
+		got := render(ev, false, false)
 		if !strings.Contains(got, "A &lt; B &amp; C") || !strings.Contains(got, "💬 x &lt; y") {
 			t.Fatalf("escaping failed: %q", got)
 		}
@@ -148,7 +148,7 @@ func TestRender(t *testing.T) {
 		ev.Action = ActionReply
 		ev.AnchorKind = "text"
 		ev.AnchorQuote = strings.Repeat("a", 200)
-		if got := render(ev); !strings.Contains(got, "…") {
+		if got := render(ev, false, false); !strings.Contains(got, "…") {
 			t.Fatalf("expected truncated quote with ellipsis, got: %q", got)
 		}
 	})
@@ -254,4 +254,96 @@ func TestCache_HitMissExpiry(t *testing.T) {
 	if _, _, ok := c.get("a@x.com"); !ok {
 		t.Fatal("hit entry should still be live")
 	}
+}
+
+// Mentions widen the recipient set beyond owner+participants: being named is
+// itself the reason to be told, so a mentioned person is notified even though
+// they have never touched the thread.
+func TestRecipientsWithMentions(t *testing.T) {
+	const (
+		owner = "owner@x.com"
+		actor = "actor@x.com"
+		p1    = "p1@x.com"
+	)
+	cases := []struct {
+		name string
+		ev   Event
+		want []string
+	}{
+		{
+			name: "a mentioned stranger is notified alongside the owner",
+			ev:   Event{Action: ActionNewComment, Owner: owner, Actor: actor, Participants: []string{actor}, Mentions: []string{"new@x.com"}},
+			want: []string{owner, "new@x.com"},
+		},
+		{
+			name: "mentioning yourself notifies nobody extra",
+			ev:   Event{Action: ActionReply, Owner: owner, Actor: actor, Participants: []string{actor}, Mentions: []string{"ACTOR@x.com"}},
+			want: []string{owner},
+		},
+		{
+			name: "a mentioned participant is notified once",
+			ev:   Event{Action: ActionReply, Owner: owner, Actor: actor, Participants: []string{p1}, Mentions: []string{"P1@x.com"}},
+			want: []string{owner, p1},
+		},
+		{
+			name: "unreachable mentions are never recipients",
+			ev:   Event{Action: ActionNewComment, Owner: owner, Actor: actor, Unreachable: []string{"outsider@y.com"}},
+			want: []string{owner},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := recipients(tc.ev)
+			want := append([]string(nil), tc.want...)
+			sort.Strings(want)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("recipients() = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestRenderMentions(t *testing.T) {
+	base := Event{
+		Action:        ActionReply,
+		ArtifactURL:   "https://arti/s/doc#comment-abc",
+		ArtifactTitle: "My Doc",
+		ActorName:     "Tian",
+		Body:          "have a look @alice@x.com",
+		Mentions:      []string{"alice@x.com"},
+	}
+
+	t.Run("a mentioned recipient leads with the mention, not the action", func(t *testing.T) {
+		got := render(base, true, false)
+		if !strings.Contains(got, "*Tian* mentioned you in a comment on") || strings.Contains(got, "replied") {
+			t.Fatalf("mention verb missing:\n%s", got)
+		}
+	})
+
+	t.Run("everyone else still sees the action verb", func(t *testing.T) {
+		got := render(base, false, false)
+		if !strings.Contains(got, "*Tian* replied on") {
+			t.Fatalf("action verb missing:\n%s", got)
+		}
+	})
+
+	t.Run("undeliverable mentions are shown to the owner only", func(t *testing.T) {
+		ev := base
+		ev.Unreachable = []string{"outsider@y.com"}
+		owner := render(ev, false, true)
+		if !strings.Contains(owner, "outsider@y.com") || !strings.Contains(owner, "not notified") {
+			t.Fatalf("owner was not told the mention went nowhere:\n%s", owner)
+		}
+		// A participant learning that an outsider was named leaks both the
+		// address and the fact somebody tried to pull them in.
+		if other := render(ev, true, false); strings.Contains(other, "outsider@y.com") {
+			t.Fatalf("non-owner recipient saw the undelivered mention:\n%s", other)
+		}
+	})
+
+	t.Run("no undeliverable mentions means no footer", func(t *testing.T) {
+		if got := render(base, false, true); strings.Contains(got, "⚠️") {
+			t.Fatalf("unexpected footer:\n%s", got)
+		}
+	})
 }

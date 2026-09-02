@@ -32,6 +32,16 @@ type AddCmd struct {
 	Scope       []string `help:"scope (repeatable, e.g. a:bt-auto-route)"`
 	Label       []string `help:"label (repeatable)"`
 	EnsureNew   bool     `name:"ensure-new" help:"with --slug: fail if the slug already exists (no auto-versioning)"`
+	// AllowTypeChange opts in to a publish that changes the slug's
+	// artifact_type or content_type. Without it the server rejects such a
+	// version (409), so `arti add --slug notes page.html` can't silently turn
+	// a markdown document into an HTML one.
+	AllowTypeChange bool `name:"allow-type-change" help:"with --slug: allow this version to change the document's type or content type"`
+	// Compress gzips the request body so the Cloudflare WAF (which inspects
+	// request bodies) can't false-match its <script> rule on an HTML/JS upload
+	// and 403 it. "auto" compresses textual content and skips already-
+	// compressed uploads (zip/image/pdf); "gzip" forces it; "none" disables it.
+	Compress string `name:"compress" enum:"auto,gzip,none" default:"auto" help:"gzip upload body: auto (text/HTML/JS) | gzip | none"`
 	// Access defaults: nil at flag-parse time means "not provided" —
 	// server then inherits from prior version, or falls back to
 	// per-user default (CLI config file) or finally server default '*'.
@@ -187,6 +197,9 @@ func (a *AddCmd) Run(cli *CLI) error {
 	if a.EnsureNew {
 		payload["ensure_new"] = true
 	}
+	if a.AllowTypeChange {
+		payload["allow_type_change"] = true
+	}
 	// Access patterns. --private forces creator-only by sending an
 	// explicit empty array; it overrides client config and prior-version
 	// inheritance and can't be combined with --access. Otherwise the
@@ -224,7 +237,11 @@ func (a *AddCmd) Run(cli *CLI) error {
 	}
 
 	var resp map[string]any
-	if err := c.DoJSON("POST", "/api/artifacts", payload, &resp); err != nil {
+	post := c.DoJSON
+	if gzipUpload(a.Compress, contentType) {
+		post = c.DoJSONGzip
+	}
+	if err := post("POST", "/api/artifacts", payload, &resp); err != nil {
 		return err
 	}
 

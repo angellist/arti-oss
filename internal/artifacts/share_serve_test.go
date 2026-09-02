@@ -112,7 +112,8 @@ func (rg *shareRig) tokenFor(state string) string {
 		}
 		r := mint(rg.t, rg.svc, a.ArtifactID, shareOwner, "slug")
 		publishVersion(rg.t, rg.svc, slug, "writer@example.com",
-			withZipType(rg.t, pgstore.TypeApp, map[string]string{"index.html": "<html>app</html>"}))
+			withZipType(rg.t, pgstore.TypeApp, map[string]string{"index.html": "<html>app</html>"}),
+			allowTypeChange())
 		return tokenOf(r)
 	}
 	rg.t.Fatalf("unknown refusal state %q", state)

@@ -94,6 +94,26 @@ curl -sX POST https://arti.example.com/api/artifacts \
   -F 'labels=design'
 ```
 
+### HTML / JavaScript (gzip past the WAF)
+
+Cloudflare's WAF inspects request bodies and false-matches its `<script>` rule on
+inline HTML/JS, so a plain HTML upload can `403` before it reaches arti. Gzip the
+body and send `Content-Encoding: gzip` — the server decompresses transparently,
+and the compressed bytes carry no markup for the WAF to match. Do this for **any**
+HTML/JS upload, even a single file (the `arti` CLI and web upload do it
+automatically for textual content; PACKAGE/APP zips need nothing):
+
+```sh
+jq -n --arg c "$(base64 < report.html)" \
+  '{artifact_type:"TEXT",content_type:"text/html",named_slug:"q3-report",title:"Q3 Report",content_base64:$c}' \
+  | gzip | curl -sX POST https://arti.example.com/api/artifacts \
+      -H "Authorization: Bearer $TOKEN" \
+      -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' \
+      --data-binary @-
+```
+
+The `413` size cap applies to the decompressed size.
+
 ### PACKAGE / APP
 
 A `PACKAGE` is a zip; an `APP` is a zip that also contains `arti-app.json`

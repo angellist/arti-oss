@@ -101,9 +101,13 @@ type metaResp struct {
 	SHA256       *string  `json:"sha256"`
 	Scopes       []string `json:"scopes"`
 	Labels       []string `json:"labels"`
-	CreatedAt    string   `json:"created_at"`
-	Creator      string   `json:"creator"`
-	URL          string   `json:"url"`
+	// Pointer so "the server didn't say" is distinguishable from "off" —
+	// `arti edit` reports the comment switch and shouldn't claim it is
+	// disabled when talking to a server that omits the field.
+	CommentsEnabled *bool  `json:"comments_enabled"`
+	CreatedAt       string `json:"created_at"`
+	Creator         string `json:"creator"`
+	URL             string `json:"url"`
 }
 
 func fetchMeta(c *Client, ident string, version int) (metaResp, error) {

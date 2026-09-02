@@ -104,9 +104,55 @@ context. It is fire-and-forget: neither the latency nor a Slack failure ever
 touches the request, and with no token configured every hook is a no-op.
 
 The event gathers the artifact (owner, title, permalink), the thread's participants
-(distinct comment authors), the anchor kind and quoted text, and the pin number;
-the notifier then resolves Slack users by email and sends the DMs. Permalinks are
-the artifact viewer URL with a `#comment-<id>` hash, which the overlay opens to that
-exact comment on load.
+(distinct comment authors), the mentions, the anchor kind and quoted text, and the
+pin number; the notifier then resolves Slack users by email and sends the DMs.
+Permalinks are the artifact viewer URL with a `#comment-<id>` hash, which the overlay
+opens to that exact comment on load.
+
+The owner here is the **document's** owner — the creator of the slug's earliest
+version, the same identity `pgstore.IsDocOwner` gates ACL changes on — not the
+creator of the version being commented on, which versioning reassigns to whoever
+pushed it.
+
+## Mentions
+
+Writing `@someone@example.com` in a comment notifies that person, whether or not
+they have ever touched the thread. The composer offers a typeahead on `@`, but the
+mention itself is **plain text in the body**: the server parses the stored body
+(`internal/comments/mentions.go`) and derives the recipients from it, so what the
+thread reads is exactly who was told. There is no separate recipient field a client
+could disagree with the document about.
+
+A mention is only delivered to somebody who can **read** the artifact — the DM
+quotes the title, the highlighted passage and the comment text, so mentioning an
+address outside `allowed_access` would hand them the content. Undeliverable
+mentions are not silently dropped: they are reported in the owner's own DM
+("… also mentioned x@y.com, who can't read this doc — not notified"), the owner
+being the one person who can grant the access that would fix it.
+
+`GET /api/artifacts/{id}/comments/people?q=` feeds the typeahead and decides all of
+this server-side:
+
+| caller | sees | may grant |
+| --- | --- | --- |
+| doc owner / admin, in-app | readers, plus non-readers flagged `no access` | yes — one explicit "grant & mention" step, `POST /api/artifacts/{id}/access/grant-read` |
+| anyone else, in-app | readers only | no |
+| any caller, embed surface | readers only | no |
+
+Mentioning never grants access implicitly. Widening a document's ACL is refused for
+anyone but its owner or an admin everywhere else in arti, and a comment box is not a
+back door around that. The grant endpoint is additive (one address, no patterns,
+never touches `allowed_write`) and re-applies the same authority gate as the access
+editor.
+
+The embed surface never offers granting, whatever the caller's authority: that
+bundle runs inside a **sandboxed page of author-supplied HTML** which can read its
+own embed token out of `window.__ARTI_COMMENTS__`. Commenting on its own artifact is
+all that token has ever authorized, and an ACL change is not something a served page
+gets to make on its viewer's behalf.
+
+Editing a comment fires no notification, so a mention added by an edit notifies
+nobody — the composer's `@` menu is deliberately absent from the edit box rather
+than promising otherwise.
 
 For where this lives in the code, see the [Codebase map](../development/codebase-map.md).

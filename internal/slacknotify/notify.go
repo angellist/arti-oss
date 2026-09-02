@@ -53,8 +53,20 @@ type Event struct {
 	ArtifactTitle string
 	ActorName     string   // display name of whoever triggered the event
 	Actor         string   // actor email — always excluded from recipients
-	Owner         string   // artifact owner (creator) email
+	Owner         string   // artifact owner email — the doc's owner, not the latest version's pusher
 	Participants  []string // distinct prior commenter emails on the thread
+
+	// Mentions are addresses @-mentioned in Body that CAN read the artifact.
+	// They are notified whether or not they have ever touched the thread —
+	// being named is the point — and their DM leads with the mention rather
+	// than the action, because "Alice mentioned you" is why they should look.
+	Mentions []string
+	// Unreachable are addresses @-mentioned in Body that CANNOT read the
+	// artifact. They are never notified (the DM quotes the document). They are
+	// carried here only so the owner's own DM can say the mention went nowhere
+	// — the owner being the one person who can grant the access that would fix
+	// it. Nobody else sees this list.
+	Unreachable []string
 
 	AnchorKind  string // "doc" | "text" | "pin"
 	AnchorQuote string // text-anchor quote, raw (untruncated, unescaped)
@@ -94,12 +106,19 @@ func (n *Notifier) Notify(ctx context.Context, ev Event) {
 	if n == nil {
 		return
 	}
-	msg := render(ev) // identical for every recipient
+	// The message is per-recipient, not shared: a mentioned person is told they
+	// were mentioned, and only the owner is told a mention went nowhere.
+	mentioned := map[string]bool{}
+	for _, m := range ev.Mentions {
+		mentioned[normEmail(m)] = true
+	}
+	owner := normEmail(ev.Owner)
 	for _, email := range recipients(ev) {
 		userID, ok := n.resolve(ctx, email)
 		if !ok {
 			continue
 		}
+		msg := render(ev, mentioned[email], email == owner)
 		if err := n.client.PostDM(ctx, userID, msg); err != nil {
 			n.log.Warn("slacknotify: post DM failed", "email", email, "err", err)
 		}
@@ -148,14 +167,24 @@ func recipients(ev Event) []string {
 			add(p)
 		}
 	}
+	// Mentions are added for every action. In practice only the actions that
+	// carry a body can produce any (resolve/reopen send an empty body, which
+	// has nothing to mention), so this needs no action guard of its own —
+	// and adding one would silently drop a mention if a future action starts
+	// carrying text.
+	for _, m := range ev.Mentions {
+		add(m)
+	}
 	sort.Strings(out)
 	return out
 }
 
 func normEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
-// render builds the Slack mrkdwn message for an event.
-func render(ev Event) string {
+// render builds the Slack mrkdwn message for one recipient. `mentioned` says
+// this recipient was named in the body; `isOwner` says they own the document
+// (and so are the only one shown mentions that could not be delivered).
+func render(ev Event, mentioned, isOwner bool) string {
 	title := strings.TrimSpace(ev.ArtifactTitle)
 	if title == "" {
 		title = "an artifact"
@@ -165,14 +194,42 @@ func render(ev Event) string {
 		link = fmt.Sprintf("<%s|%s>", ev.ArtifactURL, slackEscape(title))
 	}
 
+	// Being named beats what the naming was attached to: someone who was
+	// mentioned is told that first, since it is why the DM is worth opening.
+	verb := ev.Action.verb()
+	if mentioned {
+		verb = "mentioned you in a comment"
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "*%s* %s on %s\n%s", slackEscape(ev.ActorName), ev.Action.verb(), link, anchorLabel(ev))
+	fmt.Fprintf(&b, "*%s* %s on %s\n%s", slackEscape(ev.ActorName), verb, link, anchorLabel(ev))
 	// The comment text isn't blockquoted (the highlighted passage is — see
 	// anchorLabel); it's the person's voice, prefixed with a speech emoji.
 	if body := strings.TrimSpace(ev.Body); body != "" {
 		b.WriteString("\n💬 " + slackEscape(body))
 	}
+	if isOwner {
+		if line := unreachableLine(ev); line != "" {
+			b.WriteString("\n" + line)
+		}
+	}
 	return b.String()
+}
+
+// unreachableLine renders the owner-only footer naming mentions that were not
+// delivered because the address cannot read the document. It names the
+// addresses rather than counting them: the owner's next move is to grant one of
+// them access, and a count doesn't tell them who.
+func unreachableLine(ev Event) string {
+	if len(ev.Unreachable) == 0 {
+		return ""
+	}
+	who := make([]string, 0, len(ev.Unreachable))
+	for _, e := range ev.Unreachable {
+		who = append(who, slackEscape(e))
+	}
+	return fmt.Sprintf("⚠️ %s also mentioned %s, who can't read this doc — not notified.",
+		slackEscape(ev.ActorName), strings.Join(who, ", "))
 }
 
 // anchorLabel renders the anchor context line. A text highlight is shown as an

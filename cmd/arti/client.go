@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,10 +56,37 @@ func newPublicClient(baseURL string) *Client {
 
 // DoJSON encodes body, posts with Bearer, decodes into `into`. `body` may be nil.
 func (c *Client) DoJSON(method, path string, body any, into any) error {
+	return c.doJSON(method, path, body, into, false)
+}
+
+// DoJSONGzip is DoJSON with the request body gzip-compressed and sent with
+// `Content-Encoding: gzip`. Used for HTML/JS uploads so the Cloudflare WAF
+// (which inspects request bodies) can't false-match the `<script>` rule.
+// Only for routes the server decompresses (artifact create/append); the
+// server transparently decodes the body before the handler sees it.
+func (c *Client) DoJSONGzip(method, path string, body any, into any) error {
+	return c.doJSON(method, path, body, into, true)
+}
+
+func (c *Client) doJSON(method, path string, body any, into any, gzipBody bool) error {
 	var rdr io.Reader
+	var contentEncoding string
 	if body != nil {
 		b, _ := json.Marshal(body)
-		rdr = bytes.NewReader(b)
+		if gzipBody {
+			var buf bytes.Buffer
+			zw := gzip.NewWriter(&buf)
+			if _, err := zw.Write(b); err != nil {
+				return err
+			}
+			if err := zw.Close(); err != nil {
+				return err
+			}
+			rdr = &buf
+			contentEncoding = "gzip"
+		} else {
+			rdr = bytes.NewReader(b)
+		}
 	}
 	req, _ := http.NewRequest(method, c.Base+path, rdr)
 	if c.Token != "" {
@@ -66,6 +94,9 @@ func (c *Client) DoJSON(method, path string, body any, into any) error {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+		if contentEncoding != "" {
+			req.Header.Set("Content-Encoding", contentEncoding)
+		}
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {

@@ -133,6 +133,22 @@ the edit applies to every version of the document. With neither flag, access is
 inherited from a prior version or falls back to the server default. See
 [Authentication](../architecture/auth.md) for the access model.
 
+### Fix metadata without re-publishing
+
+Published something bare, or with the wrong label? `arti edit` changes title,
+description, labels, scopes and the comment switch in place — no new version,
+and no need for the original file:
+
+```sh
+arti edit q1-notes --description 'Q1 fund notes, superseded by q2-notes'
+arti edit q1-notes --label report --label q1 --label funds   # replaces the set
+arti edit q1-notes --description ''                          # clear it
+```
+
+`--label` and `--scope` replace the whole set rather than adding to it, so pass
+every value you want to keep. Content and artifact type stay immutable — to
+change the body, `arti add` onto the same `--slug`.
+
 ### Upload a directory (PACKAGE)
 
 Point `arti add` at a directory and it's deterministically zipped into a PACKAGE

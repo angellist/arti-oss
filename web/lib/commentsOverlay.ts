@@ -15,6 +15,8 @@ import {
   reopenThread,
   deleteComment as apiDeleteComment,
   editComment as apiEditComment,
+  mentionPeople,
+  grantReadAccess,
   type ThreadDTO,
   type CommentDTO,
 } from "./arti";
@@ -28,6 +30,7 @@ import {
   RAIL_WIDTH,
   type Shift,
 } from "./commentsGeometry";
+import { createMentionMenu, mentionHTML, MENTION_CSS, type MentionResult } from "./mentionMenu";
 
 // The overlay talks to the server through this small interface so it can be
 // driven by either the cookie-based client (in-app viewer) or a token-based
@@ -40,6 +43,14 @@ export interface CommentsApi {
   reopen(threadId: string): Promise<void>;
   del(threadId: string, commentId: string): Promise<void>;
   edit(threadId: string, commentId: string, body: string): Promise<CommentDTO>;
+  // people backs the composer's @-menu. Optional: a client that doesn't
+  // implement it simply has no mention typeahead, and an address typed by hand
+  // still notifies — the server parses the body either way.
+  people?(artifactId: string, q: string): Promise<MentionResult>;
+  // grantRead widens the doc's access by one address, for the "you mentioned
+  // someone who can't read this" step. Absent on the embed surface, where an
+  // ACL change is not something a served page may make on its viewer's behalf.
+  grantRead?(artifactId: string, email: string): Promise<void>;
 }
 
 const cookieApi: CommentsApi = {
@@ -50,6 +61,8 @@ const cookieApi: CommentsApi = {
   reopen: reopenThread,
   del: apiDeleteComment,
   edit: apiEditComment,
+  people: mentionPeople,
+  grantRead: grantReadAccess,
 };
 
 export interface OverlayOpts {
@@ -61,6 +74,12 @@ export interface OverlayOpts {
 }
 
 const AV = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+
+// Comment bodies are rendered through this rather than AV directly, so an
+// @-mention reads as one in the thread and not as a raw address. Display only:
+// the stored body is the plain text the author typed, and the edit box still
+// shows exactly that.
+const BODY = (s: string) => mentionHTML(s, AV);
 
 // One icon language for the card's top-right controls: paths drawn in a 24
 // box, 1.6 stroke, round joins — so edit / delete / link / minimize match in
@@ -284,7 +303,113 @@ const CSS = `
    content shifts. --ac-shift is computed per doc/viewport. */
 html.ac-doc-shift [data-arti-doc]{transform:translateX(calc(-1 * var(--ac-shift,0px)))}
 html.ac-doc-shift [data-arti-topbar]>*:first-child{transform:translateX(calc(-1 * var(--ac-shift-tb,0px)))}
+/* ── Dark host pages ────────────────────────────────────────────────────
+   Everything above is drawn for a light page: translucent WHITE surfaces
+   (.6 alpha over a backdrop blur) carrying near-black text. Injected into a
+   dark served artifact, that card doesn't read as white — it reads as a flat
+   mid-gray slab, because what the blur mixes into the white is the dark page
+   behind it, and the ink on top loses most of its contrast.
+   So the surfaces flip. Only color changes here: no geometry, opacity or
+   transition is touched, so the two themes can't drift in layout — which
+   matters because commentsGeometry.ts computes the document shift from
+   CARD_WIDTH and would be wrong if a dark rule resized a box.
+   The switch is the ac-dark class on <html>, set at mount from the HOST
+   page's own background (see hostIsDark) rather than from
+   prefers-color-scheme: the in-app viewer is light-only, so keying the
+   overlay off the OS preference would darken these cards on a white page. A
+   served page that honours prefers-color-scheme paints its own dark body,
+   which hostIsDark reads directly. */
+html.ac-dark .ac-card,html.ac-dark .ac-panel,html.ac-dark .ac-min{background:rgba(38,38,36,.72);border-color:rgba(255,255,255,.14)}
+html.ac-dark .ac-card{box-shadow:0 6px 24px -10px rgba(0,0,0,.7)}
+html.ac-dark .ac-panel{box-shadow:0 10px 34px -12px rgba(0,0,0,.75)}
+html.ac-dark .ac-min{color:#bdbcb6;box-shadow:0 4px 16px -8px rgba(0,0,0,.6)}
+html.ac-dark .ac-min:hover{border-color:rgba(255,255,255,.3);color:#f2f1ee;box-shadow:0 7px 20px -8px rgba(0,0,0,.75)}
+html.ac-dark .ac-card.ac-active{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(37,99,235,.4),0 10px 30px -12px rgba(0,0,0,.75)}
+html.ac-dark .ac-card.ac-draft{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(37,99,235,.4)}
+html.ac-dark .ac-who{color:#f2f1ee}
+html.ac-dark .ac-text,html.ac-dark .ac-prow .ac-psnip{color:#dcdbd6}
+html.ac-dark .ac-prow:hover{background:rgba(255,255,255,.07)}
+html.ac-dark .ac-chip{color:#bdbcb6;background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.1)}
+html.ac-dark .ac-reply textarea,html.ac-dark .ac-edit-input{color:#ececea;background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.14)}
+html.ac-dark .ac-reply textarea::placeholder{color:rgba(236,236,234,.42)}
+html.ac-dark .ac-reply textarea:focus{border-color:#3b82f6;background:rgba(255,255,255,.1)}
+html.ac-dark .ac-edit-input{border-color:#3b82f6}
+html.ac-dark .ac-mini{color:#dcdbd6;background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.14)}
+html.ac-dark .ac-mini.ac-primary{background:#2563eb;border-color:#2563eb;color:#fff}
+html.ac-dark .ac-mini.ac-primary:disabled{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.12);color:#75746f}
+html.ac-dark .ac-ico{color:#8b8a85}
+html.ac-dark .ac-ico:hover{color:#f2f1ee;background:rgba(255,255,255,.12)}
+html.ac-dark .ac-ico:focus-visible{outline-color:rgba(255,255,255,.3)}
+html.ac-dark .ac-ico.ac-copied{color:#6ee7a8}
+html.ac-dark .ac-ico.ac-resolve:hover{color:#4ade80;background:rgba(34,197,94,.16)}
+html.ac-dark .ac-sep{background:rgba(255,255,255,.16)}
+html.ac-dark .ac-fabs{background:rgba(32,32,30,.78);border-color:rgba(255,255,255,.14)}
+html.ac-dark .ac-fab+.ac-fab{border-top-color:rgba(255,255,255,.1)}
+html.ac-dark .ac-fab:hover{color:#f2f1ee;background:rgba(255,255,255,.08)}
+html.ac-dark .ac-grip{color:#6b6a66;border-bottom-color:rgba(255,255,255,.1)}
+html.ac-dark .ac-grip:hover{color:#dcdbd6;background:rgba(255,255,255,.08)}
+html.ac-dark .ac-fabs.ac-dragging .ac-grip{color:#f2f1ee}
+html.ac-dark .ac-badge{background:rgba(255,255,255,.06);border-top-color:rgba(255,255,255,.1)}
+html.ac-dark .ac-lb-stage{background:#1f1f1d}
+html.ac-dark .ac-lb-card{background:#232321;box-shadow:0 16px 44px -16px rgba(0,0,0,.75)}
+html.ac-dark .ac-lb-close,html.ac-dark .ac-lb-cmt{background:rgba(40,40,38,.92);color:#ececea}
+html.ac-dark .ac-lb-cmt.ac-on{background:#2563eb;color:#fff}
+/* The quote highlights live in the HOST page's DOM and inherit ITS text color,
+   which on a dark page is near-white — unreadable once the active mark paints
+   solid yellow behind it. Pin the ink instead of the background: the yellow is
+   the overlay's one fixed signal color and reads the same on either theme. */
+html.ac-dark .ac-hl.ac-active{color:#1c1c1a}
+html.ac-dark .ac-cmt.ac-flash{animation-name:ac-flash-dark}
+@keyframes ac-flash-dark{0%,25%{background:rgba(250,204,21,.24)}100%{background:transparent}}
 `;
+
+// Perceived brightness of an rgb()/rgba() computed color, 0 (black) to 1
+// (white). Returns null when the color is absent or effectively transparent —
+// i.e. when it tells us nothing about what will actually be painted there.
+function brightness(color: string): number | null {
+  const m = /^rgba?\(([^)]+)\)/.exec(color || "");
+  if (!m) return null;
+  const p = m[1].split(/[,/]+/).map((s) => parseFloat(s.trim()));
+  if (p.length < 3 || p.slice(0, 3).some((n) => Number.isNaN(n))) return null;
+  if (p.length > 3 && !Number.isNaN(p[3]) && p[3] < 0.5) return null; // see-through: not the real backdrop
+  return (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]) / 255;
+}
+
+// Is the page this overlay was injected into a dark one? Asked of the page
+// itself, in descending order of directness, because the overlay serves both
+// arti's light-only viewer and arbitrary served HTML:
+//   1. <body>'s own background — what a served markdown page and the app both set;
+//   2. <html>'s, for a page that paints the canvas there instead;
+//   3. <body>'s text color, for an app that backgrounds a full-bleed wrapper
+//      but still sets light ink on the body;
+//   4. the UA canvas, when nothing on the page has painted anything at all.
+// Known gap: a page that leaves body and html fully transparent, inherits its
+// text color, and paints dark only on an inner element stays on the light
+// palette.
+function hostIsDark(): boolean {
+  for (const node of [document.body, document.documentElement]) {
+    if (!node) continue;
+    const bg = brightness(getComputedStyle(node).backgroundColor);
+    if (bg !== null) return bg < 0.5;
+  }
+  if (document.body) {
+    const ink = brightness(getComputedStyle(document.body).color);
+    if (ink !== null && ink > 0.6) return true;
+  }
+  // What shows through an unpainted page is the UA canvas, and the OS
+  // preference does NOT decide that on its own: a page that never declared
+  // color-scheme keeps a white canvas on a dark machine. So the preference
+  // only gets a vote once the page has asked for one, and a dark-only
+  // declaration is already the answer whatever the machine prefers.
+  const declared = (getComputedStyle(document.documentElement).colorScheme || "").toLowerCase();
+  if (!/\bdark\b/.test(declared)) return false;
+  if (!/\blight\b/.test(declared)) return true;
+  try {
+    return !!window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+  } catch {
+    return false;
+  }
+}
 
 interface Draft {
   type: "text" | "pin";
@@ -297,6 +422,16 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   const { container, artifactId, me } = opts;
   const api = opts.api ?? cookieApi;
   const allowPin = !!opts.allowPin && !!container;
+
+  // The @-menu is one instance shared by every composer on the page: only one
+  // box has the caret at a time, so a menu per textarea would be several
+  // hidden dropdowns and several debounce timers for one visible thing.
+  const mentions = api.people
+    ? createMentionMenu({
+        search: (q) => api.people!(artifactId, q),
+        grantRead: api.grantRead ? (email) => api.grantRead!(artifactId, email) : undefined,
+      })
+    : null;
 
   // Position everything below arti's sticky toolbar (if present) so the
   // cards / panel sit inside the document view, not over the header.
@@ -311,9 +446,20 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   if (!document.getElementById("ac-style")) {
     const st = document.createElement("style");
     st.id = "ac-style";
-    st.textContent = CSS;
+    st.textContent = CSS + MENTION_CSS;
     document.head.appendChild(st);
   }
+
+  // Light or dark chrome, decided from the page we were injected into (see the
+  // dark block in CSS). The flag rides <html> like ac-doc-shift does, so it
+  // reaches every root we append there — the layer, the rail, the selection
+  // button — plus the lightbox and toast, which are created later.
+  const applyTheme = () => document.documentElement.classList.toggle("ac-dark", hostIsDark());
+  applyTheme();
+  // A served page's dark styles usually come from its own prefers-color-scheme
+  // rules, so its background flips under us when the OS theme is switched.
+  const scheme = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  scheme?.addEventListener?.("change", applyTheme);
 
   // DOM roots
   const layer = el("div", "ac-layer");
@@ -349,6 +495,10 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   let dead = false;
   const mediaCleanups: Array<() => void> = []; // undo the per-media zoom wiring on teardown
   let closeLightbox: (() => void) | null = null; // close + unbind an open lightbox (used by teardown)
+  // The open lightbox's Escape handler. It listens at document capture, which
+  // the key shield (see shieldKey) short-circuits, so the shield re-delivers to
+  // it through this handle. null whenever no lightbox is open.
+  let lightboxKeydown: ((e: KeyboardEvent) => void) | null = null;
 
   // ── per-thread "minimize" ───────────────────────────────────────────
   // A text thread can be tucked from its full margin card down to a tiny
@@ -667,7 +817,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       lead === null
         ? `<div class="ac-cmt-acts">${cmtActs(c, tid)}</div>`
         : `<div class="ac-cmt-acts ac-lead"><div class="ac-grp">${cmtActs(c, tid)}${lead ? `<span class="ac-sep"></span>` : ""}</div>${lead}</div>`;
-    return `<div class="ac-cmt" data-cid="${c.id}">${avatar(c.author, c.author_name, c.author_picture)}<div><div><span class="ac-who">${AV(name)}</span>${edited}</div><div class="ac-text">${AV(c.body)}</div></div>${acts}</div>`;
+    return `<div class="ac-cmt" data-cid="${c.id}">${avatar(c.author, c.author_name, c.author_picture)}<div><div><span class="ac-who">${AV(name)}</span>${edited}</div><div class="ac-text">${BODY(c.body)}</div></div>${acts}</div>`;
   }
   // A thread's card has two rendered forms, and they differ by ONE thing: the
   // open ("full") form carries a reply composer, the collapsed ("concise") form
@@ -902,8 +1052,9 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       if (pinning) { setPinning(false); return; } // then disarm pinning
       closeLb();
     };
-    function closeLb() { lb.remove(); stage.removeEventListener("scroll", repositionCard); document.removeEventListener("keydown", onEsc, true); window.removeEventListener("resize", repositionCard); if (closeLightbox === closeLb) closeLightbox = null; }
+    function closeLb() { lb.remove(); stage.removeEventListener("scroll", repositionCard); document.removeEventListener("keydown", onEsc, true); window.removeEventListener("resize", repositionCard); if (closeLightbox === closeLb) closeLightbox = null; if (lightboxKeydown === onEsc) lightboxKeydown = null; }
     closeLightbox = closeLb; // teardown can detach this if a lightbox is open
+    lightboxKeydown = onEsc; // the key shield re-delivers Escape to it
     document.addEventListener("keydown", onEsc, true);
     close.onclick = closeLb;
     // One card at a time: a click anywhere off the card/pin/chrome dismisses the
@@ -972,7 +1123,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       vwrap.querySelectorAll(".ac-lb-pin.ac-draft").forEach((p) => p.remove());
       const num = pinNo(t); // universal, stable pin number across the doc
       card = el("div", "ac-lb-card");
-      const cmts = t.comments.map((c) => `<div class="ac-cmt">${avatar(c.author, c.author_name, c.author_picture)}<div style="flex:1;min-width:0"><div><span class="ac-who">${AV(displayName(c.author, c.author_name))}</span></div><div class="ac-text">${AV(c.body)}</div></div></div>`).join("");
+      const cmts = t.comments.map((c) => `<div class="ac-cmt">${avatar(c.author, c.author_name, c.author_picture)}<div style="flex:1;min-width:0"><div><span class="ac-who">${AV(displayName(c.author, c.author_name))}</span></div><div class="ac-text">${BODY(c.body)}</div></div></div>`).join("");
       // Same control language as the margin card: resolve is a ✓ in the corner,
       // and Reply only appears (enabled) once the composer holds text.
       card.innerHTML = `<span class="ac-chip">${icon("pin")} pin ${num}</span>${cmts}<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-r></textarea></div><div class="ac-acts ac-onfocus"><button class="ac-mini ac-primary" data-rs disabled>Reply</button></div><div class="ac-card-acts"><button class="ac-ico ac-resolve" data-rv title="Resolve thread" aria-label="Resolve thread">${icon("ok")}</button></div>`;
@@ -1409,6 +1560,12 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     ta.addEventListener("focus", sync);
     ta.addEventListener("blur", sync);
     sync();
+    // Every composer goes through here — margin reply, draft card, and both
+    // lightbox pin composers — so this is the one place the @-menu has to be
+    // wired. The edit box is deliberately NOT a composer: editing a comment
+    // fires no notification at all, so a mention added by editing would notify
+    // nobody and an @-menu there would promise otherwise.
+    mentions?.attach(ta);
   }
 
   function wire() {
@@ -1840,13 +1997,16 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   // those two keys only while the handle holds focus, which is the point — the
   // arrows are driving the rail then, not the page. Home/PageUp/etc. are left
   // alone so the usual scroll shortcuts still work even with the handle focused.
-  grip.addEventListener("keydown", (e) => {
+  // Assigned as an `onkeydown` PROPERTY, not via addEventListener: the key
+  // shield (see shieldKey) stops overlay keystrokes before they reach their
+  // target and re-delivers them through that property.
+  grip.onkeydown = (e) => {
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     e.preventDefault();
     const step = (e.shiftKey ? 64 : 16) * (e.key === "ArrowUp" ? -1 : 1);
     setRailTop(fabs.getBoundingClientRect().top + step);
     saveRailY();
-  });
+  };
   applyRailY();
 
   // fabs
@@ -1957,11 +2117,73 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     if (!active) return;
     const t = find(active);
     if (!t || t.anchor.type !== "pin") return;
-    if ((e.target as HTMLElement).closest(".ac-card,.ac-pin,.ac-fabs,.ac-float,.ac-panel,.ac-lb")) return;
+    if ((e.target as HTMLElement).closest(".ac-card,.ac-pin,.ac-fabs,.ac-float,.ac-panel,.ac-lb,.ac-mm")) return;
     active = null;
     render();
   };
   const onScrollResize = () => { place(); positionFloat(); };
+
+  // ── keyboard isolation while the keyboard is aimed at the overlay ───
+  // On a served HTML page the overlay is injected INTO the document it
+  // comments on, so a keystroke typed into a comment box still travels through
+  // whatever that page bound to document/window: a slide deck pages on Space,
+  // an editor moves its cursor on ArrowUp/Down, and any page handler that
+  // calls preventDefault eats the character before the textarea can insert it.
+  // Whenever the event's target is overlay chrome, the page must not see the
+  // key at all — the reader is commenting, not driving the page.
+  //
+  // The block runs at window CAPTURE because that is the first node in the
+  // event path: a page handler can sit on window, document, body or an
+  // element, in either phase, and stopping here precedes all of them. It uses
+  // stopImmediatePropagation, not stopPropagation — the plain form only skips
+  // the REST of the path, leaving any other listener on window/capture to run,
+  // so a page that binds one after the overlay mounts would still page on
+  // Space. The catch is that it also skips the overlay's OWN listeners further
+  // down the path, so this handler re-delivers the event to each of them:
+  //   - the open lightbox's Escape handler (document capture, consumes Esc),
+  //   - the focused element's `on<type>` property — every overlay key handler
+  //     is assigned that way (composer, reply, edit, pin-card inputs, and the
+  //     rail grip) precisely so this re-delivery reaches it,
+  //   - onKeyDown, the overlay's own document-level Escape handling.
+  // preventDefault still works from a re-delivered handler: the event is mid
+  // dispatch, so Enter-to-send suppresses its newline as before.
+  //
+  // Not covered: a page handler on `window` in capture registered BEFORE the
+  // overlay mounts — it has already run by the time this one is called, and
+  // nothing can pre-empt an earlier listener on the same node and phase. The
+  // embed is a deferred script at the end of <body>, so it cannot get in front
+  // of one. Everything else — window/capture bound later, and any handler on
+  // document/body/element in either phase, which is the normal case and every
+  // deck library we've seen — is fully covered.
+  const CHROME_SEL = ".ac-layer,.ac-fabs,.ac-float,.ac-lb,.ac-mm";
+  const inChrome = (n: EventTarget | null): boolean => {
+    const el = n as Element | null;
+    return !!el && typeof el.closest === "function" && !!el.closest(CHROME_SEL);
+  };
+  const shieldKey = (e: KeyboardEvent) => {
+    if (dead || !inChrome(e.target)) return;
+    e.stopImmediatePropagation();
+    // The @-menu gets first refusal, HERE rather than in each composer's own
+    // handler, because this is the only point every composer keystroke is
+    // guaranteed to pass through — and the only one that precedes the two
+    // handlers the shield re-delivers to. Consulted lower down, Escape closed
+    // the menu and then reached `onKeyDown` (throwing away the draft behind it)
+    // or, in the lightbox, never reached the menu at all because the Escape
+    // branch below claims the key first and closes the card.
+    if (e.type === "keydown" && mentions?.key(e)) return;
+    if (e.type === "keydown" && lightboxKeydown && e.key === "Escape") {
+      lightboxKeydown(e); // closes the open card / lightbox, and consumes the key
+      return;
+    }
+    const t = e.target as HTMLElement & Record<string, unknown>;
+    const own = t[`on${e.type}`];
+    if (typeof own === "function") (own as (ev: KeyboardEvent) => void).call(t, e);
+    if (e.type === "keydown") onKeyDown(e);
+  };
+  window.addEventListener("keydown", shieldKey, true);
+  window.addEventListener("keypress", shieldKey, true);
+  window.addEventListener("keyup", shieldKey, true);
+
   document.addEventListener("mouseup", onMouseUp);
   document.addEventListener("click", onDocClick);
   document.addEventListener("keydown", onKeyDown);
@@ -1986,6 +2208,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   return () => {
     dead = true;
     cancelCollapse();
+    mentions?.destroy(); // the menu lives on document.body, outside the layer
     dragAbort?.abort(); // drop a rail drag still holding window listeners
     reseedObserver.disconnect();
     sizeObserver.disconnect();
@@ -1993,12 +2216,17 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     document.removeEventListener("mouseup", onMouseUp);
     document.removeEventListener("click", onDocClick);
     document.removeEventListener("keydown", onKeyDown);
+    window.removeEventListener("keydown", shieldKey, true);
+    window.removeEventListener("keypress", shieldKey, true);
+    window.removeEventListener("keyup", shieldKey, true);
     if (container) container.removeEventListener("click", onContainerClickCapture, true);
     window.removeEventListener("resize", onScrollResize, true);
     window.removeEventListener("scroll", onScrollResize, true);
     mediaCleanups.forEach((fn) => fn());
     if (closeLightbox) closeLightbox(); // remove an open lightbox AND its Escape listener
     padEl?.remove(); // drop the scroll-area spacer we appended to the doc body
+    scheme?.removeEventListener?.("change", applyTheme);
+    document.documentElement.classList.remove("ac-dark"); // undo the theme flag
     document.documentElement.classList.remove("ac-doc-shift"); // undo the left-bias
     document.documentElement.style.removeProperty("--ac-shift");
     document.documentElement.style.removeProperty("--ac-shift-tb");

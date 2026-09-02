@@ -217,18 +217,23 @@ function VersionSelect({
 // (whitespace-pre-wrap keeps indentation; break-words snaps unbreakable tokens)
 // so a logical line reads as several visual lines instead of forcing a
 // horizontal scroll. Font-size is calc()'d against the viewer's inherited
-// `--arti-text-scale` (same var the width/size controls publish), so the
-// text-size control drives the diff too; the gutter is pinned to 12px so line
-// numbers stay compact regardless of scale. Rose = removed (left), emerald =
+// `--arti-text-scale` (same var the width/size controls publish) times
+// DIFF_TEXT_FACTOR, so the text-size control drives the diff too; the gutter is
+// pinned (unscaled) so line numbers stay compact. Rose = removed (left), emerald =
 // added (right), neutral filler on the empty side. Each side's kind comes from
 // rowKinds so a both-present-but-differing row (only the truncated fallback
 // produces these) tints as a change rather than showing neutral.
+// One step down ViewerToolbar's ~15%-per-step text ladder (TEXT_SCALE): two
+// panes side by side need more lines on screen than a single body, so the diff
+// renders a step smaller than whatever the viewer's text-size control is set to.
+const DIFF_TEXT_FACTOR = 0.85;
+
 function DiffTable({ diff }: { diff: DiffResult }) {
   return (
     <div className="overflow-x-auto rounded-md border border-neutral-200 bg-white">
       <table
         className="w-full table-fixed border-collapse font-mono leading-relaxed"
-        style={{ fontSize: "calc(12px * var(--arti-text-scale, 1))" }}
+        style={{ fontSize: `calc(12px * var(--arti-text-scale, 1) * ${DIFF_TEXT_FACTOR})` }}
       >
         <colgroup>
           <col className="w-14" />
@@ -283,7 +288,10 @@ function DiffPane({
   const divider = side === "left" ? " border-r border-neutral-200" : "";
   return (
     <>
-      <td className={`select-none px-2 text-right align-top text-[12px] tabular-nums ${numCls}`}>
+      <td
+        className={`select-none px-2 text-right align-top tabular-nums ${numCls}`}
+        style={{ fontSize: `calc(12px * ${DIFF_TEXT_FACTOR})` }}
+      >
         {cell ? cell.num : ""}
       </td>
       <td className={`whitespace-pre-wrap break-words px-3 align-top${divider} ${textCls}`}>

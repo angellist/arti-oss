@@ -109,8 +109,12 @@ function CreatedKeyDialog({ created, onClose }: { created: CreatedApiKey; onClos
       <div className="w-full max-w-lg rounded-lg border border-neutral-200 bg-white p-6 shadow-xl">
         <h3 className="text-[14px] font-semibold text-neutral-900">API key created — copy it now</h3>
         <p className="mt-1 text-[12px] text-neutral-500">
-          This key will not be shown again. Store it somewhere safe (e.g. your CI secret store or{" "}
-          <code className="rounded bg-neutral-100 px-1 text-[11px]">ARTI_TOKEN</code> env var).
+          This key will not be shown again. Store it somewhere safe, such as your CI secret store.
+        </p>
+        <p className="mt-2 text-[12px] text-neutral-500">
+          To set it as an environment variable, use{" "}
+          <code className="rounded bg-neutral-100 px-1 text-[11px]">ARTI_API_KEY</code> as the
+          variable <em>name</em>, and the string below as the variable <em>value</em>.
         </p>
         <div className="mt-3 flex items-center gap-2 rounded border border-neutral-200 bg-neutral-50 px-3 py-2">
           <code className="flex-1 break-all text-[11px] text-neutral-800">{created.key}</code>

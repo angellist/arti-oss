@@ -223,7 +223,36 @@ The toolbar on the right gives you:
 ## Versions
 
 Re-uploading under the same slug creates a new version; the viewer always opens
-the latest. The slug chip (`s/<slug> · v<version>`) links to a catalog view
+the latest.
+
+### Publishing one from the viewer
+
+Open a document you can write to and **drop a file anywhere on the page** — the
+overlay says which slug it will land on — or pick **Upload new version…** from
+the ⋯ menu. Both open the upload modal in version mode:
+
+- The slug is locked to the document you are on. Switch to **New document** in
+  the modal to upload it as its own artifact instead.
+- Title, labels and scopes arrive **inherited** from the slug's latest version
+  and stay editable. Leaving them alone keeps whatever the document has now,
+  even if someone edited it while your modal was open.
+- The version published is **latest + 1**, not the version you happen to be
+  viewing. Dropping onto v3 of a slug that is at v7 publishes v8.
+- If the file changes what the document is — a zip on a text document, a
+  markdown file on an HTML one — the modal names the change and makes you
+  acknowledge it before the button works. Only PACKAGE → APP goes through
+  without one: it adds a launcher and takes nothing away.
+- If someone publishes while your modal is open, the upload is refused, the
+  modal re-reads the slug, re-aims at the new latest and asks you to confirm
+  again — nothing lands on top of a version you never saw.
+
+The drop works on the page chrome around the content. An HTML document or an APP
+renders in a sandboxed frame, and drag events inside a frame never reach the
+page, so on those the ⋯ menu item is the reliable way in.
+
+A binary can be a versioned document too: publish it under a slug and it gets
+the same version lineage as anything else. Files posted by another app without a
+slug (couch's chat attachments) stay slugless and creator-only. The slug chip (`s/<slug> · v<version>`) links to a catalog view
 filtered to that slug, sorted newest-first, so you can open any prior version.
 The permalink chip (`a/<uuid>`) instead points at one specific version forever.
 

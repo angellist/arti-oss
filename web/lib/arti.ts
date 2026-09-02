@@ -23,7 +23,10 @@ function baseFor(isServer: boolean) {
 }
 
 export class ArtiError extends Error {
-  constructor(public status: number, message: string) {
+  // code is the server envelope's machine-readable `code` ("stale-base-version",
+  // "type-change", …) when there was one. Callers that recover from a specific
+  // failure must branch on this, never on the human message.
+  constructor(public status: number, message: string, public code = "") {
     super(message);
   }
 }
@@ -41,9 +44,10 @@ export class ArtiError extends Error {
 // from drifting apart again.
 async function errorFrom(resp: Response): Promise<ArtiError> {
   let detail = "";
+  let code = "";
   try {
     const body = (await resp.text()).trim();
-    if (body) detail = detailFromBody(body);
+    if (body) ({ detail, code } = detailFromBody(body));
   } catch {
     // Body already consumed or the stream failed; fall back to the status line.
   }
@@ -53,14 +57,14 @@ async function errorFrom(resp: Response): Promise<ArtiError> {
   // the message would be blank exactly where it matters, and the components that
   // do setErr(e.message) would render an empty error. statusText is still
   // preferred when present (HTTP/1.1, and the Node fetch used for SSR).
-  return new ArtiError(resp.status, detail || resp.statusText || `HTTP ${resp.status}`);
+  return new ArtiError(resp.status, detail || resp.statusText || `HTTP ${resp.status}`, code);
 }
 
 // Longest body we are willing to show verbatim. Past this it is a document, not
 // a message, and belongs in devtools rather than a toast.
 const MAX_INLINE_BODY = 200;
 
-function detailFromBody(body: string): string {
+function detailFromBody(body: string): { detail: string; code: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -74,8 +78,8 @@ function detailFromBody(body: string): string {
     // through resp.json() got statusText for an HTML body, because parsing
     // threw. So reject anything opening like markup or a broken data structure
     // and let the status line speak instead.
-    if (/^[<{[]/.test(body)) return "";
-    return body.length <= MAX_INLINE_BODY ? body : "";
+    if (/^[<{[]/.test(body)) return { detail: "", code: "" };
+    return { detail: body.length <= MAX_INLINE_BODY ? body : "", code: "" };
   }
   // It parsed, so it is machine output. Only our envelope's `detail` is written
   // for a human — a proxy's own `{message}`, a bare scalar, or an array must
@@ -84,9 +88,13 @@ function detailFromBody(body: string): string {
   // the UI as the literal "null" or "[object Object]".
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     const d = (parsed as { detail?: unknown }).detail;
-    if (typeof d === "string") return d.trim();
+    const c = (parsed as { code?: unknown }).code;
+    return {
+      detail: typeof d === "string" ? d.trim() : "",
+      code: typeof c === "string" ? c.trim() : "",
+    };
   }
-  return "";
+  return { detail: "", code: "" };
 }
 
 async function http<T>(
@@ -322,17 +330,60 @@ export interface CreateArtifactInput {
   // `slug-exists` if the slug already has a non-deleted version, instead of
   // silently appending v(N+1) to someone else's slug.
   ensure_new?: boolean;
+  // Description for THIS version. The server inherits scopes/labels/access
+  // from the slug's prior version but NOT the description, so a version
+  // upload that means to keep it has to re-send it.
+  description?: string;
+  // The version this upload is built on. The server publishes ahead of the
+  // slug's fresh latest and rejects with 409 `stale-base-version` if that is
+  // no longer this number — someone else published while the form was open.
+  expected_latest_version?: number;
+  // Confirm a version that changes the document's artifact_type or the base of
+  // its content_type. Without it the server rejects with 409 `type-change`.
+  allow_type_change?: boolean;
+}
+
+// shouldGzipUpload reports whether an upload of this content type should be
+// gzipped. Textual content — HTML, JS, JSON, plain text, SVG — is exactly
+// what the Cloudflare WAF's <script> rule false-matches and 403s; gzipping it
+// hides the literal markup from the WAF. Already-compressed uploads (zip
+// PACKAGE/APP, images, PDFs) are left alone.
+export function shouldGzipUpload(contentType: string): boolean {
+  const base = contentType.toLowerCase().split(";")[0].trim();
+  if (base.startsWith("text/")) return true;
+  return (
+    base === "application/json" ||
+    base === "application/yaml" ||
+    base === "application/javascript" ||
+    base === "image/svg+xml"
+  );
+}
+
+// gzipString compresses a UTF-8 string with the browser's CompressionStream.
+// The Blob does the UTF-8 encoding, so no manual TypedArray handling is needed.
+async function gzipString(s: string): Promise<ArrayBuffer> {
+  const stream = new Blob([s]).stream().pipeThrough(new CompressionStream("gzip"));
+  return new Response(stream).arrayBuffer();
 }
 
 // createArtifact POSTs a new artifact (or a new version of an existing
 // slug). Mirrors the CLI's JSON-with-base64 upload. Returns the created
-// artifact's metadata (including its url / version).
+// artifact's metadata (including its url / version). Textual uploads are
+// gzipped (Content-Encoding: gzip) so the Cloudflare WAF can't false-match
+// its <script> rule; the server decompresses transparently.
 export async function createArtifact(input: CreateArtifactInput): Promise<ArtifactInfo> {
+  const json = JSON.stringify(input);
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  let body: BodyInit = json;
+  if (shouldGzipUpload(input.content_type) && typeof CompressionStream !== "undefined") {
+    body = await gzipString(json);
+    headers["Content-Encoding"] = "gzip";
+  }
   const resp = await fetch(`/api/artifacts`, {
     method: "POST",
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    headers,
+    body,
   });
   if (!resp.ok) {
     throw await errorFrom(resp);
@@ -592,6 +643,44 @@ export async function searchPeople(q: string, cookie?: string): Promise<string[]
     cookie,
   );
   return (people ?? []).map((p) => p.email);
+}
+
+// mentionPeople backs the comment composer's @-menu: addresses matching a
+// partial query, each flagged with whether it can READ this artifact, plus
+// whether this caller may widen the doc's access from the composer.
+//
+// Deliberately not searchPeople + a client-side ACL check: who may be offered,
+// who is flagged, and who may grant are all decided by the server against the
+// artifact in question. Served by GET /api/artifacts/{id}/comments/people.
+export interface MentionPeopleResult {
+  people: { email: string; can_read: boolean }[];
+  can_grant: boolean;
+  min_query: number;
+}
+
+export async function mentionPeople(artifactId: string, q: string): Promise<MentionPeopleResult> {
+  const empty = { people: [], can_grant: false, min_query: MIN_PEOPLE_QUERY };
+  if (q.trim().length < MIN_PEOPLE_QUERY) return empty;
+  const res = await fetch(`/api/artifacts/${artifactId}/comments/people?q=${encodeURIComponent(q.trim())}`, {
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const body = (await res.json()) as Partial<MentionPeopleResult>;
+  return { people: body.people ?? [], can_grant: !!body.can_grant, min_query: body.min_query ?? MIN_PEOPLE_QUERY };
+}
+
+// grantReadAccess adds ONE address to an artifact's allowed_access. The server
+// re-applies the same owner/admin gate as every other access change, so a
+// caller without that authority gets a 403 here exactly as they would in the
+// access editor. Served by POST /api/artifacts/{id}/access/grant-read.
+export async function grantReadAccess(artifactId: string, email: string): Promise<void> {
+  const res = await fetch(`/api/artifacts/${artifactId}/access/grant-read`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new Error(await res.text());
 }
 
 // createGroup creates a new group. Admin only (server returns 404 otherwise).

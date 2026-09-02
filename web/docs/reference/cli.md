@@ -1,7 +1,7 @@
 ---
 title: CLI
 order: 3
-summary: Every arti CLI command and flag — login/auth, add, append, get, list/search, versions, url, rm, and the env vars (ARTI_BASE_URL, ARTI_TOKEN) that drive them.
+summary: Every arti CLI command and flag — login/auth, add, append, edit, access, get, list/search, versions, url, rm, and the env vars (ARTI_BASE_URL, ARTI_TOKEN) that drive them.
 ---
 
 # CLI
@@ -42,8 +42,9 @@ An optional `~/.config/arti/config.json` supplies a default access list:
 
 ## Commands
 
-`arti login` · `logout` · `whoami` · `add` · `append` · `get` · `rm` · `ls` ·
-`versions` · `url` · `search` · `version` · `update` (and the hidden `token`).
+`arti login` · `logout` · `whoami` · `add` · `append` · `edit` · `access` · `get` ·
+`rm` · `ls` · `versions` · `url` · `search` · `version` · `update` (and the hidden
+`token`).
 
 ### `arti login`
 
@@ -89,10 +90,12 @@ PACKAGE). An explicit `--type` wins.
 | `--scope` | string[] | Scope, repeatable (e.g. `a:bt-auto-route`). |
 | `--label` | string[] | Label, repeatable. |
 | `--ensure-new` | bool | With `--slug`: fail (409) if the slug already exists — no auto-versioning. |
+| `--allow-type-change` | bool | With `--slug`: allow this version to change the document's `artifact_type` or content type. Without it such a version is refused (409), so a markdown document can't silently become an HTML one. |
 | `--access` | string[] | Read-access pattern, repeatable; glob-on-email; `*` = everyone. Defaults to client config, then server `*`. |
 | `--private` | bool | Creator-only read (sends empty `allowed_access`). Mutually exclusive with `--access`. |
 | `--write-access` | string[] | Write-access pattern, repeatable; the subset of readers allowed to push new versions / append / edit. Absent = writers follow readers. Server unions these into `--access`. |
 | `--write-private` | bool | Only you (the creator) may write; readers stay read-only (sends empty `allowed_write`). Mutually exclusive with `--write-access`. |
+| `--compress` | string | `auto` (default) \| `gzip` \| `none`. `auto` gzips textual uploads (HTML/JS/JSON/text) with `Content-Encoding: gzip` so Cloudflare's WAF can't `403` inline `<script>`; already-compressed uploads (zip/image/PDF) are sent as-is. `gzip` forces it; `none` disables it. |
 
 Prints the artifact id (and `slug (v#)` when named) to stderr and the URL to stdout.
 
@@ -131,6 +134,7 @@ from the prior version when not overridden.
 | `--private` | bool | Creator-only read (explicit empty list). Mutually exclusive with `--access`. |
 | `--write-access` | string[] | Override the write list, repeatable (else inherit). |
 | `--write-private` | bool | Creator-only writes (explicit empty list). Mutually exclusive with `--write-access`. |
+| `--compress` | string | `auto` (default) \| `gzip` \| `none`. Append bodies are always text, so `auto` gzips them (`Content-Encoding: gzip`) to keep appended `<script>` clear of the WAF. |
 
 An access pair that differs from the slug's current one applies to **all
 versions of the document** (slug owner or admin only) — same rule as
@@ -140,6 +144,52 @@ versions of the document** (slug owner or admin only) — same rule as
 echo "new entry" | arti append --slug changelog
 arti append --slug log line.txt --auto-key
 arti append --slug thread entry.md --idempotency-key "$(uuidgen)"
+```
+
+### `arti edit`
+
+Edit an artifact's metadata **in place, without creating a new version** — the same
+`PATCH /api/artifacts/{id}` the web editor and the MCP `update_artifact` tool use. This
+is how you fix a doc that was published bare: labels and description are the two fields
+browse and search surface, and re-publishing just to add a label would mint a pointless
+version (and, for a PACKAGE or ATTACHMENT, require the original bytes). Content and
+artifact type stay immutable — use `arti add` with the same `--slug` to change the body.
+Access lives in [`arti access`](#arti-access).
+
+With no flags it prints the editable fields and writes nothing.
+
+| Positional | Meaning |
+|---|---|
+| `ident` | UUID (that exact version) or slug (its latest version, or `--version`) |
+
+| Flag | Short | Type | Meaning |
+|---|---|---|---|
+| `--version` | `-v` | int | Version to edit (slug only; default: latest). |
+| `--title` | | string | Replace the title. Cannot be empty. |
+| `--description` | | string | Replace the description; `--description ''` clears it. |
+| `--label` | | string[] | **Replace** the label set, repeatable. Omit to keep current. |
+| `--clear-labels` | | bool | Remove all labels. Mutually exclusive with `--label`. |
+| `--scope` | | string[] | **Replace** the scope set, repeatable. Omit to keep current. |
+| `--clear-scopes` | | bool | Remove all scopes. Mutually exclusive with `--scope`. |
+| `--comments` / `--no-comments` | | bool | Turn commenting on/off for the whole document. Owner or admin only. |
+
+`--label` and `--scope` replace rather than merge (the API has no add/remove verb), so
+carry forward what you want to keep — including a structural label like `skill` or
+`kind:*`, which type-scoped listings filter on.
+
+Title, description, labels and scopes are **per-version**: the edit lands on the one
+version `ident` resolves to, and siblings keep theirs. The comment switch is
+**per-document** — it applies to every version of the slug.
+
+```sh
+arti edit my-doc                                     # show what's editable
+arti edit my-doc --title 'Q3 treasury review'
+arti edit my-doc --description 'what changed and why'
+arti edit my-doc --description ''                    # clear the description
+arti edit my-doc --label report --label treasury     # replaces the label set
+arti edit my-doc --scope a:bt-auto-route
+arti edit my-doc -v 2 --label report                 # a specific version
+arti edit my-doc --no-comments                       # owner/admin only
 ```
 
 ### `arti access`

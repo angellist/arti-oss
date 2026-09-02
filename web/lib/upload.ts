@@ -53,10 +53,17 @@ export function guessContentType(file: File): string {
   return "application/octet-stream";
 }
 
+// baseContentType strips parameters and case, so `text/html; charset=utf-8`
+// and `text/html` are one kind of document. Mirrors the server's own
+// baseContentType, which decides whether a version changes the document's type.
+export function baseContentType(ct: string): string {
+  return ct.split(";")[0].trim().toLowerCase();
+}
+
 // isTextualContentType mirrors the server's rule for what may be a TEXT
 // artifact: text/* plus a few application/* text formats.
 export function isTextualContentType(ct: string): boolean {
-  const base = ct.split(";")[0].trim().toLowerCase();
+  const base = baseContentType(ct);
   if (base.startsWith("text/")) return true;
   // Structured-suffix JSON (RFC 6839), e.g. the diagram type
   // application/vnd.arti.diagram+json, is text like plain JSON is.
@@ -169,6 +176,23 @@ export function bytesToBase64(buf: ArrayBuffer): string {
     binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
   return btoa(binary);
+}
+
+// sha256Hex hashes the bytes the same way the server records them, so a
+// version upload can tell the user the file is byte-identical to what the slug
+// already holds. Returns null wherever WebCrypto isn't available (an insecure
+// origin, or a test environment) — the check is advisory, never a gate.
+export async function sha256Hex(buf: ArrayBuffer): Promise<string | null> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return null;
+  try {
+    const digest = await subtle.digest("SHA-256", buf);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  } catch {
+    return null;
+  }
 }
 
 // textSample decodes up to `max` characters of UTF-8 from the head of the

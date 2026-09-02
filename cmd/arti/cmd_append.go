@@ -31,6 +31,10 @@ type AppendCmd struct {
 	Separator      string `help:"separator between prior body and new content (default \"\\n\\n\"); pass --separator='' for none"`
 	IdempotencyKey string `name:"idempotency-key" help:"dedup key (24h TTL on the server); recommended for agent retries"`
 	AutoKey        bool   `name:"auto-key" help:"compute idempotency-key = sha256(slug + content) (mutually exclusive with --idempotency-key)"`
+	// Compress gzips the request body so the Cloudflare WAF can't false-match
+	// its <script> rule on appended HTML/JS. Append bodies are always UTF-8
+	// text, so "auto" (the default) always compresses; "none" disables it.
+	Compress string `name:"compress" enum:"auto,gzip,none" default:"auto" help:"gzip upload body: auto | gzip | none"`
 
 	// Seed-only fields. Required if the slug doesn't exist yet (auto-
 	// create v1); ignored on subsequent appends unless --override is set.
@@ -130,7 +134,17 @@ func (a *AppendCmd) Run(cli *CLI) error {
 
 	var resp map[string]any
 	endpoint := "/api/artifacts/by-slug/" + url.PathEscape(a.Slug) + "/append"
-	if err := c.DoJSON("POST", endpoint, payload, &resp); err != nil {
+	// Append bodies are always UTF-8 text; treat an unset content type as text
+	// so "auto" compresses (the WAF rule fires on any body carrying <script>).
+	ct := a.ContentType
+	if ct == "" {
+		ct = "text/plain"
+	}
+	post := c.DoJSON
+	if gzipUpload(a.Compress, ct) {
+		post = c.DoJSONGzip
+	}
+	if err := post("POST", endpoint, payload, &resp); err != nil {
 		return err
 	}
 

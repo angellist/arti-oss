@@ -138,8 +138,9 @@ web/
 ```
 
 Notable modules: `lib/arti.ts` is the FE's typed client against the REST API;
-`lib/commentsOverlay.ts` is the comment-rendering engine; `components/CommentsLayer.tsx`
-mounts it; `lib/help-docs.ts` loads and orders these help pages from frontmatter.
+`lib/commentsOverlay.ts` is the comment-rendering engine; `lib/mentionMenu.ts` is the
+composer's `@` typeahead (and the twin of `internal/comments/mentions.go`, which
+decides who a mention actually notifies); `components/CommentsLayer.tsx` mounts it; `lib/help-docs.ts` loads and orders these help pages from frontmatter.
 The web UI is documented in the [Web UI guide](../guides/web-ui.md).
 
 ## `api/openapi/` — the spec, actually elsewhere

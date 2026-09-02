@@ -80,6 +80,9 @@ const UploadScope = "upload"
 const (
 	TokenTypeCLI = "cli"
 	TokenTypeMCP = "mcp"
+	// TokenTypeAPIKey marks claims minted from an opaque arti_ API key
+	// (internal/apikeys) — a service credential, not a person at a browser.
+	TokenTypeAPIKey = "api-key"
 )
 
 // IsUploadScoped reports whether the token carries the device-flow upload scope.

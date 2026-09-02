@@ -93,6 +93,7 @@ export default function ChipInput({
             }
           }}
           placeholder={values.length === 0 ? placeholder : ""}
+          aria-label={`add a ${noun}`}
           className="min-w-[6rem] flex-1 bg-transparent text-[13px] text-neutral-900 placeholder:text-neutral-400 focus:outline-none"
         />
       </div>
