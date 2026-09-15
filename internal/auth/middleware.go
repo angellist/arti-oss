@@ -90,6 +90,7 @@ const (
 	ctxName
 	ctxPicture
 	ctxPeerAddr
+	ctxCredential
 )
 
 // EmailFromContext returns the authenticated caller's email, or "".
@@ -247,7 +248,8 @@ func authenticate(cfg Config, r *http.Request) (context.Context, *authFailure) {
 	// ── 1. shared service secret ───────────────────────────
 	if cfg.HasServiceSecret {
 		if HashEqual(r.Header.Get(APISecretHeader), cfg.ServiceSecretHash) {
-			return withIdent(r.Context(), cfg.ServiceSecretEmail, []string{"service"}), nil
+			ctx := withIdent(r.Context(), cfg.ServiceSecretEmail, []string{"service"})
+			return withCredential(ctx, Credential{Kind: CredKindService}), nil
 		}
 	}
 
@@ -271,7 +273,7 @@ func authenticate(cfg Config, r *http.Request) (context.Context, *authFailure) {
 	// via proxy_set_header so a client value cannot reach the pod.
 
 	// ── 3/4. bearer token (OIDC first, HS256 fallback) ─
-	tok := extractToken(r)
+	tok, source := extractToken(r)
 	if tok == "" {
 		return nil, &authFailure{status: http.StatusUnauthorized, reason: "missing token"}
 	}
@@ -279,7 +281,7 @@ func authenticate(cfg Config, r *http.Request) (context.Context, *authFailure) {
 	// ── API-key rung: opaque "arti_" bearer, registry-backed ──
 	if cfg.APIKeys != nil && strings.HasPrefix(tok, APIKeyPrefix) {
 		if c, err := cfg.APIKeys.Authenticate(r.Context(), tok); err == nil && IsAllowed(c.Email) {
-			return withClaims(r.Context(), c), nil
+			return withCredential(withClaims(r.Context(), c), credentialFor(c, source)), nil
 		}
 		return nil, &authFailure{status: http.StatusUnauthorized, reason: "invalid api key"}
 	}
@@ -287,7 +289,7 @@ func authenticate(cfg Config, r *http.Request) (context.Context, *authFailure) {
 	if cfg.OIDC != nil {
 		if c, err := cfg.OIDC.Verify(r.Context(), tok); err == nil {
 			ctx := WithProfile(withIdent(r.Context(), c.Email, c.Scopes), c.Name, c.Picture)
-			return ctx, nil
+			return withCredential(ctx, credentialFor(c, source)), nil
 		} else if errors.Is(err, ErrForbidden) {
 			return nil, &authFailure{status: http.StatusForbidden, reason: "user not authorized"}
 		}
@@ -304,7 +306,7 @@ func authenticate(cfg Config, r *http.Request) (context.Context, *authFailure) {
 		// that user.
 		if err == nil && IsAllowed(c.Email) && !c.IsEmbedScoped() && !c.IsAppScoped() {
 			ctx := WithProfile(withClaims(r.Context(), c), c.Name, c.Picture)
-			return ctx, nil
+			return withCredential(ctx, credentialFor(c, source)), nil
 		}
 	}
 
@@ -334,7 +336,11 @@ func Disabled(localEmail string) func(http.Handler) http.Handler {
 			if h := strings.TrimSpace(r.Header.Get(LocalEmailHeader)); h != "" {
 				email = h // dev-only per-request identity override (see LocalEmailHeader)
 			}
-			next.ServeHTTP(w, r.WithContext(withIdent(r.Context(), email, []string{"user"})))
+			ctx := withIdent(r.Context(), email, []string{"user"})
+			// Stands in for a browser session, so browser-only routes (minting
+			// an API key) stay reachable with auth disabled locally.
+			ctx = withCredential(ctx, Credential{Kind: CredKindSession, Source: CredSourceCookie})
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
@@ -366,10 +372,14 @@ func WithProfile(ctx context.Context, name, picture string) context.Context {
 	return ctx
 }
 
-func extractToken(r *http.Request) string {
+// extractToken returns the caller's token and the transport it arrived on. The
+// transport is the only thing that separates a browser from a script here: the
+// arti_session cookie and a CLI access token are both HS256 tokens with the
+// same claims, so nothing inside them says which is which.
+func extractToken(r *http.Request) (string, string) {
 	// 1. Explicit Authorization: Bearer — API / CLI / MCP callers.
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer ")), CredSourceBearer
 	}
 	// 2. arti's own arti_session cookie — preferred over the oauth2-proxy
 	// access token below. On an oauth2-proxy'd HTML route (e.g. /app) a browser
@@ -380,13 +390,13 @@ func extractToken(r *http.Request) string {
 	// group check and 403s every app for every user (regression from the C1 fix,
 	// #96). Preferring the verified cookie fixes that without weakening the gate.
 	if c, err := r.Cookie(CookieName); err == nil {
-		return c.Value
+		return c.Value, CredSourceCookie
 	}
 	// 3. Fallback: oauth2-proxy's forwarded access token (verified downstream).
 	if h := r.Header.Get(ProxyTokenHeader); h != "" {
-		return strings.TrimSpace(h)
+		return strings.TrimSpace(h), CredSourceProxy
 	}
-	return ""
+	return "", ""
 }
 
 func unauth(w http.ResponseWriter, reason string) {

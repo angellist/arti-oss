@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { listGroups, listIdpGroups, updateArtifactAccess } from "@/lib/arti";
+import { listGroups, listIdpGroups, transferArtifactOwner, updateArtifactAccess } from "@/lib/arti";
 import { usePeopleSearch } from "@/lib/usePeopleSearch";
 import type { Group, IdpGroup } from "@/lib/types";
 
@@ -12,7 +12,7 @@ type Level = "read" | "write";
 // A principal row: one access token plus its resolved level. `write` level
 // means the token is in allowed_write (may push versions / append / edit);
 // `read` means read-only.
-interface Row {
+export interface Row {
   token: string;
   level: Level;
 }
@@ -50,6 +50,30 @@ function principalKind(token: string): "everyone" | "domain" | "group" | "idp" |
   return "email";
 }
 
+// ownerCoveredBy reports whether `owner` already holds everything keep_access
+// would grant them — READ AND WRITE. Only a row at write level counts: keeping
+// access grants both, so a document that is world-READABLE with an explicit
+// write list leaves the outgoing owner's write exactly what they stand to lose,
+// and calling that "already covered" would disable the checkbox while the
+// request still granted it.
+//
+// A row matches on `*`, a domain glob the address falls under, or the address
+// itself. Group and idp tokens deliberately do not count: membership lives on
+// the server, and assuming it would disable the checkbox on most group-shared
+// documents and grant the outgoing owner access they could not decline.
+// Exported for direct unit testing.
+export function ownerCoveredBy(owner: string | undefined, rows: Row[]): boolean {
+  if (!owner) return false;
+  const lower = owner.toLowerCase();
+  return rows.some((r) => {
+    if (r.level !== "write") return false;
+    const t = r.token.toLowerCase();
+    if (t === "*") return true;
+    if (t.startsWith("*@")) return lower.endsWith(t.slice(1));
+    return t === lower;
+  });
+}
+
 // AccessModal is the centered access editor: one row per principal with a
 // Read | Read & write control, plus an add-row typeahead over emails, manual
 // groups, and captured IdP (SSO) groups. Read-only for non-editors.
@@ -81,6 +105,10 @@ export default function AccessModal({
   draft: draftMode = false,
   onCommit,
   liveShareLinks = 0,
+  slug,
+  owner,
+  isOwner = false,
+  actorIsOwner = false,
 }: {
   // Required unless draft mode, where nothing is PATCHed.
   artifactID?: string;
@@ -100,6 +128,19 @@ export default function AccessModal({
   // revoke it. An owner tightening an ACL to contain a leak is otherwise in
   // the wrong place, and nothing would tell them so.
   liveShareLinks?: number;
+  // Ownership is slug-scoped, so a transfer needs the slug rather than the
+  // version's id. Absent (a slugless artifact) means no transfer is possible.
+  slug?: string | null;
+  // The document's owner, and whether the caller is it — the server's
+  // can_manage_comments, which is the same authority the transfer endpoint
+  // enforces, so the control is never offered where the write would 403.
+  owner?: string;
+  isOwner?: boolean;
+  // Whether the CALLER is the owner, as opposed to an admin acting on someone
+  // else's document. keep_access always grants the OUTGOING owner, so an admin
+  // reading "my access" would think the checkbox was about themselves and
+  // silently withhold write from the person losing the document.
+  actorIsOwner?: boolean;
 }) {
   // Staged copy of the principal rows. Seeded from props and re-synced whenever
   // the server props change (after a save + router.refresh).
@@ -121,6 +162,12 @@ export default function AccessModal({
   const [focused, setFocused] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // Transfer is a separate mode, not a staged row. Every other edit here is
+  // undone by Cancel; this one cannot be undone by the person making it, since
+  // they are no longer the owner afterwards.
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [recipient, setRecipient] = useState("");
+  const [keepAccess, setKeepAccess] = useState(true);
   const [groups, setGroups] = useState<Group[]>([]);
   const [idpGroups, setIdpGroups] = useState<IdpGroup[]>([]);
 
@@ -133,11 +180,16 @@ export default function AccessModal({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
+      if (e.key !== "Escape" || busy) return;
+      if (transferOpen) {
+        setTransferOpen(false);
+        return;
+      }
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  }, [busy, onClose, transferOpen]);
 
   const groupByToken = useMemo(() => {
     const m = new Map<string, Group>();
@@ -201,6 +253,36 @@ export default function AccessModal({
   // rather than filtered client-side: unlike groups, there is no bounded list
   // of people to hold in memory, and the server caps disclosure per query.
   const peopleMatches = usePeopleSearch(canEdit ? draft : "", rows.map((r) => r.token));
+  // Same directory the access typeahead uses, so the common path picks a real
+  // colleague. The server accepts any well-formed address, so this is a
+  // convenience rather than a gate.
+  const transferMatches = usePeopleSearch(transferOpen ? recipient : "", owner ? [owner] : []);
+  // Deliberately the SAVED pair, not the staged rows. A transfer posts against
+  // what the server currently holds, so judging "already covered" by edits that
+  // may never be confirmed would disable the checkbox on the strength of a
+  // grant that does not exist yet.
+  const ownerAlreadyCovered = useMemo(
+    () => ownerCoveredBy(owner, levelsFor(access, write)),
+    [owner, access, write],
+  );
+
+  const doTransfer = async () => {
+    const to = recipient.trim();
+    if (!to || !slug) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await transferArtifactOwner(slug, to, ownerAlreadyCovered || keepAccess);
+      onSaved();
+      // Closing is the honest outcome: access, comments and sharing all need
+      // owner authority, so nothing left in this dialog is theirs to change.
+      onClose();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // Typeahead suggestions across people, manual groups, and idp groups, once
   // the user types.
@@ -302,6 +384,93 @@ export default function AccessModal({
             </p>
           ) : null}
 
+          {!draftMode && owner ? (
+            <div className="mb-2 flex shrink-0 items-center justify-between gap-2 rounded-md border border-neutral-200 bg-neutral-50 px-2.5 py-2">
+              <span className="flex min-w-0 items-baseline gap-1.5 text-[12px]">
+                <span className="shrink-0 text-neutral-500">Owner</span>
+                <span className="truncate font-sans text-neutral-800">{owner}</span>
+              </span>
+              {isOwner && slug ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setErr("");
+                    // Fresh each time: Back leaves the previous answer behind,
+                    // and a stale unchecked box would silently withhold the
+                    // outgoing owner's write on the next transfer.
+                    setRecipient("");
+                    setKeepAccess(true);
+                    setTransferOpen(true);
+                  }}
+                  disabled={busy}
+                  className="shrink-0 rounded-md border border-neutral-200 bg-white px-2 py-1 text-[11px] text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
+                >
+                  Transfer…
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
+          {transferOpen ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <p className="shrink-0 text-[12px] leading-snug text-neutral-700">
+                Give this document to someone else. They will control its access, comments and
+                share links; you will not.
+              </p>
+              <label className="mt-3 shrink-0 text-[11px] font-medium text-neutral-600" htmlFor="transfer-to">
+                New owner
+              </label>
+              <input
+                id="transfer-to"
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value)}
+                disabled={busy}
+                placeholder="someone@example.com"
+                autoComplete="off"
+                className="mt-1 shrink-0 rounded-md border border-neutral-200 px-2 py-1.5 font-sans text-[12px] outline-none focus:border-neutral-400"
+              />
+              <ul className="mt-1 max-h-28 shrink-0 overflow-y-auto">
+                {transferMatches.map((m) => (
+                  <li key={m}>
+                    <button
+                      type="button"
+                      onClick={() => setRecipient(m)}
+                      className="w-full truncate px-2 py-1 text-left font-sans text-[12px] text-neutral-700 hover:bg-neutral-50"
+                    >
+                      {m}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <label className="mt-3 flex shrink-0 items-start gap-2 text-[12px] text-neutral-700">
+                <input
+                  type="checkbox"
+                  checked={keepAccess}
+                  disabled={busy || ownerAlreadyCovered}
+                  onChange={(e) => setKeepAccess(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  {actorIsOwner ? "Keep my view and edit access" : `Keep ${owner}'s view and edit access`}
+                  {ownerAlreadyCovered ? (
+                    <span className="block text-[11px] text-neutral-500">
+                      An entry above already grants read and write, so this changes nothing.
+                    </span>
+                  ) : null}
+                </span>
+              </label>
+              <p className="mt-2 shrink-0 text-[11px] leading-snug text-neutral-500">
+                {actorIsOwner
+                  ? "Editing answers to the owner, so without this you lose it."
+                  : "Editing answers to the owner, so without this the outgoing owner loses it."}
+                {liveShareLinks > 0
+                  ? ` The new owner inherits ${liveShareLinks} live external ${liveShareLinks === 1 ? "link" : "links"}.`
+                  : ""}
+              </p>
+              <div className="flex-1" />
+            </div>
+          ) : (
+          <>
           {/* The only scroller — growth happens here, not in the window. */}
           <ul className="min-h-0 flex-1 divide-y divide-neutral-100 overflow-y-auto">
             {rows.length === 0 ? (
@@ -425,24 +594,49 @@ export default function AccessModal({
               {err ? <p className="mt-1 text-[11px] text-rose-600">error: {err}</p> : null}
             </div>
           ) : null}
+          </>
+          )}
+          {transferOpen && err ? (
+            <p className="shrink-0 pb-1 text-[11px] text-rose-600">error: {err}</p>
+          ) : null}
         </div>
 
         {/* Explicit commit boundary. Nothing above this line has been written:
             Confirm applies the staged rows in one call, Cancel drops them. */}
         <div className="flex shrink-0 items-center justify-between gap-2 border-t border-neutral-100 px-5 py-3">
           <span className="text-[11px] text-neutral-400">
-            {canEdit ? (dirty ? "unsaved changes" : "no changes") : ""}
+            {transferOpen
+              ? "you cannot undo this yourself"
+              : canEdit
+                ? (dirty ? "unsaved changes" : "no changes")
+                : ""}
           </span>
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => {
+                if (transferOpen) {
+                  setTransferOpen(false);
+                  setErr("");
+                  return;
+                }
+                onClose();
+              }}
               disabled={busy}
               className="rounded-md border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 transition hover:bg-neutral-50 disabled:opacity-50"
             >
-              {canEdit ? "Cancel" : "Close"}
+              {transferOpen ? "Back" : canEdit ? "Cancel" : "Close"}
             </button>
-            {canEdit ? (
+            {transferOpen ? (
+              <button
+                type="button"
+                onClick={() => void doTransfer()}
+                disabled={busy || !recipient.trim()}
+                className="rounded-md bg-neutral-800 px-3 py-1 text-xs font-medium text-white transition hover:bg-neutral-900 disabled:cursor-not-allowed disabled:bg-neutral-300"
+              >
+                {busy ? "Transferring…" : "Transfer"}
+              </button>
+            ) : canEdit ? (
               <button
                 type="button"
                 onClick={() => void commit()}

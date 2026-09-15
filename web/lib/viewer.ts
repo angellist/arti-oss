@@ -13,6 +13,44 @@ export function isFullPageView(
   return pick("v") === "full" || pick("view") === "fullpage";
 }
 
+// exitFullPageSearch strips the full-page params off a query string, keeping
+// every other one (`file`, `ts`, `version`) so the normal view opens on the
+// same file at the same settings. Both forms isFullPageView accepts are
+// dropped, since a URL carrying the legacy one must also be able to leave.
+// Returns "" or a string with a leading "?", like fileParamSearch.
+export function exitFullPageSearch(currentSearch: string): string {
+  const params = new URLSearchParams(currentSearch);
+  params.delete("v");
+  params.delete("view");
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
+// isTopLevelWindow reports whether this window is the outermost one. The
+// full-page view is also IFRAMED by embedders (couch's artifact side panel),
+// where the host owns the chrome and there is no normal view to return to —
+// so page-level affordances check this first. A cross-origin `window.top`
+// access throws, which is itself proof of being framed.
+export function isTopLevelWindow(w: Window): boolean {
+  try {
+    return w.self === w.top;
+  } catch {
+    return false;
+  }
+}
+
+// An HTML artifact carries its own type sizes, authored against a desktop
+// window, so in a phone-width frame it reads oversized. htmlFitZoom scales the
+// frame below FIT_WIDTH, giving the authored layout FIT_WIDTH to lay out in.
+// Exactly 1 from FIT_WIDTH up, and 1 for an unmeasured (non-positive) width.
+const FIT_WIDTH = 460;
+const FIT_FLOOR = 0.72;
+
+export function htmlFitZoom(viewportWidth: number): number {
+  if (!(viewportWidth > 0)) return 1;
+  return Math.min(1, Math.max(FIT_FLOOR, viewportWidth / FIT_WIDTH));
+}
+
 // isTextualContentType reports whether a content_type holds text the viewer
 // renders as text (markdown/html/code) — and therefore the page must fetch the
 // body as a string. Mirrors the server's isTextualContentType. Non-text

@@ -23,8 +23,8 @@ WHERE thread_id = $1 AND deleted_at IS NULL
 ORDER BY created_at;
 
 -- name: AddComment :one
-INSERT INTO comments (comment_id, thread_id, author, body, author_name, author_picture)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO comments (comment_id, thread_id, author, body, author_name, author_picture, source)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
 -- name: SetThreadStatus :execrows

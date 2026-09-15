@@ -1,0 +1,215 @@
+/* The light and dark colour themes. Imported after globals.css so these rules
+ * win.
+ *
+ * arti is styled with Tailwind's own colour utilities, so a theme is not a new
+ * token vocabulary — it is an override of the scale those utilities already
+ * read (`bg-neutral-100` compiles to `var(--color-neutral-100)`). Selected by
+ * `data-theme` on <html>, which lib/appearance.ts resolves to `light` or
+ * `dark` before first paint.
+ *
+ * The ramp's roles, in the order arti uses them: `white` is the base surface
+ * (body and cards), `neutral-50` a recessed strip, `-100` a hover fill, `-200`
+ * and `-300` borders, `-400` placeholder, `-500`/`-600` muted and secondary
+ * text, `-700`/`-800`/`-900` body and heading text. Dark keeps those roles and
+ * inverts the lightness. `black` is NOT themed: its only use is modal scrims,
+ * which stay black.
+ *
+ * Both themes state the whole ramp, light included. A block also applies to a
+ * nested element carrying the attribute, which is how the picker renders each
+ * swatch in the theme it offers — and a swatch can only be honest if light is
+ * a block rather than the absence of one.
+ *
+ * The tinted scales carry meaning (blue selection, amber warning, rose error,
+ * emerald ok) and are used as light tints on light chrome: `bg-rose-50
+ * text-rose-700` for a failure notice. On dark chrome each pair has to swap
+ * ends, so a shade takes the value of its mirror (50↔950, 100↔900, …, 500
+ * unchanged) and the notice reads as dark-tint-on-light-text with no component
+ * change. Only the shades arti actually uses are listed; add the mirror here
+ * when a component reaches for a new one.
+ */
+
+[data-theme="light"] {
+  --color-white: #ffffff;
+  --color-neutral-50: #fafafa;
+  --color-neutral-100: #f5f5f5;
+  --color-neutral-200: #e5e5e5;
+  --color-neutral-300: #d4d4d4;
+  --color-neutral-400: #a1a1a1;
+  --color-neutral-500: #737373;
+  --color-neutral-600: #525252;
+  --color-neutral-700: #404040;
+  --color-neutral-800: #262626;
+  --color-neutral-900: #171717;
+  --color-neutral-950: #0a0a0a;
+
+  /* amber */
+  --color-amber-50: oklch(98.7% 0.022 95.277);
+  --color-amber-100: oklch(96.2% 0.059 95.617);
+  --color-amber-200: oklch(92.4% 0.12 95.746);
+  --color-amber-400: oklch(82.8% 0.189 84.429);
+  --color-amber-500: oklch(76.9% 0.188 70.08);
+  --color-amber-600: oklch(66.6% 0.179 58.318);
+  --color-amber-700: oklch(55.5% 0.163 48.998);
+  --color-amber-800: oklch(47.3% 0.137 46.201);
+  --color-amber-900: oklch(41.4% 0.112 45.904);
+  --color-amber-950: oklch(27.9% 0.077 45.635);
+  /* blue */
+  --color-blue-50: oklch(97% 0.014 254.604);
+  --color-blue-100: oklch(93.2% 0.032 255.585);
+  --color-blue-200: oklch(88.2% 0.059 254.128);
+  --color-blue-300: oklch(80.9% 0.105 251.813);
+  --color-blue-400: oklch(70.7% 0.165 254.624);
+  --color-blue-500: oklch(62.3% 0.214 259.815);
+  --color-blue-600: oklch(54.6% 0.245 262.881);
+  --color-blue-700: oklch(48.8% 0.243 264.376);
+  --color-blue-800: oklch(42.4% 0.199 265.638);
+  /* emerald */
+  --color-emerald-50: oklch(97.9% 0.021 166.113);
+  --color-emerald-100: oklch(95% 0.052 163.051);
+  --color-emerald-200: oklch(90.5% 0.093 164.15);
+  --color-emerald-300: oklch(84.5% 0.143 164.978);
+  --color-emerald-400: oklch(76.5% 0.177 163.223);
+  --color-emerald-500: oklch(69.6% 0.17 162.48);
+  --color-emerald-600: oklch(59.6% 0.145 163.225);
+  --color-emerald-700: oklch(50.8% 0.118 165.612);
+  --color-emerald-900: oklch(37.8% 0.077 168.94);
+  /* green */
+  --color-green-50: oklch(98.2% 0.018 155.826);
+  --color-green-700: oklch(52.7% 0.154 150.069);
+  /* indigo */
+  --color-indigo-50: oklch(96.2% 0.018 272.314);
+  --color-indigo-600: oklch(51.1% 0.262 276.966);
+  /* purple */
+  --color-purple-50: oklch(97.7% 0.014 308.299);
+  --color-purple-100: oklch(94.6% 0.033 307.174);
+  --color-purple-200: oklch(90.2% 0.063 306.703);
+  --color-purple-800: oklch(43.8% 0.218 303.724);
+  /* red */
+  --color-red-50: oklch(97.1% 0.013 17.38);
+  --color-red-600: oklch(57.7% 0.245 27.325);
+  /* rose */
+  --color-rose-50: oklch(96.9% 0.015 12.422);
+  --color-rose-100: oklch(94.1% 0.03 12.58);
+  --color-rose-200: oklch(89.2% 0.058 10.001);
+  --color-rose-400: oklch(71.2% 0.194 13.428);
+  --color-rose-500: oklch(64.5% 0.246 16.439);
+  --color-rose-600: oklch(58.6% 0.253 17.585);
+  --color-rose-700: oklch(51.4% 0.222 16.935);
+  --color-rose-800: oklch(45.5% 0.188 13.697);
+  --color-rose-900: oklch(41% 0.159 10.272);
+  /* sky */
+  --color-sky-50: oklch(97.7% 0.013 236.62);
+  --color-sky-200: oklch(90.1% 0.058 230.902);
+  --color-sky-700: oklch(50% 0.134 242.749);
+  --color-sky-800: oklch(44.3% 0.11 240.79);
+  /* yellow */
+  --color-yellow-50: oklch(98.7% 0.026 102.212);
+  --color-yellow-400: oklch(85.2% 0.199 91.936);
+  --color-yellow-700: oklch(55.4% 0.135 66.442);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-white: #161616;
+  --color-neutral-50: #101010;
+  --color-neutral-100: #262626;
+  --color-neutral-200: #303030;
+  --color-neutral-300: #404040;
+  --color-neutral-400: #6e6e6e;
+  --color-neutral-500: #8f8f8f;
+  --color-neutral-600: #ababab;
+  --color-neutral-700: #c6c6c6;
+  --color-neutral-800: #dedede;
+  --color-neutral-900: #efefef;
+  --color-neutral-950: #fafafa;
+
+  /* amber */
+  --color-amber-50: oklch(27.9% 0.077 45.635); /* amber-950 */
+  --color-amber-100: oklch(41.4% 0.112 45.904); /* amber-900 */
+  --color-amber-200: oklch(47.3% 0.137 46.201); /* amber-800 */
+  --color-amber-400: oklch(66.6% 0.179 58.318); /* amber-600 */
+  --color-amber-500: oklch(76.9% 0.188 70.08); /* amber-500 */
+  --color-amber-600: oklch(82.8% 0.189 84.429); /* amber-400 */
+  --color-amber-700: oklch(87.9% 0.169 91.605); /* amber-300 */
+  --color-amber-800: oklch(92.4% 0.12 95.746); /* amber-200 */
+  --color-amber-900: oklch(96.2% 0.059 95.617); /* amber-100 */
+  --color-amber-950: oklch(98.7% 0.022 95.277); /* amber-50 */
+  /* blue */
+  --color-blue-50: oklch(28.2% 0.091 267.935); /* blue-950 */
+  --color-blue-100: oklch(37.9% 0.146 265.522); /* blue-900 */
+  --color-blue-200: oklch(42.4% 0.199 265.638); /* blue-800 */
+  --color-blue-300: oklch(48.8% 0.243 264.376); /* blue-700 */
+  --color-blue-400: oklch(54.6% 0.245 262.881); /* blue-600 */
+  --color-blue-500: oklch(62.3% 0.214 259.815); /* blue-500 */
+  --color-blue-600: oklch(70.7% 0.165 254.624); /* blue-400 */
+  --color-blue-700: oklch(80.9% 0.105 251.813); /* blue-300 */
+  --color-blue-800: oklch(88.2% 0.059 254.128); /* blue-200 */
+  /* emerald */
+  --color-emerald-50: oklch(26.2% 0.051 172.552); /* emerald-950 */
+  --color-emerald-100: oklch(37.8% 0.077 168.94); /* emerald-900 */
+  --color-emerald-200: oklch(43.2% 0.095 166.913); /* emerald-800 */
+  --color-emerald-300: oklch(50.8% 0.118 165.612); /* emerald-700 */
+  --color-emerald-400: oklch(59.6% 0.145 163.225); /* emerald-600 */
+  --color-emerald-500: oklch(69.6% 0.17 162.48); /* emerald-500 */
+  --color-emerald-600: oklch(76.5% 0.177 163.223); /* emerald-400 */
+  --color-emerald-700: oklch(84.5% 0.143 164.978); /* emerald-300 */
+  --color-emerald-900: oklch(95% 0.052 163.051); /* emerald-100 */
+  /* green */
+  --color-green-50: oklch(26.6% 0.065 152.934); /* green-950 */
+  --color-green-700: oklch(87.1% 0.15 154.449); /* green-300 */
+  /* indigo */
+  --color-indigo-50: oklch(25.7% 0.09 281.288); /* indigo-950 */
+  --color-indigo-600: oklch(67.3% 0.182 276.935); /* indigo-400 */
+  /* purple */
+  --color-purple-50: oklch(29.1% 0.149 302.717); /* purple-950 */
+  --color-purple-100: oklch(38.1% 0.176 304.987); /* purple-900 */
+  --color-purple-200: oklch(43.8% 0.218 303.724); /* purple-800 */
+  --color-purple-800: oklch(90.2% 0.063 306.703); /* purple-200 */
+  /* red */
+  --color-red-50: oklch(25.8% 0.092 26.042); /* red-950 */
+  --color-red-600: oklch(70.4% 0.191 22.216); /* red-400 */
+  /* rose */
+  --color-rose-50: oklch(27.1% 0.105 12.094); /* rose-950 */
+  --color-rose-100: oklch(41% 0.159 10.272); /* rose-900 */
+  --color-rose-200: oklch(45.5% 0.188 13.697); /* rose-800 */
+  --color-rose-400: oklch(58.6% 0.253 17.585); /* rose-600 */
+  --color-rose-500: oklch(64.5% 0.246 16.439); /* rose-500 */
+  --color-rose-600: oklch(71.2% 0.194 13.428); /* rose-400 */
+  --color-rose-700: oklch(81% 0.117 11.638); /* rose-300 */
+  --color-rose-800: oklch(89.2% 0.058 10.001); /* rose-200 */
+  --color-rose-900: oklch(94.1% 0.03 12.58); /* rose-100 */
+  /* sky */
+  --color-sky-50: oklch(29.3% 0.066 243.157); /* sky-950 */
+  --color-sky-200: oklch(44.3% 0.11 240.79); /* sky-800 */
+  --color-sky-700: oklch(82.8% 0.111 230.318); /* sky-300 */
+  --color-sky-800: oklch(90.1% 0.058 230.902); /* sky-200 */
+  /* yellow */
+  --color-yellow-50: oklch(28.6% 0.066 53.813); /* yellow-950 */
+  --color-yellow-400: oklch(68.1% 0.162 75.834); /* yellow-600 */
+  --color-yellow-700: oklch(90.5% 0.182 98.111); /* yellow-300 */
+}
+
+/* The typography plugin sets its prose tokens ON `.prose`, from a light-mode
+ * palette, and ships the dark set alongside them as `--tw-prose-invert-*`.
+ * Point each token at its own dark twin rather than at a colour of ours, so
+ * markdown reads on dark chrome without `prose-invert` on every call site. */
+[data-theme="dark"] .prose {
+  --tw-prose-body: var(--tw-prose-invert-body);
+  --tw-prose-bold: var(--tw-prose-invert-bold);
+  --tw-prose-bullets: var(--tw-prose-invert-bullets);
+  --tw-prose-captions: var(--tw-prose-invert-captions);
+  --tw-prose-code: var(--tw-prose-invert-code);
+  --tw-prose-counters: var(--tw-prose-invert-counters);
+  --tw-prose-headings: var(--tw-prose-invert-headings);
+  --tw-prose-hr: var(--tw-prose-invert-hr);
+  --tw-prose-kbd: var(--tw-prose-invert-kbd);
+  --tw-prose-kbd-shadows: var(--tw-prose-invert-kbd-shadows);
+  --tw-prose-lead: var(--tw-prose-invert-lead);
+  --tw-prose-links: var(--tw-prose-invert-links);
+  --tw-prose-pre-bg: var(--tw-prose-invert-pre-bg);
+  --tw-prose-pre-code: var(--tw-prose-invert-pre-code);
+  --tw-prose-quote-borders: var(--tw-prose-invert-quote-borders);
+  --tw-prose-quotes: var(--tw-prose-invert-quotes);
+  --tw-prose-td-borders: var(--tw-prose-invert-td-borders);
+  --tw-prose-th-borders: var(--tw-prose-invert-th-borders);
+}

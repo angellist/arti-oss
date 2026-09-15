@@ -33,6 +33,8 @@ const row = (over: Partial<ArtifactInfo> = {}): ArtifactInfo => ({
   size_bytes: 2048,
   sha256: null,
   creator: "sam@example.com",
+  written_via: null,
+  written_via_name: null,
   scopes: ["topic:platform"],
   labels: ["report"],
   allowed_access: ["*"],
@@ -85,8 +87,23 @@ describe("CatalogTable columns", () => {
     render();
     expect(headers()).toContain("title");
     expect(headers()).toContain("scope · labels");
+    expect(headers()).toContain("views");
     expect(headers()).not.toContain("comments");
     expect(headers()).not.toContain("id");
+  });
+
+  it("distinguishes unavailable view counts from an observed zero", () => {
+    const columns = defaultColumnPrefs();
+    columns.hidden = columns.order.filter((key) => key !== "views");
+    render(columns, [row(), row({ artifact_id: "22222222-3333-4444-5555-666666666666", view_count: 0, view_count_30d: 0 })]);
+    const cells = Array.from(container.querySelectorAll("tbody tr")).map((tr) =>
+      tr.querySelector("td:first-child")!,
+    );
+    expect(cells[0].textContent).toContain("—");
+    expect(cells[1].textContent).toContain("0");
+    expect(cells[1].querySelector("[title]")?.getAttribute("title")).toBe(
+      "0 views · 0 in the last 30 days",
+    );
   });
 
   it("renders a column layout supplied by the server without a client re-shuffle", () => {
@@ -282,7 +299,7 @@ describe("CatalogTable sticky header", () => {
 
 describe("headerShadow", () => {
   it("always draws the header rule", () => {
-    expect(headerShadow(false, false)).toBe("inset 0 -1px 0 0 rgb(229 229 229)");
+    expect(headerShadow(false, false)).toBe("inset 0 -1px 0 0 var(--color-neutral-200)");
   });
 
   it("layers the reorder drop mark on top of the rule instead of replacing it", () => {
@@ -682,5 +699,110 @@ describe("CatalogTable search bar", () => {
     act(() => close.click());
     expect(window.location.search, "and so does closing").toBe("?page=2");
     expect(nav.pushed, "neither touched the server").toEqual([]);
+  });
+});
+
+// Phones get cards instead of the table (the columns sum past any phone
+// width). Both renderings are in the DOM at once — which one you see is a CSS
+// breakpoint — so these assert on the card container, and the table tests
+// above assert on thead/tbody.
+describe("CatalogTable mobile cards", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    document.cookie = `${COLUMN_COOKIE}=; path=/; max-age=0`;
+    nav.search = "";
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    nav.search = "";
+  });
+
+  const render = (rows = [row()], me: Parameters<typeof CatalogTable>[0]["me"] = null) => {
+    act(() => {
+      root.render(
+        <CatalogTable rows={rows} total={rows.length} page={1} me={me} initialColumns={defaultColumnPrefs()} />,
+      );
+    });
+  };
+
+  // The card list is the only child of this box, so scoping to it proves the
+  // fields are on the CARD and not just somewhere in the table.
+  const cards = () => container.querySelector("div.sm\\:hidden") as HTMLElement;
+  const cardEls = () => Array.from(cards().children) as HTMLElement[];
+
+  it("renders one card per row carrying every field the table spreads across columns", () => {
+    render();
+    expect(cardEls()).toHaveLength(1);
+    const text = cards().textContent ?? "";
+    expect(text).toContain("Weekly report"); // title
+    expect(text).toContain("weekly-report"); // slug
+    expect(text).toContain("v3"); // version
+    expect(text).toContain("TEXT"); // type
+    expect(text).toContain("report"); // label
+    expect(text).toContain("topic:platform"); // scope
+    expect(text).toContain("2 KB"); // size
+    expect(text).toContain("text/markdown"); // content type
+    // The title links to the version-pinned slug URL, like the table's does.
+    const title = cards().querySelector("a") as HTMLAnchorElement;
+    expect(title.getAttribute("href")).toBe("/s/weekly-report/3");
+  });
+
+  // The table's horizontal scroll came from its own width; hiding it below
+  // `sm` is what removes the side-scroll, so the class is the contract.
+  it("hides the table where the cards show, and vice versa", () => {
+    render();
+    const table = container.querySelector("table") as HTMLTableElement;
+    expect(table.className).toContain("hidden");
+    expect(table.className).toContain("sm:table");
+    expect(cards().className).toContain("sm:hidden");
+  });
+
+  it("links an APP row to the running app from the card too", () => {
+    render([row({ artifact_type: "APP", named_slug: "dash", version: 2 })]);
+    const hrefs = Array.from(cards().querySelectorAll("a")).map((a) => a.getAttribute("href"));
+    expect(hrefs).toContain("/app/dash/2");
+  });
+
+  it("falls back to the uuid when a row has no slug", () => {
+    render([row({ named_slug: null, version: null })]);
+    const text = cards().textContent ?? "";
+    expect(text).toContain("11111111-2222-3333-4444-555555555555");
+    const title = cards().querySelector("a") as HTMLAnchorElement;
+    expect(title.getAttribute("href")).toBe("/a/11111111-2222-3333-4444-555555555555");
+    // No "v" line for a version-less row — never "vnull".
+    expect(text).not.toContain("null");
+  });
+
+  // Archive is a drill-in affordance in the table (its own actions column);
+  // the card has to carry it in the same view, under the same permission.
+  it("offers archive on the card only in the drill-in, and only to someone who may", () => {
+    render();
+    expect(cards().querySelector("button"), "no archive control on the plain listing").toBeNull();
+
+    nav.search = "slug=weekly-report";
+    render();
+    const btn = cards().querySelector("button") as HTMLButtonElement;
+    expect(btn.textContent).toContain("archive");
+    expect(btn.disabled, "a stranger cannot archive someone else's artifact").toBe(true);
+
+    // The row's own creator: canActOn is creator-or-admin, so this is the
+    // non-admin half of that check.
+    render([row()], { email: "sam@example.com", name: "Sam", is_admin: false, permissions: [] });
+    expect((cards().querySelector("button") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("marks an archived row on the card and offers to restore it", () => {
+    nav.search = "slug=weekly-report";
+    render([row({ deleted_at: "2026-08-01T00:00:00Z" })]);
+    const text = cards().textContent ?? "";
+    expect(text).toContain("archived");
+    expect(cards().querySelector("button")!.textContent).toContain("unarchive");
   });
 });

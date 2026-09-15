@@ -66,8 +66,14 @@ var feProxyGuardPrefixes = []string{"/api", "/app", "/auth", "/mcp", "/share"}
 // re-registering it here would replace the real handler with a 404.
 var feProxyBareGuardPrefixes = []string{"/api", "/app", "/auth", "/share"}
 
-// mountFEProxyGuards registers a 404 catch-all under each prefix arti-server
+// mountFEProxyGuards claims every unmatched path under each prefix arti-server
 // owns. Must be called before the `/*` FE proxy route.
+//
+// The handler is trailingSlashRedirect rather than a bare NotFoundHandler: a
+// path that failed to route only because of a trailing slash is canonicalized
+// here, and everything else 404s as before. Anything that matched a real route
+// — including a wildcard route serving its own directory root — is already
+// gone by this point.
 //
 // These do not shadow the real routes: chi resolves static segments before
 // path params and path params before a wildcard, so `/api/artifacts` and
@@ -75,10 +81,10 @@ var feProxyBareGuardPrefixes = []string{"/api", "/app", "/auth", "/share"}
 // route table.
 func mountFEProxyGuards(root chi.Router) {
 	for _, prefix := range feProxyGuardPrefixes {
-		root.Handle(prefix+"/*", http.NotFoundHandler())
+		root.Handle(prefix+"/*", http.HandlerFunc(trailingSlashRedirect))
 	}
 	for _, prefix := range feProxyBareGuardPrefixes {
-		root.Handle(prefix, http.NotFoundHandler())
+		root.Handle(prefix, http.HandlerFunc(trailingSlashRedirect))
 	}
 }
 

@@ -158,14 +158,14 @@ middleware, which pins it to a single artifact/app.
 The **upload** scope is enforced separately, by a guard that sits after the main
 auth middleware in the authed group. For an upload credential it (a) applies a
 default-deny allowlist — downgrading *even an admin* to create/append/read only —
-and (b) caps the body size (25 MiB). So a leaked upload bearer can never delete or
+and (b) caps the body size (`ARTI_DEVICE_MAX_UPLOAD_BYTES`). So a leaked upload bearer can never delete or
 reach admin. Device tokens additionally re-check that the long-lived family isn't
 revoked or expired on every call.
 
 **API keys** are a *non-JWT* upload credential: an opaque `arti_upload_…` string,
 stored only as a SHA-256 hash, minted self-serve by any authenticated user and tied
 to that user's email. They carry the `upload` scope, so they hit the exact same guard
-(and 25 MiB cap) as a device token — never delete, edit, admin, or MCP. Revocation and
+(and body cap) as a device token — never delete, edit, admin, or MCP. Revocation and
 expiry are enforced at the API-key auth rung (a revoked or expired key simply fails to
 authenticate). Minting a key requires a full-access credential; an upload credential
 can't mint more keys.

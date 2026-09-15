@@ -82,11 +82,24 @@ func newRouterWithChecker(store *fakeServiceStore, maxTTL time.Duration, checker
 	return r
 }
 
-// do fires a request with the given caller email injected as identity.
+// browserSession is what the settings page's own fetch arrives as: an
+// arti_session cookie. Minting requires it (see httpCreate).
+var browserSession = auth.Credential{Kind: auth.CredKindSession, Source: auth.CredSourceCookie}
+
+// do fires a request with the given caller email injected as identity, as a
+// browser session.
 func do(t *testing.T, r *chi.Mux, email, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return doAs(t, r, email, browserSession, method, path, body)
+}
+
+// doAs fires a request with an explicit credential, for the routes that care
+// which one the caller holds.
+func doAs(t *testing.T, r *chi.Mux, email string, cred auth.Credential, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-	req = req.WithContext(auth.WithIdentity(req.Context(), email))
+	ctx := auth.WithIdentity(req.Context(), email)
+	req = req.WithContext(auth.WithTestCredential(ctx, cred))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
@@ -96,7 +109,8 @@ func do(t *testing.T, r *chi.Mux, email, method, path, body string) *httptest.Re
 func doWithClaims(t *testing.T, r *chi.Mux, claims auth.Claims, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-	req = req.WithContext(auth.WithTestClaims(req.Context(), claims))
+	ctx := auth.WithTestClaims(req.Context(), claims)
+	req = req.WithContext(auth.WithTestCredential(ctx, browserSession))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
@@ -385,5 +399,92 @@ func TestRevoke_Own_CheckerError_StillRevokes(t *testing.T) {
 	w := do(t, r, regularEmail, "DELETE", "/api/keys/"+id.String(), "")
 	if w.Code != http.StatusNoContent {
 		t.Errorf("want 204 (own revoke independent of checker), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ─── mint gate ───────────────────────────────────────────────────────────────
+
+// The failure this gate exists for: an agent holding its owner's CLI token
+// minted a year-long key under that person's name, and the person never knew.
+// A bearer authenticates as the same user with identical claims, so the
+// refusal can only key on how the credential arrived.
+func TestCreate_BearerTokenCannotMint(t *testing.T) {
+	store := &fakeServiceStore{}
+	r := newRouter(store, 365*24*time.Hour)
+
+	cred := auth.Credential{Kind: auth.CredKindToken, Source: auth.CredSourceBearer}
+	w := doAs(t, r, regularEmail, cred, "POST", "/api/keys", `{"name":"from-an-agent"}`)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(store.inserted) != 0 {
+		t.Fatal("a bearer token minted a key")
+	}
+	if !strings.Contains(w.Body.String(), "web UI") {
+		t.Errorf("the refusal must say where to mint instead, got %s", w.Body.String())
+	}
+}
+
+// A request with no credential at all (no auth middleware upstream) must not
+// mint either — the gate fails closed rather than treating absence as a
+// browser.
+func TestCreate_NoCredentialCannotMint(t *testing.T) {
+	store := &fakeServiceStore{}
+	r := newRouter(store, 365*24*time.Hour)
+
+	req := httptest.NewRequest("POST", "/api/keys", bytes.NewBufferString(`{"name":"x"}`))
+	req = req.WithContext(auth.WithIdentity(req.Context(), regularEmail))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// A cookie-borne credential without the session marker is a session minted
+// before this shipped. The person is real and at a browser, so the refusal has
+// to tell them to sign in again rather than talk about bearer tokens.
+func TestCreate_PreMarkerSessionIsToldToSignInAgain(t *testing.T) {
+	store := &fakeServiceStore{}
+	r := newRouter(store, 365*24*time.Hour)
+
+	cred := auth.Credential{Kind: auth.CredKindToken, Source: auth.CredSourceCookie}
+	w := doAs(t, r, regularEmail, cred, "POST", "/api/keys", `{"name":"old-session"}`)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "sign in again") {
+		t.Errorf("refusal must tell the person how to recover, got %s", w.Body.String())
+	}
+}
+
+// The owner of the identity a key is created under has to hear about it, since
+// not noticing is half of how the incident happened.
+func TestCreate_NotifiesOwner(t *testing.T) {
+	store := &fakeServiceStore{}
+	svc := apikeys.NewService(store, 365*24*time.Hour, fakeChecker)
+	got := make(chan apikeys.Minted, 1)
+	svc.OnMint(func(_ context.Context, ev apikeys.Minted) { got <- ev })
+	r := chi.NewRouter()
+	svc.Mount(r, func(h http.Handler) http.Handler { return h })
+
+	w := doAs(t, r, regularEmail, browserSession, "POST", "/api/keys", `{"name":"ci-upload"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	select {
+	case ev := <-got:
+		if ev.OwnerEmail != regularEmail || ev.Name != "ci-upload" {
+			t.Errorf("notified %+v, want the owner and the key's name", ev)
+		}
+		if !strings.HasPrefix(ev.KeyPrefix, "arti_upload_") {
+			t.Errorf("prefix = %q, want the identifiable prefix so the owner can match it", ev.KeyPrefix)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner was never notified of the mint")
 	}
 }

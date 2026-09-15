@@ -1,4 +1,4 @@
-package artifacts
+package mdtext
 
 import (
 	"github.com/yuin/goldmark"
@@ -17,7 +17,7 @@ import (
 // gets parsed as an opening/closing pair and the text between the two tildes is
 // wrapped in <del>. goldmark v1.8.2 exposes no option to require "~~", so we
 // register our own inline parser that only opens on a run of exactly two
-// tildes, and drop extension.Strikethrough from the GFM set (see embed_serve.go).
+// tildes, and drop extension.Strikethrough from the GFM set (see New below).
 //
 // Everything else (the AST node kind and the <del> HTML renderer) is reused from
 // goldmark so double-tilde strikethrough keeps rendering identically.

@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
+import { appHref } from "@/lib/hrefs";
 import type { ArtifactInfo, Me, PackageManifest } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
 import { relativeTime } from "@/lib/time";
@@ -19,14 +20,46 @@ import CommentsMenuItem from "./CommentsMenuItem";
 import { MENU_ROW, MENU_SVG, MenuIcon } from "./MenuRow";
 import { ShareModal } from "./ShareModal";
 import CreatorName from "./CreatorName";
+import WrittenViaChip from "./WrittenViaChip";
 import ArtifactEditor from "./ArtifactEditor";
 import ArtifactCompare from "./ArtifactCompare";
 import DiagramView from "./DiagramView";
 import DiagramArtifactEditor from "./DiagramArtifactEditor";
 import { isDiagramContentType } from "@/lib/diagram";
 import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
+import ViewTracker from "./ViewTracker";
 import { useUpload } from "@/lib/upload-context";
 import { targetFromInfo } from "@/lib/upload-target";
+
+// useIsMobileViewport — a resize-aware "are we below the sm breakpoint"
+// read, via useSyncExternalStore rather than a mount effect + setState: the
+// server (and the client's first hydration pass) has no window, so the
+// server snapshot is hard-coded to `false` and the real check only takes
+// effect once React reconciles against the live client snapshot post-hydrate.
+// A mount effect that read matchMedia and called setState would work too, but
+// it's exactly the "localStorage hydration" shape this file's eslint config
+// flags as a known anti-pattern (see web/eslint.config.mjs) — this is the
+// same fix already used for width/text-size prefs.
+const MOBILE_MQ = "(max-width: 639px)";
+function subscribeMobileViewport(onChange: () => void) {
+  if (typeof window === "undefined") return () => {};
+  const mq = window.matchMedia(MOBILE_MQ);
+  mq.addEventListener("change", onChange);
+  return () => mq.removeEventListener("change", onChange);
+}
+function getMobileViewportSnapshot() {
+  return typeof window !== "undefined" && window.matchMedia(MOBILE_MQ).matches;
+}
+function getMobileViewportServerSnapshot() {
+  return false;
+}
+function useIsMobileViewport(): boolean {
+  return useSyncExternalStore(
+    subscribeMobileViewport,
+    getMobileViewportSnapshot,
+    getMobileViewportServerSnapshot,
+  );
+}
 
 // BackButton — small left-chevron that pops one step in browser history
 // if there is one, falling back to the catalog root. Lives at the very
@@ -221,14 +254,20 @@ export function EditableTitle({
   }
   return (
     <h1
-      className="flex select-none items-center gap-2 rounded -mx-1 px-1 text-base font-semibold text-neutral-900 cursor-pointer transition hover:bg-neutral-100"
+      className="flex min-w-0 select-none items-center gap-2 rounded -mx-1 px-1 text-base font-semibold text-neutral-900 cursor-pointer transition hover:bg-neutral-100"
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       title={canEdit ? "click to collapse · double-click to rename" : "click to collapse"}
     >
-      {title}
+      {/* Below sm the title is the one flex item that shrinks (min-w-0 on the
+          h1 lets it go under its content width), so it truncates instead of
+          wrapping — keeping the back button and collapse triangle on the same
+          row as the title. Desktop keeps the old wrapping behaviour. */}
+      <span className="min-w-0 truncate sm:overflow-visible sm:whitespace-normal sm:text-clip">
+        {title}
+      </span>
       {isPackage ? (
-        <span title="multi-file PACKAGE artifact" aria-label="package">📦</span>
+        <span className="shrink-0" title="multi-file PACKAGE artifact" aria-label="package">📦</span>
       ) : null}
     </h1>
   );
@@ -368,15 +407,25 @@ function AccessButton({
   access,
   write,
   hasOtherVersions,
-  canEdit,
   canShare,
+  slug,
+  owner,
+  isOwner,
+  actorIsOwner,
   onSaved,
 }: {
   artifactID: string;
   access: string[];
   write?: string[] | null;
   hasOtherVersions: boolean;
-  canEdit: boolean;
+  // Changing access and transferring both need owner authority on the server,
+  // so one flag gates the editor, the button's label and the Transfer control
+  // alike. A version's creator who does not own the document would otherwise
+  // get an editable dialog whose Confirm returns 403.
+  slug?: string | null;
+  owner?: string;
+  isOwner: boolean;
+  actorIsOwner: boolean;
   // The server's `can_share`. Gates the live-link count, which is owner-only
   // information and is not worth a request otherwise.
   canShare: boolean;
@@ -434,7 +483,7 @@ function AccessButton({
         className="inline-flex items-center gap-1.5 rounded-md border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 transition hover:bg-neutral-50"
       >
         <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden="true" />
-        {canEdit ? "Edit Access" : "Access"}
+        {isOwner ? "Edit Access" : "Access"}
       </button>
       {open ? (
         <AccessModal
@@ -442,7 +491,11 @@ function AccessButton({
           access={access}
           write={write}
           hasOtherVersions={hasOtherVersions}
-          canEdit={canEdit}
+          canEdit={isOwner}
+          slug={slug}
+          owner={owner}
+          isOwner={isOwner}
+          actorIsOwner={actorIsOwner}
           liveShareLinks={liveShares}
           onClose={() => setOpen(false)}
           onSaved={onSaved}
@@ -462,7 +515,7 @@ function ThreeDotsMenu({
   downloadLabel,
   zipHref,
   zipName,
-  canEdit,
+  canArchive,
   isArchived,
   archiving,
   onArchive,
@@ -482,7 +535,9 @@ function ThreeDotsMenu({
   downloadLabel?: string;
   zipHref?: string;
   zipName?: string;
-  canEdit: boolean;
+  // Archive's own authority, which is not the metadata one — see canArchive
+  // where it is derived.
+  canArchive: boolean;
   isArchived: boolean;
   archiving: boolean;
   onArchive: () => void;
@@ -659,7 +714,7 @@ function ThreeDotsMenu({
               onToggle={() => onToggleComments()}
             />
           ) : null}
-          {canEdit ? (
+          {canArchive ? (
             <button
               type="button"
               onClick={() => { onArchive(); setOpen(false); }}
@@ -895,6 +950,12 @@ export default function ArtifactViewer({
   // Keying the whole viewer on artifact_id would also work, but it would remount
   // the comments overlay and the width machinery — far more than this needs.
   const [sharing, setSharing] = useState(false);
+  const [viewCount, setViewCount] = useState<number | undefined>(undefined);
+  const [viewCount30d, setViewCount30d] = useState<number | undefined>(undefined);
+  const onViewCount = useCallback((total: number, last30d: number) => {
+    setViewCount(total);
+    setViewCount30d(last30d);
+  }, []);
   const [renderedArtifactId, setRenderedArtifactId] = useState(info.artifact_id);
   if (info.artifact_id !== renderedArtifactId) {
     setRenderedArtifactId(info.artifact_id);
@@ -906,6 +967,8 @@ export default function ArtifactViewer({
     // keep showing the previous document's minted URL and link list while
     // artifactID underneath it points at the new one.
     setSharing(false);
+    setViewCount(undefined);
+    setViewCount30d(undefined);
   }
   const mode = useRailMode();
   const router = useRouter();
@@ -920,7 +983,19 @@ export default function ArtifactViewer({
     setTarget(uploadTarget);
     return () => clearTarget(uploadTarget);
   }, [uploadTarget, setTarget, clearTarget]);
-  const canEdit = !!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(me.email, info.creator));
+  // The server's own verdict on metadata editing (admin, this version's
+  // creator, or the document's owner, minus the kind:skill guard). Falls back
+  // to the old client re-derivation only where the field is absent, in
+  // non-viewer contexts: `creator` names whoever pushed this version, so on a
+  // transferred document it answers for the wrong person in both directions.
+  const canEdit =
+    info.can_edit_metadata ??
+    (!!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(me.email, info.creator)));
+  // Archive and unarchive keep their own rule — "only the creator or an admin"
+  // (httpArchive / httpUnarchive). That is this predicate exactly rather than an
+  // approximation, so it needs no server flag; it is simply not canEdit, which
+  // now also answers yes for a document's owner.
+  const canArchive = !!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(me.email, info.creator));
   const isArchived = !!info.deleted_at;
   // Comments only attach to documents you can annotate: TEXT with textual
   // content, or a PACKAGE (its HTML files get the in-page overlay). Never for
@@ -950,6 +1025,34 @@ export default function ArtifactViewer({
   // list itself and reports "only one version" on open (no pre-check here).
   const comparable = isComparableArtifact(info);
   const [headerCollapsed, setHeaderCollapsed] = useState(false);
+  // Type/content-type/chips/labels/scopes/toolbar is too much for a phone at
+  // first paint, so mobile starts collapsed; desktop keeps the expanded
+  // default. Applied once — on the first render where the mobile snapshot is
+  // known — as a during-render adjustment rather than a mount effect (see
+  // useIsMobileViewport above for why). A fresh artifact remounts this
+  // component (see the remount caveat above), so each new document also
+  // opens collapsed on mobile.
+  const isMobileViewport = useIsMobileViewport();
+  const [mobileDefaultApplied, setMobileDefaultApplied] = useState(false);
+  if (isMobileViewport && !mobileDefaultApplied) {
+    setMobileDefaultApplied(true);
+    setHeaderCollapsed(true);
+  }
+  // Row 3 (labels/scopes) starts clipped to one line on mobile; this expands
+  // it. No effect on desktop, where row 3 is never clipped (see the JSX).
+  const [metaOpen, setMetaOpen] = useState(false);
+  // Both declared after the artifact-identity reset block above, so they get
+  // their own reset here rather than folding into that one — same stale
+  // `renderedArtifactId` comparison, so it fires in the same render as the
+  // block above and converges the same way (see that block's comment).
+  // Without this, a reused instance (see the remount caveat above) would keep
+  // the previous document's collapse-applied flag and "more" state: the next
+  // document would never get the mobile auto-collapse (mobileDefaultApplied
+  // already true) and would open with its labels/scopes pre-expanded.
+  if (info.artifact_id !== renderedArtifactId) {
+    setMobileDefaultApplied(false);
+    setMetaOpen(false);
+  }
   const [archiving, setArchiving] = useState(false);
   const [actionErr, setActionErr] = useState<string>("");
   const [commentsBusy, setCommentsBusy] = useState(false);
@@ -971,7 +1074,7 @@ export default function ArtifactViewer({
     }
   };
   const doArchive = async () => {
-    if (!canEdit) return;
+    if (!canArchive) return;
     const ok = window.confirm(
       isArchived
         ? `Unarchive "${info.title}"? It will reappear in the catalog.`
@@ -1020,16 +1123,9 @@ export default function ArtifactViewer({
       ? new URL(permalink, window.location.origin).toString()
       : permalink;
 
-  // APP artifacts get a "Visit app" launcher → the full-page running app at
-  // /app/{slug}/{version} (or /app/{uuid} when slugless), pinned to this version.
-  const visitHref =
-    info.artifact_type !== "APP"
-      ? undefined
-      : info.named_slug
-        ? info.version != null
-          ? `/app/${info.named_slug}/${info.version}`
-          : `/app/${info.named_slug}`
-        : `/app/${info.artifact_id}`;
+  // APP artifacts get a "Visit app" launcher → the full-page running app,
+  // pinned to this version.
+  const visitHref = appHref(info) ?? undefined;
 
   // "Full Page" target — the chrome-less view of the selected payload. Unified
   // on a slug-relative `?v=full[&file=<path>]` URL that resolves against the page
@@ -1086,11 +1182,23 @@ export default function ArtifactViewer({
 
   return (
     <>
+      <ViewTracker
+        artifactID={info.artifact_id}
+        onCount={onViewCount}
+      />
       {commentsEnabled ? <CommentsLayer artifactId={info.artifact_id} me={me} contentType={info.content_type} artifactType={info.artifact_type} fullPage={false} fullPageHref={fullHref ?? "?v=full"} /> : null}
       <div data-arti-topbar className="sticky top-12 z-20 border-b border-neutral-200 bg-neutral-50/95 backdrop-blur supports-[backdrop-filter]:bg-neutral-50/80 md:top-0">
-        <div className={`mx-auto ${WIDTH_CLASS.wide} px-6 pt-4 pb-2`}>
-          {/* Row 1 — title with collapse toggle. */}
-          <div className="flex flex-wrap items-center gap-2">
+        <div className={`mx-auto ${WIDTH_CLASS.wide} px-4 pt-2.5 pb-1.5 sm:px-6`}>
+          {/* Row 1 — title with collapse toggle. flex-wrap decides whether to
+              start a new line from each item's UNSHRUNK preferred width, not
+              its post-shrink size — so on its own this row still wraps the
+              title (with truncate + min-w-0 doing nothing, since they only
+              apply once an item is on a line) onto its own full-width line
+              below sm, splitting the back button/title/triangle across three
+              lines. flex-nowrap forces one line and lets the title actually
+              shrink and truncate; sm:flex-wrap restores the original
+              (rarely-hit) desktop wrap. */}
+          <div className="flex flex-nowrap items-center gap-2 sm:flex-wrap">
             <BackButton />
             <EditableTitle
               initial={info.title}
@@ -1115,15 +1223,29 @@ export default function ArtifactViewer({
           {!headerCollapsed ? (
             <>
               {/* Row 2 — type + content-type + permalink (left), creator + size + time (right). */}
-              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-neutral-500">
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-neutral-500">
                 <span className="rounded bg-neutral-100 px-2 py-0.5 text-neutral-600">
                   {info.artifact_type}
                 </span>
                 <span>{info.content_type}</span>
-                <PermalinkChip href={permalink} copy={permalinkAbs} />
+                {/* The UUID permalink is a copy target for desktop work
+                    (paste into a doc, a PR, a chat); on a phone the address
+                    bar is the share affordance and the chip only costs a
+                    wrapped line, so it folds away below `sm`. */}
+                <span className="hidden sm:inline-flex">
+                  <PermalinkChip href={permalink} copy={permalinkAbs} />
+                </span>
                 {info.named_slug ? <SlugChip slug={info.named_slug} version={info.version} /> : null}
                 <span className="ml-auto flex items-center gap-1">
                   <CreatorName email={info.creator} />
+                  {/* Credential provenance is a desktop nicety, not something
+                      worth a phone's limited row width. */}
+                  <span className="hidden sm:inline-flex">
+                    <WrittenViaChip
+                      writtenVia={info.written_via}
+                      writtenViaName={info.written_via_name}
+                    />
+                  </span>
                   {info.size_bytes != null ? (
                     <span className="text-neutral-400" title={`${info.size_bytes} bytes`}>
                       {" \u00b7 "}
@@ -1141,9 +1263,22 @@ export default function ArtifactViewer({
                   these are human-facing tags, not identifiers like the
                   mono UUID/slug chips in row 2. */}
               {info.scopes.length > 0 || info.labels.length > 0 || canEdit ? (
-                <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
+                <div className="mt-1 flex flex-wrap items-start gap-x-4 gap-y-1.5 text-[11px]">
+                  {/* Below sm, each chip group clips to one line (any wrapped
+                      chips are just under the fold, not gone) until "more" is
+                      tapped. focus-within lifts the clip the moment the "+"
+                      input opens (it autofocuses — see ChipEditor), so the
+                      typeahead dropdown is never clipped even while collapsed.
+                      Desktop is unclipped, as before. */}
                   {info.labels.length > 0 || canEdit ? (
-                    <div className="flex flex-wrap items-center gap-1.5">
+                    <div
+                      className={
+                        "flex flex-wrap items-center gap-1.5" +
+                        (metaOpen
+                          ? ""
+                          : " max-h-[24px] overflow-hidden focus-within:max-h-none focus-within:overflow-visible sm:max-h-none sm:overflow-visible")
+                      }
+                    >
                       <LabelEditor
                         artifactID={info.artifact_id}
                         labels={info.labels}
@@ -1153,7 +1288,14 @@ export default function ArtifactViewer({
                     </div>
                   ) : null}
                   {info.scopes.length > 0 || canEdit ? (
-                    <div className="flex flex-wrap items-center gap-1.5">
+                    <div
+                      className={
+                        "flex flex-wrap items-center gap-1.5" +
+                        (metaOpen
+                          ? ""
+                          : " max-h-[24px] overflow-hidden focus-within:max-h-none focus-within:overflow-visible sm:max-h-none sm:overflow-visible")
+                      }
+                    >
                       <ScopeEditor
                         artifactID={info.artifact_id}
                         scopes={info.scopes}
@@ -1162,11 +1304,24 @@ export default function ArtifactViewer({
                       />
                     </div>
                   ) : null}
+                  {/* canEdit is included even with zero chips: the lone "+"
+                      always fits in the clipped row, but this still gives an
+                      explicit way to pin the row open rather than relying on
+                      focus-within alone. */}
+                  {info.labels.length > 0 || info.scopes.length > 0 || canEdit ? (
+                    <button
+                      type="button"
+                      onClick={() => setMetaOpen((o) => !o)}
+                      className="text-neutral-400 underline decoration-dotted underline-offset-2 hover:text-neutral-700 sm:hidden"
+                    >
+                      {metaOpen ? "less" : "more"}
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
 
               {/* Row 4 — view controls + access + three-dot menu. */}
-              <div className="mt-2 flex flex-wrap items-center gap-3">
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
                 <ViewerToolbar
                   width={effectiveWidth}
                   setWidth={comparing ? setCompareWidth : setWidth}
@@ -1174,6 +1329,8 @@ export default function ArtifactViewer({
                   setTextSize={setTextSize}
                   visitHref={visitHref}
                   fullHref={effectiveFullHref}
+                  viewCount={viewCount}
+                  viewCount30d={viewCount30d}
                   // Inert while something forces full width — hidden rather
                   // than left doing nothing.
                   showWidth={!forcedWide}
@@ -1184,12 +1341,21 @@ export default function ArtifactViewer({
                     to avoid a dead toggle. */}
                 {!editing && !comparing ? <RawToggle original={original} setOriginal={setOriginal} /> : null}
                 <AccessButton
+                  // Keyed so an in-place document switch REMOUNTS it. Its open
+                  // state, and the transfer pane's recipient inside it, live
+                  // here rather than in the identity-reset block above; a
+                  // surviving recipient plus the new slug would transfer the
+                  // wrong document, and that cannot be undone.
+                  key={info.artifact_id}
                   artifactID={info.artifact_id}
                   access={info.allowed_access}
                   write={info.allowed_write}
                   hasOtherVersions={!!info.named_slug}
-                  canEdit={canEdit}
                   canShare={!!info.can_share}
+                  slug={info.named_slug}
+                  owner={info.owner}
+                  isOwner={!!info.can_manage_comments}
+                  actorIsOwner={!!me && !!info.owner && sameEmail(me.email, info.owner)}
                   onSaved={() => router.refresh()}
                 />
                 <ThreeDotsMenu
@@ -1198,7 +1364,7 @@ export default function ArtifactViewer({
                   downloadLabel={downloadLabel}
                   zipHref={zipHref}
                   zipName={zipName}
-                  canEdit={canEdit}
+                  canArchive={canArchive}
                   isArchived={isArchived}
                   archiving={archiving}
                   onArchive={doArchive}
@@ -1260,7 +1426,7 @@ export default function ArtifactViewer({
       ) : (
         <section
           data-arti-doc
-          className={`mx-auto ${WIDTH_CLASS[effectiveWidth]} px-6 py-8`}
+          className={`mx-auto ${WIDTH_CLASS[effectiveWidth]} px-4 py-4 sm:px-5 sm:py-6`}
           style={{ "--arti-text-scale": textScale } as React.CSSProperties}
         >
           {!isTextualContentType(info.content_type) ? (
@@ -1416,7 +1582,7 @@ function PackageBody({
 
   return (
     <section
-      className={`mx-auto ${WIDTH_CLASS[width]} px-6 py-8`}
+      className={`mx-auto ${WIDTH_CLASS[width]} px-4 py-4 sm:px-5 sm:py-6`}
       style={{ "--arti-text-scale": textScale } as React.CSSProperties}
     >
       {selected ? (

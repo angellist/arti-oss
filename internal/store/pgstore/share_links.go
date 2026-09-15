@@ -113,6 +113,61 @@ func (s *Store) SlugLiveCreator(ctx context.Context, slug string) (string, error
 	return creator, err
 }
 
+// LiveLineageFacts is what the share path needs to tell a hand-off apart from a
+// reclaim. Both look like "the live lineage was written by someone who is not
+// the owner"; only the timing separates them.
+type LiveLineageFacts struct {
+	// Creator of the slug's earliest NON-archived version. Empty when every
+	// version is archived.
+	LiveCreator string
+	// When that version was published.
+	LiveCreatedAt time.Time
+	// Whether ownership was ever moved deliberately (artifact_owners.updated_by
+	// is set only by a transfer; a claim or the 0029 backfill leaves it NULL).
+	Transferred bool
+	// When the owner row was last written.
+	OwnerSetAt time.Time
+}
+
+// LiveLineageFacts reads them in one statement so the timestamps cannot be
+// straddled by a concurrent transfer or version insert.
+//
+// The ORDER BY carries a tiebreak because uix_artifacts_slug_ver is partial on
+// deleted_at IS NULL: an archived v1 and a reclaimed live v1 can coexist under
+// one slug, which is the case this exists to catch.
+func (s *Store) LiveLineageFacts(ctx context.Context, slug string) (LiveLineageFacts, error) {
+	var f LiveLineageFacts
+	var creator *string
+	var createdAt, ownerSetAt *time.Time
+	var updatedBy *string
+	err := s.pool.QueryRow(ctx, `
+		SELECT live.creator, live.created_at, o.updated_at, o.updated_by
+		  FROM artifact_owners o
+		  LEFT JOIN LATERAL (
+		    SELECT creator, created_at FROM artifacts
+		     WHERE named_slug = o.named_slug AND deleted_at IS NULL
+		     ORDER BY version ASC, created_at ASC, artifact_id ASC LIMIT 1
+		  ) live ON TRUE
+		 WHERE o.named_slug = $1`, slug).Scan(&creator, &createdAt, &ownerSetAt, &updatedBy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return f, ErrNoOwner
+	}
+	if err != nil {
+		return f, err
+	}
+	if creator != nil {
+		f.LiveCreator = *creator
+	}
+	if createdAt != nil {
+		f.LiveCreatedAt = *createdAt
+	}
+	if ownerSetAt != nil {
+		f.OwnerSetAt = *ownerSetAt
+	}
+	f.Transferred = updatedBy != nil && *updatedBy != ""
+	return f, nil
+}
+
 // GetLatestBySlugAnyState returns a slug's newest version REGARDLESS of
 // archival. The share serve path needs this rather than GetBySlug(slug, nil):
 // that filters deleted_at and walks back to an older version, so archiving the

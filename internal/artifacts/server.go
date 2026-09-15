@@ -28,6 +28,7 @@ import (
 	"github.com/angellist/arti-oss/internal/httperr"
 	"github.com/angellist/arti-oss/internal/pkgzip"
 	"github.com/angellist/arti-oss/internal/rbac"
+	"github.com/angellist/arti-oss/internal/slacknotify"
 	"github.com/angellist/arti-oss/internal/store/opensearch"
 	"github.com/angellist/arti-oss/internal/store/pgstore"
 )
@@ -80,7 +81,14 @@ type Service struct {
 	osClient *opensearch.Client
 	// osIndexer syncs artifact writes to the OpenSearch index (nil = disabled).
 	osIndexer *opensearch.Indexer
+	// notifier DMs a new owner when a document is handed to them. nil disables
+	// it; every send is a no-op on a nil *Notifier.
+	notifier *slacknotify.Notifier
 }
+
+// SetNotifier wires the Slack notifier used to tell a new owner they have been
+// given a document. Optional: nil leaves transfers silent.
+func (s *Service) SetNotifier(n *slacknotify.Notifier) { s.notifier = n }
 
 // SetEmbedTokenFn wires the comment-embed token minter (from the comments
 // service). When set, served text/html package files get the comments
@@ -367,6 +375,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 		ContentType:        req.ContentType,
 		Content:            content,
 		Creator:            creator,
+		WrittenVia:         auth.CredentialFromContext(ctx).Ref(),
+		WrittenViaName:     auth.CredentialFromContext(ctx).Label,
 		Scopes:             scopes,
 		Labels:             labels,
 		Metadata:           meta,
@@ -526,17 +536,19 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 	// differs from the slug's fresh prior version (see Create).
 	var aclFanout bool
 	row, perr := s.store.Append(ctx, pgstore.AppendInput{
-		NamedSlug:     slug,
-		Separator:     sep,
-		Content:       []byte(req.Content),
-		Creator:       creator,
-		ContentType:   req.ContentType,
-		Title:         req.Title,
-		Description:   req.Description,
-		Scopes:        req.Scopes,
-		Labels:        req.Labels,
-		AllowedAccess: req.AllowedAccess,
-		AllowedWrite:  req.AllowedWrite,
+		NamedSlug:      slug,
+		Separator:      sep,
+		Content:        []byte(req.Content),
+		Creator:        creator,
+		WrittenVia:     auth.CredentialFromContext(ctx).Ref(),
+		WrittenViaName: auth.CredentialFromContext(ctx).Label,
+		ContentType:    req.ContentType,
+		Title:          req.Title,
+		Description:    req.Description,
+		Scopes:         req.Scopes,
+		Labels:         req.Labels,
+		AllowedAccess:  req.AllowedAccess,
+		AllowedWrite:   req.AllowedWrite,
 		// Closes the race the check above can't: if the slug looked absent
 		// on our own pre-check but a concurrent writer created it (as a
 		// restricted artifact) before this call landed, the retry loop
@@ -732,8 +744,8 @@ func (s *Service) requireAclChangeAuthority(ctx context.Context, caller, slug st
 		return nil
 	}
 	if slug != "" {
-		owner, oerr := s.store.SlugCreator(ctx, slug)
-		if oerr != nil && !errors.Is(oerr, pgstore.ErrNotFound) {
+		owner, oerr := s.store.SlugOwner(ctx, slug)
+		if oerr != nil && !errors.Is(oerr, pgstore.ErrNoOwner) {
 			return oerr
 		}
 		if owner != "" && strings.EqualFold(owner, caller) {
@@ -783,7 +795,11 @@ func (s *Service) checkWriteAccess(ctx context.Context, row sqlc.Artifact, calle
 	if err != nil {
 		return err
 	}
-	if pgstore.CanWrite(row, caller, groups) {
+	owner, err := s.store.DocOwner(ctx, row)
+	if err != nil {
+		return err
+	}
+	if pgstore.CanWrite(row, caller, groups, owner) {
 		return nil
 	}
 	return pgstore.ErrNotFound
@@ -818,11 +834,27 @@ func (s *Service) infoWithWrite(ctx context.Context, row sqlc.Artifact, caller s
 		}
 	}
 	info.CanWrite = &cw
+	if owner, err := s.store.DocOwner(ctx, row); err == nil && owner != "" {
+		info.Owner = &owner
+	}
 	// One isDocOwner call feeds both flags: the comment switch and the share
 	// control take the same authority, and computing it twice would let them
 	// drift.
-	owner := s.isDocOwner(ctx, row, caller) == nil
-	info.CanManageComments = &owner
+	isOwner := s.isDocOwner(ctx, row, caller) == nil
+	info.CanManageComments = &isOwner
+	// The predicate UpdateMetadata enforces, published so the viewer stops
+	// re-deriving edit rights from `creator` — which names whoever pushed this
+	// version and, on a transferred document, answers for the wrong person in
+	// both directions. isDocOwner already covers admin, and the kind:skill
+	// write-guard applies to title/labels/scopes there too, so reduce on it
+	// exactly as CanWrite does above.
+	cem := isOwner || strings.EqualFold(row.Creator, caller)
+	if cem {
+		if err := s.requireSkillWrite(ctx, caller, row.Labels); err != nil {
+			cem = false
+		}
+	}
+	info.CanEditMetadata = &cem
 	// can_share must agree with what MintShare will actually allow, so it runs
 	// the same gate rather than re-deriving from ownership alone: minting adds
 	// an ambiguous-lineage refusal that the comment switch does not have.
@@ -947,7 +979,15 @@ func (s *Service) Search(ctx context.Context, q string, in pgstore.ListInput) (L
 	// only ever marks the latest *non-deleted* version, so it can't surface an
 	// archived latest version. Postgres computes the latest over the
 	// archive-inclusive candidate set, which is the correct composition.
-	if q != "" && in.OrderBy == "" && s.osClient.Enabled() && !(in.LatestPerSlug && in.IncludeArchived) {
+	//
+	// A `via:` filter stays on Postgres for a different reason: the index has
+	// no written_via field, and EnsureIndex never revises the mapping of an
+	// index that already exists, so the field would map dynamically as text and
+	// a term filter on it would match nothing — a search that silently answers
+	// with other credentials' documents. `via:` is an audit filter, where
+	// missing a document costs more than losing relevance ranking.
+	if q != "" && in.OrderBy == "" && s.osClient.Enabled() &&
+		!(in.LatestPerSlug && in.IncludeArchived) && in.WrittenVia == nil {
 		osResult, err := s.osSearch(ctx, q, in)
 		if err == nil {
 			return osResult, nil
@@ -1077,6 +1117,7 @@ func (s *Service) osSearch(ctx context.Context, q string, in pgstore.ListInput) 
 	// Same annotation the Postgres list path applies, so the catalog's comment
 	// column doesn't blank out the moment a query routes through OpenSearch.
 	s.fillCommentCounts(ctx, out.Artifacts)
+	s.fillViewCounts(ctx, out.Artifacts)
 	return out, nil
 }
 
@@ -1086,6 +1127,7 @@ func (s *Service) listResp(ctx context.Context, res pgstore.ListResult) ListResp
 		out.Artifacts = append(out.Artifacts, ToInfo(r, s.baseURL))
 	}
 	s.fillCommentCounts(ctx, out.Artifacts)
+	s.fillViewCounts(ctx, out.Artifacts)
 	return out
 }
 
@@ -1125,6 +1167,29 @@ func (s *Service) fillCommentCounts(ctx context.Context, infos []ArtifactInfo) {
 		comments, open := c.Comments, c.OpenThreads
 		infos[i].CommentCount = &comments
 		infos[i].OpenThreadCount = &open
+	}
+}
+
+// fillViewCounts annotates one catalog/search page with slug-scoped view
+// counts in one query. A failed optional count query leaves values nil.
+func (s *Service) fillViewCounts(ctx context.Context, infos []ArtifactInfo) {
+	if len(infos) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(infos))
+	for _, a := range infos {
+		keys = append(keys, viewKeyOfInfo(a))
+	}
+	counts, err := s.store.ArtifactViewCounts(ctx, keys)
+	if err != nil {
+		slog.Warn("artifact view counts for catalog page failed", "err", err, "rows", len(infos))
+		return
+	}
+	for i := range infos {
+		c := counts[viewKeyOfInfo(infos[i])]
+		total, last30d := c.Total, c.Last30d
+		infos[i].ViewCount = &total
+		infos[i].ViewCount30d = &last30d
 	}
 }
 
@@ -1457,6 +1522,8 @@ func Mount(r chi.Router, svc *Service) {
 	r.Get("/api/artifacts/by-slug/{slug}", svc.httpGetBySlug)
 	r.Get("/api/artifacts/by-slug/{slug}/raw", svc.httpGetBySlugRaw)
 	r.Get("/api/artifacts/by-slug/{slug}/versions", svc.httpVersions)
+	r.Get("/api/artifacts/by-slug/{slug}/denial", svc.httpDenialBySlug)
+	r.Post("/api/artifacts/by-slug/{slug}/owner", svc.httpTransferOwner)
 	r.Delete("/api/artifacts/by-slug/{slug}", svc.httpArchiveBySlug)
 	r.Get("/api/artifacts/by-slug/{slug}/files", svc.httpFilesBySlug)
 	r.Get("/api/artifacts/by-slug/{slug}/files/*", svc.httpFileBySlug)
@@ -1467,9 +1534,12 @@ func Mount(r chi.Router, svc *Service) {
 	// routes once both are registered, so ordering is not strictly
 	// required, but we list specific first for clarity.
 	r.Get("/api/artifacts/{id}/meta", svc.httpGetMeta)
+	r.Get("/api/artifacts/{id}/denial", svc.httpDenialByID)
 	r.Post("/api/artifacts/{id}/access/grant-read", svc.httpGrantRead)
 	r.Get("/api/artifacts/{id}/files", svc.httpFilesByID)
 	r.Get("/api/artifacts/{id}/files/*", svc.httpFileByID)
+	r.Post("/api/artifacts/{id}/views", svc.httpRecordView)
+	r.Get("/api/artifacts/{id}/views", svc.httpViewStats)
 	r.Get("/api/artifacts/{id}", svc.httpGetContent)
 	r.Delete("/api/artifacts/{id}", svc.httpArchive)
 	r.Post("/api/artifacts/{id}/unarchive", svc.httpUnarchive)
@@ -1529,40 +1599,54 @@ func (s *Service) httpCreate(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(info)
 }
 
-// writeCreateError maps a Create failure to its HTTP status. Shared by the
-// JSON and multipart handlers so the two front doors can't drift — a 409 the
-// web modal recovers from must not arrive as a 500 through the other one.
-func writeCreateError(w http.ResponseWriter, err error) {
+// WriteStatus maps a write failure (Create, Append, Update) to the status,
+// machine code and message a caller should get. Exported because the apps
+// proxy dispatches the same writes in-process for APP artifacts and is a third
+// front door onto this table — a 409 the web modal recovers from must not
+// arrive as a 502 through an app.
+func WriteStatus(err error) (status int, code, msg string) {
 	var br badRequest
 	if errors.As(err, &br) {
-		writeError(w, http.StatusBadRequest, "bad-request", br.msg)
-		return
+		return http.StatusBadRequest, "bad-request", br.msg
 	}
 	var fb forbidden
 	if errors.As(err, &fb) {
-		writeError(w, http.StatusForbidden, "forbidden", fb.msg)
-		return
+		return http.StatusForbidden, "forbidden", fb.msg
 	}
 	var sc slugConflict
 	if errors.As(err, &sc) {
-		writeError(w, http.StatusConflict, "slug-exists", sc.Error())
-		return
+		return http.StatusConflict, "slug-exists", sc.Error()
 	}
 	var sv staleBaseVersion
 	if errors.As(err, &sv) {
-		writeError(w, http.StatusConflict, "stale-base-version", sv.Error())
-		return
+		return http.StatusConflict, "stale-base-version", sv.Error()
 	}
 	var tc typeChange
 	if errors.As(err, &tc) {
-		writeError(w, http.StatusConflict, "type-change", tc.Error())
-		return
+		return http.StatusConflict, "type-change", tc.Error()
+	}
+	var stale idempotencyStale
+	if errors.As(err, &stale) {
+		// 410 Gone — the idempotency-cached artifact is no longer accessible
+		// (archived or access revoked). The caller should pick a fresh
+		// idempotency_key rather than retry with the same one.
+		return http.StatusGone, "idempotency-stale", stale.Error()
+	}
+	if errors.Is(err, pgstore.ErrConflict) {
+		return http.StatusConflict, "conflict",
+			"append lost the (slug, version) race after retries; try again"
 	}
 	if errors.Is(err, pgstore.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not-found", "not found")
-		return
+		return http.StatusNotFound, "not-found", "not found"
 	}
-	writeError(w, http.StatusInternalServerError, "internal", err.Error())
+	return http.StatusInternalServerError, "internal", err.Error()
+}
+
+// writeCreateError answers a Create failure. Shared by the JSON and multipart
+// handlers so the two front doors can't drift.
+func writeCreateError(w http.ResponseWriter, err error) {
+	status, code, msg := WriteStatus(err)
+	writeError(w, status, code, msg)
 }
 
 // httpCreateMultipart handles a multipart/form-data POST /api/artifacts:
@@ -1666,34 +1750,8 @@ func (s *Service) httpAppendBySlug(w http.ResponseWriter, r *http.Request) {
 	email := auth.EmailFromContext(r.Context())
 	info, replayed, err := s.Append(r.Context(), slug, body, email)
 	if err != nil {
-		var br badRequest
-		if errors.As(err, &br) {
-			writeError(w, http.StatusBadRequest, "bad-request", br.msg)
-			return
-		}
-		var fb forbidden
-		if errors.As(err, &fb) {
-			writeError(w, http.StatusForbidden, "forbidden", fb.msg)
-			return
-		}
-		var stale idempotencyStale
-		if errors.As(err, &stale) {
-			// 410 Gone — the idempotency-cached artifact is no longer
-			// accessible (archived or access revoked). Caller should pick
-			// a fresh idempotency_key rather than retry with the same one.
-			writeError(w, http.StatusGone, "idempotency-stale", stale.Error())
-			return
-		}
-		if errors.Is(err, pgstore.ErrConflict) {
-			writeError(w, http.StatusConflict, "conflict",
-				"append lost the (slug, version) race after retries; try again")
-			return
-		}
-		if errors.Is(err, pgstore.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not-found", "not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		status, code, msg := WriteStatus(err)
+		writeError(w, status, code, msg)
 		return
 	}
 	if replayed {
@@ -2117,7 +2175,18 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 		req.GrantAccess != nil) &&
 		req.Title == nil && req.Description == nil && req.Scopes == nil && req.Labels == nil
 	if !admin && !docSettingsOnly && !strings.EqualFold(existing.Creator, caller) {
-		return ArtifactInfo{}, errForbidden("only the creator or an admin may edit")
+		// The document's OWNER edits its metadata too. Without this a
+		// transferred document has an owner who controls its access, its
+		// comment switch and its share links but cannot retitle it. The added
+		// principal is the stored owner, never a version's creator, so a
+		// delegated writer gains nothing here.
+		isOwner, oerr := s.store.IsDocOwner(ctx, existing, caller)
+		if oerr != nil {
+			return ArtifactInfo{}, oerr
+		}
+		if !isOwner {
+			return ArtifactInfo{}, errForbidden("only the creator, the document's owner, or an admin may edit")
+		}
 	}
 	// The kind:skill write-guard protects a skill's content and metadata. A
 	// comments-only PATCH changes neither — it is a document setting, gated by
@@ -2309,14 +2378,19 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 // unarchive.
 func (s *Service) reindexSlugSiblings(ctx context.Context, slug string, except pgtype.UUID) {
 	rows, err := s.store.Versions(ctx, slug)
-	if err != nil {
+	if err != nil || len(rows) == 0 {
 		return
 	}
+	// Versions is version-DESC over live rows, so rows[0] is the one version
+	// that may carry is_latest. Indexing replaces the whole document, so every
+	// other version has to be written with the flag OFF or the fan-out revives
+	// all of them in latest-per-slug search.
+	latest := rows[0].ArtifactID
 	for _, r := range rows {
 		if r.ArtifactID == except {
 			continue
 		}
-		s.osIndexer.IndexArtifact(ctx, r)
+		s.osIndexer.IndexVersion(ctx, r, r.ArtifactID == latest)
 	}
 }
 
@@ -2582,8 +2656,13 @@ func (s *Service) httpApp(w http.ResponseWriter, r *http.Request) {
 	if pinned {
 		stale = s.staleAppNotice(r.Context(), row, caller)
 	}
-	if err := s.serveAppRow(w, r, row, caller, "", "", "", nil, stale); err != nil {
+	tw := &writeErrTracker{ResponseWriter: w}
+	if err := s.serveAppRow(tw, r, row, caller, "", "", "", nil, stale); err != nil {
 		writeBadOrInternal(w, err)
+		return
+	}
+	if tw.err == nil {
+		s.recordView(r, row, caller, "app")
 	}
 }
 
@@ -2960,12 +3039,13 @@ const appBridgeJS = `(function(){
       try{ window.parent.postMessage({ type: "arti-app:token", appId: cfg.appId, token: tok, exp: exp }, o); }catch(e){}
     }
   }
-  function rpc(server, tool, args){
+  function rpc(server, tool, args, opts){
     return fetch(cfg.endpoint, {
       method: "POST",
       credentials: "omit",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + cfg.token },
-      body: JSON.stringify({ app_id: cfg.appId, server: server, tool: tool, arguments: args || {} })
+      body: JSON.stringify({ app_id: cfg.appId, server: server, tool: tool, arguments: args || {},
+        timeout_ms: (opts && opts.timeout_ms) || undefined })
     }).then(function(r){
       // Tolerate non-JSON bodies (e.g. a 502 HTML page or empty body) instead
       // of throwing a parse error — surface a controlled {detail}.
@@ -2973,6 +3053,13 @@ const appBridgeJS = `(function(){
         var b; try { b = tx ? JSON.parse(tx) : {}; } catch(e){ b = { detail: "non-JSON response (HTTP " + r.status + ")" }; }
         return { status: r.status, body: b };
       });
+    }, function(e){
+      // fetch itself rejected: no response reached the page. From a sandboxed
+      // (opaque-origin) page that is what an edge error page without CORS
+      // headers looks like, as well as a real network failure.
+      var err = new Error("no response reached the page (" + (e && e.message) + "): the network failed, or an edge error page without CORS headers replaced arti's answer");
+      err.code = "network_error"; err.status = 0; err.server = server; err.tool = tool;
+      throw err;
     });
   }
   function authorize(url){
@@ -2990,7 +3077,22 @@ const appBridgeJS = `(function(){
       var t = setInterval(function(){ if(!pop || pop.closed){ clearInterval(t); finish(); } }, 600);
     });
   }
-  function fail(res){ throw new Error((res.body && res.body.detail) || ("arti tool call failed: " + res.status)); }
+  // The thrown Error carries the proxy's structured fields (code, status,
+  // server, tool) so an app can branch on err.code instead of its message. A
+  // non-JSON 502/504/524 is the edge (nginx/Cloudflare) answering in arti's
+  // place: arti itself never sends 502 or 504 from this endpoint.
+  function fail(res){
+    var b = res.body || {};
+    var code = b.error || null, msg = b.detail || ("arti tool call failed: " + res.status);
+    if(!code && (res.status === 502 || res.status === 504 || res.status === 524)){
+      code = "edge_timeout";
+      msg = "the arti edge stopped waiting (HTTP " + res.status + "); the call may still be running upstream - resume it rather than re-running it";
+    }
+    var e = new Error(msg);
+    e.code = code; e.status = res.status; e.server = b.server || null; e.tool = b.tool || null;
+    if(b.retry_after != null){ e.retryAfter = b.retry_after; }
+    throw e;
+  }
   // ── user-mode connect handshake (cfg.connect present, no baked token) ──
   var pendingConnect = null, connectBtn = null;
   function connQS(){
@@ -3079,11 +3181,11 @@ const appBridgeJS = `(function(){
     if(document.readyState === "loading"){ document.addEventListener("DOMContentLoaded", showConnectButton); }
     else { showConnectButton(); }
   }
-  function run(server, tool, args){
-    return rpc(server, tool, args).then(function(res){
+  function run(server, tool, args, opts){
+    return rpc(server, tool, args, opts).then(function(res){
       if(res.status === 401 && res.body && res.body.error === "authorization_required"){
         return authorize(res.body.authorize_url).then(function(){
-          return rpc(server, tool, args).then(function(res2){
+          return rpc(server, tool, args, opts).then(function(res2){
             if(res2.status >= 400){ fail(res2); }
             return res2.body;
           });
@@ -3100,7 +3202,7 @@ const appBridgeJS = `(function(){
       if(staleToken && cfg.connect){
         cfg.token = null;
         return connect().then(function(){
-          return rpc(server, tool, args).then(function(res2){
+          return rpc(server, tool, args, opts).then(function(res2){
             if(res2.status >= 400){ fail(res2); }
             return res2.body;
           });
@@ -3111,14 +3213,16 @@ const appBridgeJS = `(function(){
     });
   }
   window.arti = {
-    callTool: function(server, tool, args){
+    // opts.timeout_ms: how long the proxy waits on the upstream (default 60s,
+    // server-capped); the 504 detail names the cap.
+    callTool: function(server, tool, args, opts){
       if(!cfg.token && cfg.connect){
         // Never an unprompted popup: this path only works inside a user
         // gesture (a click's activation covers the window.open); outside one
         // it rejects and the fixed Connect button remains the affordance.
-        return connect().then(function(){ return run(server, tool, args); });
+        return connect().then(function(){ return run(server, tool, args, opts); });
       }
-      return run(server, tool, args);
+      return run(server, tool, args, opts);
     }
   };
   // ── data helpers: read OTHER arti artifacts as the viewer. The governed
@@ -4052,7 +4156,7 @@ func interactiveCaller(ctx context.Context) bool {
 // value is taken verbatim so it may itself contain colons.
 var fieldKeys = map[string]bool{
 	"slug": true, "creator": true, "scope": true, "type": true, "label": true,
-	"content_type": true,
+	"content_type": true, "via": true,
 }
 
 // negatableKeys are the fields a leading `-` may exclude (e.g. `-label:foo`).
@@ -4142,6 +4246,11 @@ func mergeFilters(in *pgstore.ListInput, filters, negated map[string][]string) {
 			in.ContentType = v
 		}
 	}
+	if in.WrittenVia == nil {
+		if v := first("via"); v != nil {
+			in.WrittenVia = v
+		}
+	}
 	if labels := filters["label"]; len(labels) > 0 {
 		in.Labels = append(in.Labels, labels...)
 	}
@@ -4178,6 +4287,9 @@ func parseList(r *http.Request) pgstore.ListInput {
 	}
 	if v := q.Get("slug"); v != "" {
 		in.Slug = &v
+	}
+	if v := q.Get("via"); v != "" {
+		in.WrittenVia = &v
 	}
 	if vs := q["label"]; len(vs) > 0 {
 		in.Labels = vs

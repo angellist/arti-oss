@@ -8,20 +8,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/angellist/arti-oss/gen/sqlc"
 	"github.com/angellist/arti-oss/internal/auth"
+	"github.com/angellist/arti-oss/internal/mdtext"
 	"github.com/angellist/arti-oss/internal/rbac"
 	"github.com/angellist/arti-oss/internal/slacknotify"
 	"github.com/angellist/arti-oss/internal/store/pgstore"
@@ -35,10 +39,27 @@ type Service struct {
 
 	notifier *slacknotify.Notifier // nil → Slack notifications disabled
 	baseURL  string                // for building artifact permalinks in notifications
+
+	rateMu          sync.Mutex
+	rateGlobalRPM   int
+	rateArtifactRPM int
+	rateGlobal      map[string][]time.Time
+	rateArtifact    map[string][]time.Time
 }
 
 func NewService(pool *pgxpool.Pool, art *pgstore.Store, signer *auth.JWTSigner) *Service {
-	return &Service{pool: pool, q: sqlc.New(pool), art: art, signer: signer}
+	return &Service{
+		pool: pool, q: sqlc.New(pool), art: art, signer: signer,
+		rateGlobalRPM: 30, rateArtifactRPM: 10,
+		rateGlobal: map[string][]time.Time{}, rateArtifact: map[string][]time.Time{},
+	}
+}
+
+func (s *Service) SetRateLimit(globalRPM, artifactRPM int) {
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	s.rateGlobalRPM = globalRPM
+	s.rateArtifactRPM = artifactRPM
 }
 
 // SetNotifier enables Slack DM notifications for comment events. A nil
@@ -86,6 +107,7 @@ type Comment struct {
 	AuthorName    string     `json:"author_name"`
 	AuthorPicture string     `json:"author_picture,omitempty"`
 	Body          string     `json:"body"`
+	Source        string     `json:"source,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
 	EditedAt      *time.Time `json:"edited_at,omitempty"`
 }
@@ -101,11 +123,36 @@ type Thread struct {
 }
 
 type ListResponse struct {
-	Threads []Thread `json:"threads"`
+	ArtifactID string   `json:"artifact_id,omitempty"`
+	Slug       string   `json:"slug,omitempty"`
+	Version    *int32   `json:"version,omitempty"`
+	Threads    []Thread `json:"threads"`
+}
+
+type WriteResponse struct {
+	ArtifactID          string   `json:"artifact_id"`
+	Slug                string   `json:"slug,omitempty"`
+	Version             *int32   `json:"version,omitempty"`
+	Thread              Thread   `json:"thread"`
+	MentionsNotified    []string `json:"mentions_notified"`
+	MentionsUnreachable []string `json:"mentions_unreachable"`
+}
+
+type AddInput struct {
+	Anchor json.RawMessage `json:"anchor"`
+	Quote  string          `json:"quote"`
+	Body   string          `json:"body"`
+	Source string          `json:"source"`
+}
+
+type ReplyInput struct {
+	Body   string `json:"body"`
+	Source string `json:"source"`
 }
 
 type createReq struct {
 	Anchor json.RawMessage `json:"anchor"`
+	Quote  string          `json:"quote"`
 	Body   string          `json:"body"`
 }
 
@@ -122,8 +169,11 @@ type editReq struct {
 // Mount attaches comment routes. Auth middleware is applied at a higher level.
 func (s *Service) Mount(r chi.Router) {
 	r.Get("/api/artifacts/{id}/comments", s.list)
+	r.Get("/api/artifacts/by-slug/{slug}/comments", s.listBySlug)
 	r.Get("/api/artifacts/{id}/comments/people", s.mentionPeople)
 	r.Post("/api/artifacts/{id}/comments", s.create)
+	r.Post("/api/artifacts/by-slug/{slug}/comments", s.createBySlug)
+	r.Get("/api/comments/{threadID}", s.getThread)
 	r.Post("/api/comments/{threadID}/replies", s.reply)
 	r.Post("/api/comments/{threadID}/resolve", s.resolve)
 	r.Post("/api/comments/{threadID}/reopen", s.reopen)
@@ -132,7 +182,9 @@ func (s *Service) Mount(r chi.Router) {
 }
 
 // MountEmbed registers the same comment endpoints under /api/embed/*, but
-// authed by a scoped embed token (Bearer) instead of the session cookie,
+// the embed-token artifact pin stays in gateArtifact/gateThread. Do not wire
+// embed routes directly to service methods, or the token widens past one artifact.
+// Authed by a scoped embed token (Bearer) instead of the session cookie,
 // with CORS so the sandboxed served-HTML overlay can call them. Mount this
 // OUTSIDE the cookie-auth group.
 func (s *Service) MountEmbed(r chi.Router) {
@@ -241,6 +293,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	out.withArtifact(row)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -294,12 +347,44 @@ func (s *Service) ListForCaller(ctx context.Context, artifactID uuid.UUID, calle
 	return s.fetchThreads(ctx, artifactID, includeResolved)
 }
 
-func (s *Service) create(w http.ResponseWriter, r *http.Request) {
-	id, row, caller, ok := s.gateArtifact(w, r, chi.URLParam(r, "id"))
+func (s *Service) listBySlug(w http.ResponseWriter, r *http.Request) {
+	row, caller, ok := s.gateSlug(w, r)
 	if !ok {
 		return
 	}
-	if commentsOff(w, row) {
+	if !row.CommentsEnabled {
+		out := ListResponse{Threads: []Thread{}}
+		out.withArtifact(row)
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	out, err := s.fetchThreads(r.Context(), uuidFrom(row.ArtifactID), r.URL.Query().Get("exclude_resolved") != "true")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = caller
+	out.withArtifact(row)
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Service) getThread(w http.ResponseWriter, r *http.Request) {
+	tid, err := uuid.Parse(chi.URLParam(r, "threadID"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad thread id")
+		return
+	}
+	th, err := s.GetThreadForCaller(r.Context(), tid, auth.EmailFromContext(r.Context()))
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, th)
+}
+
+func (s *Service) create(w http.ResponseWriter, r *http.Request) {
+	id, _, caller, ok := s.gateArtifact(w, r, chi.URLParam(r, "id"))
+	if !ok {
 		return
 	}
 	var req createReq
@@ -307,81 +392,30 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
 		return
 	}
-	if strings.TrimSpace(req.Body) == "" {
-		writeErr(w, http.StatusBadRequest, "body required")
-		return
-	}
-	anchor := req.Anchor
-	if len(anchor) == 0 {
-		anchor = json.RawMessage(`{"type":"doc"}`)
-	}
-
-	ctx := r.Context()
-	tx, err := s.pool.Begin(ctx)
+	out, err := s.AddForCaller(r.Context(), id, caller, AddInput{Anchor: req.Anchor, Quote: req.Quote, Body: req.Body, Source: sourceFromRequest(r)})
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeServiceErr(w, err)
 		return
 	}
-	defer tx.Rollback(ctx)
-	qtx := s.q.WithTx(tx)
+	writeJSON(w, http.StatusCreated, out)
+}
 
-	// Single doc-level thread per artifact. Serialize doc creates for this
-	// artifact with a transaction-scoped advisory lock, then find-or-create
-	// inside the same tx — so two concurrent doc comments fold into one thread
-	// instead of racing to insert duplicates.
-	if isDocAnchor(anchor) {
-		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", id.String()+":doc-thread"); err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		threads, err := qtx.ListThreadsByArtifact(ctx, pgUUID(id))
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		for _, t := range threads {
-			if !isDocAnchor(t.Anchor) {
-				continue
-			}
-			c, err := qtx.AddComment(ctx, sqlc.AddCommentParams{
-				CommentID: pgUUID(uuid.New()), ThreadID: t.ThreadID, Author: caller, Body: req.Body,
-				AuthorName: strPtr(auth.NameFromContext(ctx)), AuthorPicture: strPtr(auth.PictureFromContext(ctx)),
-			})
-			if err != nil {
-				writeErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			if err := tx.Commit(ctx); err != nil {
-				writeErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			s.fireNotify(slacknotify.ActionNewComment, id, uuidFrom(t.ThreadID), uuidFrom(c.CommentID), caller, auth.NameFromContext(ctx), req.Body)
-			writeJSON(w, http.StatusCreated, toThread(t, []Comment{toComment(c)}))
-			return
-		}
+func (s *Service) createBySlug(w http.ResponseWriter, r *http.Request) {
+	row, caller, ok := s.gateSlug(w, r)
+	if !ok {
+		return
 	}
-
-	thread, err := qtx.CreateThread(ctx, sqlc.CreateThreadParams{
-		ThreadID: pgUUID(uuid.New()), ArtifactID: pgUUID(id), Anchor: anchor, CreatedBy: caller,
-	})
+	var req createReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	out, err := s.AddForCaller(r.Context(), uuidFrom(row.ArtifactID), caller, AddInput{Anchor: req.Anchor, Quote: req.Quote, Body: req.Body, Source: sourceFromRequest(r)})
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeServiceErr(w, err)
 		return
 	}
-	c, err := qtx.AddComment(ctx, sqlc.AddCommentParams{
-		CommentID: pgUUID(uuid.New()), ThreadID: thread.ThreadID, Author: caller, Body: req.Body,
-		AuthorName: strPtr(auth.NameFromContext(ctx)), AuthorPicture: strPtr(auth.PictureFromContext(ctx)),
-	})
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.fireNotify(slacknotify.ActionNewComment, id, uuidFrom(thread.ThreadID), uuidFrom(c.CommentID), caller, auth.NameFromContext(ctx), req.Body)
-	writeJSON(w, http.StatusCreated, toThread(thread, []Comment{toComment(c)}))
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (s *Service) reply(w http.ResponseWriter, r *http.Request) {
@@ -390,20 +424,16 @@ func (s *Service) reply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req replyReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Body) == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "body required")
 		return
 	}
-	c, err := s.q.AddComment(r.Context(), sqlc.AddCommentParams{
-		CommentID: pgUUID(uuid.New()), ThreadID: t.ThreadID, Author: caller, Body: req.Body,
-		AuthorName: strPtr(auth.NameFromContext(r.Context())), AuthorPicture: strPtr(auth.PictureFromContext(r.Context())),
-	})
+	c, err := s.ReplyForCaller(r.Context(), uuidFrom(t.ThreadID), caller, ReplyInput{Body: req.Body, Source: sourceFromRequest(r)})
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeServiceErr(w, err)
 		return
 	}
-	s.fireNotify(slacknotify.ActionReply, uuidFrom(t.ArtifactID), uuidFrom(t.ThreadID), uuidFrom(c.CommentID), caller, auth.NameFromContext(r.Context()), req.Body)
-	writeJSON(w, http.StatusCreated, toComment(c))
+	writeJSON(w, http.StatusCreated, c)
 }
 
 func (s *Service) resolve(w http.ResponseWriter, r *http.Request) { s.setStatus(w, r, "resolved") }
@@ -414,25 +444,326 @@ func (s *Service) setStatus(w http.ResponseWriter, r *http.Request, status strin
 	if !ok {
 		return
 	}
+	th, err := s.SetStatusForCaller(r.Context(), uuidFrom(t.ThreadID), caller, status, sourceFromRequest(r))
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	if status == "open" {
+		writeJSON(w, http.StatusOK, th)
+		return
+	}
+	writeJSON(w, http.StatusOK, th)
+}
+
+// ─── transport-neutral write surface ─────────────────────────────────
+
+var (
+	ErrEmptyBody        = errors.New("body required")
+	ErrQuoteNotFound    = errors.New("quote not found in rendered artifact text")
+	ErrCommentsDisabled = errors.New("commenting is turned off for this document")
+	ErrQuoteUnsupported = errors.New("quote anchoring is not supported for a package artifact; omit quote to comment on the document")
+	ErrQuoteIsSource    = errors.New("quote carries markdown markup; send the text as the page renders it")
+	ErrRateLimited      = errors.New("comment write rate limit exceeded")
+)
+
+func (s *Service) AddForCaller(ctx context.Context, artifactID uuid.UUID, caller string, in AddInput) (WriteResponse, error) {
+	if strings.TrimSpace(in.Body) == "" {
+		return WriteResponse{}, ErrEmptyBody
+	}
+	row, ok, err := s.canRead(ctx, artifactID, caller)
+	if err != nil {
+		return WriteResponse{}, err
+	}
+	if !ok {
+		return WriteResponse{}, pgstore.ErrNotFound
+	}
+	if !row.CommentsEnabled {
+		return WriteResponse{}, ErrCommentsDisabled
+	}
+	if !s.allowWrite(caller, artifactID) {
+		return WriteResponse{}, ErrRateLimited
+	}
+	anchor := in.Anchor
+	if len(anchor) == 0 && strings.TrimSpace(in.Quote) != "" {
+		if err := s.validateQuote(ctx, row, in.Quote); err != nil {
+			return WriteResponse{}, err
+		}
+		b, _ := json.Marshal(map[string]string{"type": "text", "quote": strings.TrimSpace(in.Quote)})
+		anchor = b
+	}
+	if len(anchor) == 0 {
+		anchor = json.RawMessage(`{"type":"doc"}`)
+	}
+	if in.Source == "" {
+		in.Source = "api"
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return WriteResponse{}, err
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.q.WithTx(tx)
+
+	var thread sqlc.CommentThread
+	var c sqlc.Comment
+	if isDocAnchor(anchor) {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", artifactID.String()+":doc-thread"); err != nil {
+			return WriteResponse{}, err
+		}
+		threads, err := qtx.ListThreadsByArtifact(ctx, pgUUID(artifactID))
+		if err != nil {
+			return WriteResponse{}, err
+		}
+		for _, t := range threads {
+			if isDocAnchor(t.Anchor) {
+				thread = t
+				break
+			}
+		}
+	}
+	if !thread.ThreadID.Valid {
+		thread, err = qtx.CreateThread(ctx, sqlc.CreateThreadParams{
+			ThreadID: pgUUID(uuid.New()), ArtifactID: pgUUID(artifactID), Anchor: anchor, CreatedBy: caller,
+		})
+		if err != nil {
+			return WriteResponse{}, err
+		}
+	}
+	c, err = qtx.AddComment(ctx, sqlc.AddCommentParams{
+		CommentID: pgUUID(uuid.New()), ThreadID: thread.ThreadID, Author: caller, Body: in.Body,
+		AuthorName: strPtr(auth.NameFromContext(ctx)), AuthorPicture: strPtr(auth.PictureFromContext(ctx)), Source: in.Source,
+	})
+	if err != nil {
+		return WriteResponse{}, err
+	}
+	mentioned, unreachable, err := s.splitMentions(ctx, row, caller, in.Body)
+	if err != nil {
+		return WriteResponse{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WriteResponse{}, err
+	}
+	s.fireNotify(slacknotify.ActionNewComment, artifactID, uuidFrom(thread.ThreadID), uuidFrom(c.CommentID), caller, auth.NameFromContext(ctx), in.Body)
+	return writeResponse(row, toThread(thread, []Comment{toComment(c)}), mentioned, unreachable), nil
+}
+
+func (s *Service) ReplyForCaller(ctx context.Context, threadID uuid.UUID, caller string, in ReplyInput) (Comment, error) {
+	if strings.TrimSpace(in.Body) == "" {
+		return Comment{}, ErrEmptyBody
+	}
+	t, row, err := s.threadForCaller(ctx, threadID, caller)
+	if err != nil {
+		return Comment{}, err
+	}
+	if !row.CommentsEnabled {
+		return Comment{}, ErrCommentsDisabled
+	}
+	if !s.allowWrite(caller, uuidFrom(t.ArtifactID)) {
+		return Comment{}, ErrRateLimited
+	}
+	if in.Source == "" {
+		in.Source = "api"
+	}
+	c, err := s.q.AddComment(ctx, sqlc.AddCommentParams{
+		CommentID: pgUUID(uuid.New()), ThreadID: t.ThreadID, Author: caller, Body: in.Body,
+		AuthorName: strPtr(auth.NameFromContext(ctx)), AuthorPicture: strPtr(auth.PictureFromContext(ctx)), Source: in.Source,
+	})
+	if err != nil {
+		return Comment{}, err
+	}
+	s.fireNotify(slacknotify.ActionReply, uuidFrom(t.ArtifactID), uuidFrom(t.ThreadID), uuidFrom(c.CommentID), caller, auth.NameFromContext(ctx), in.Body)
+	return toComment(c), nil
+}
+
+func (s *Service) SetStatusForCaller(ctx context.Context, threadID uuid.UUID, caller string, status, source string) (Thread, error) {
+	t, row, err := s.threadForCaller(ctx, threadID, caller)
+	if err != nil {
+		return Thread{}, err
+	}
+	if !row.CommentsEnabled {
+		return Thread{}, ErrCommentsDisabled
+	}
+	if t.Status == status {
+		cmts, err := s.q.ListCommentsByThread(ctx, t.ThreadID)
+		if err != nil {
+			return Thread{}, err
+		}
+		return toThread(t, commentsToDTO(cmts)), nil
+	}
+	if !s.allowWrite(caller, uuidFrom(t.ArtifactID)) {
+		return Thread{}, ErrRateLimited
+	}
 	var by *string
 	var at pgtype.Timestamptz
 	if status == "resolved" {
 		by = &caller
 		at = pgtype.Timestamptz{Time: time.Now(), Valid: true}
 	}
-	if _, err := s.q.SetThreadStatus(r.Context(), sqlc.SetThreadStatusParams{
+	if _, err := s.q.SetThreadStatus(ctx, sqlc.SetThreadStatusParams{
 		ThreadID: t.ThreadID, Status: status, ResolvedBy: by, ResolvedAt: at,
 	}); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return Thread{}, err
 	}
+	t.Status = status
+	t.ResolvedBy = by
+	t.ResolvedAt = at
 	action := slacknotify.ActionResolve
 	if status == "open" {
 		action = slacknotify.ActionReopen
 	}
-	// uuid.Nil link target → buildEvent links the thread's originating comment.
-	s.fireNotify(action, uuidFrom(t.ArtifactID), uuidFrom(t.ThreadID), uuid.Nil, caller, auth.NameFromContext(r.Context()), "")
-	w.WriteHeader(http.StatusNoContent)
+	s.fireNotify(action, uuidFrom(t.ArtifactID), uuidFrom(t.ThreadID), uuid.Nil, caller, auth.NameFromContext(ctx), "")
+	cmts, err := s.q.ListCommentsByThread(ctx, t.ThreadID)
+	if err != nil {
+		return Thread{}, err
+	}
+	return toThread(t, commentsToDTO(cmts)), nil
+}
+
+func (s *Service) GetThreadForCaller(ctx context.Context, threadID uuid.UUID, caller string) (Thread, error) {
+	t, row, err := s.threadForCaller(ctx, threadID, caller)
+	if err != nil {
+		return Thread{}, err
+	}
+	// A document with commenting off has no threads, which is what the list
+	// paths report. Answering here with a shell would tell a caller holding the
+	// id that the thread is still there.
+	if !row.CommentsEnabled {
+		return Thread{}, pgstore.ErrNotFound
+	}
+	cmts, err := s.q.ListCommentsByThread(ctx, t.ThreadID)
+	if err != nil {
+		return Thread{}, err
+	}
+	return toThread(t, commentsToDTO(cmts)), nil
+}
+
+func (s *Service) threadForCaller(ctx context.Context, threadID uuid.UUID, caller string) (sqlc.CommentThread, sqlc.Artifact, error) {
+	t, err := s.q.GetThread(ctx, pgUUID(threadID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.CommentThread{}, sqlc.Artifact{}, pgstore.ErrNotFound
+	}
+	if err != nil {
+		return sqlc.CommentThread{}, sqlc.Artifact{}, err
+	}
+	row, ok, err := s.canRead(ctx, uuidFrom(t.ArtifactID), caller)
+	if err != nil || !ok {
+		return sqlc.CommentThread{}, sqlc.Artifact{}, pgstore.ErrNotFound
+	}
+	return t, row, nil
+}
+
+func (s *Service) allowWrite(caller string, artifactID uuid.UUID) bool {
+	now := time.Now()
+	cutoff := now.Add(-time.Minute)
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	if s.rateGlobal == nil {
+		s.rateGlobal = map[string][]time.Time{}
+	}
+	if s.rateArtifact == nil {
+		s.rateArtifact = map[string][]time.Time{}
+	}
+	globalKey := strings.ToLower(caller)
+	artifactKey := globalKey + ":" + artifactID.String()
+	if !allowRateKey(s.rateGlobal, globalKey, s.rateGlobalRPM, cutoff, now) {
+		return false
+	}
+	if !allowRateKey(s.rateArtifact, artifactKey, s.rateArtifactRPM, cutoff, now) {
+		if s.rateGlobalRPM > 0 {
+			s.rateGlobal[globalKey] = s.rateGlobal[globalKey][:len(s.rateGlobal[globalKey])-1]
+		}
+		return false
+	}
+	return true
+}
+
+func allowRateKey(buckets map[string][]time.Time, key string, limit int, cutoff, now time.Time) bool {
+	if limit <= 0 {
+		return true
+	}
+	kept := buckets[key][:0]
+	for _, t := range buckets[key] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= limit {
+		buckets[key] = kept
+		return false
+	}
+	buckets[key] = append(kept, now)
+	return true
+}
+
+func (s *Service) validateQuote(ctx context.Context, row sqlc.Artifact, quote string) error {
+	q := normalizePlainText(quote)
+	if q == "" {
+		return ErrQuoteNotFound
+	}
+	// The stored bytes of a PACKAGE or APP are the zip, not the served page,
+	// so a text search over them can only ever say "not found".
+	if pgstore.IsPackageLike(row.ArtifactType) {
+		return ErrQuoteUnsupported
+	}
+	rc, err := s.art.Content(ctx, row)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(io.LimitReader(rc, 1<<20))
+	if err != nil {
+		return err
+	}
+	body := mdtext.PageText(string(b))
+	if strings.Contains(body, q) {
+		return nil
+	}
+	// The quote does name text in the document, but only in its source form:
+	// the markers are not on the page, so the viewer could never seat a
+	// highlight for it. Say which of the two failures this is.
+	if strings.Contains(body, mdtext.PageText(quote)) {
+		return ErrQuoteIsSource
+	}
+	return ErrQuoteNotFound
+}
+
+func normalizePlainText(s string) string { return mdtext.Normalize(s) }
+
+func commentsToDTO(cmts []sqlc.Comment) []Comment {
+	out := make([]Comment, 0, len(cmts))
+	for _, c := range cmts {
+		out = append(out, toComment(c))
+	}
+	return out
+}
+
+func writeResponse(row sqlc.Artifact, thread Thread, mentioned, unreachable []string) WriteResponse {
+	out := WriteResponse{
+		ArtifactID: uuidStr(row.ArtifactID), Thread: thread,
+		MentionsNotified: mentioned, MentionsUnreachable: unreachable,
+	}
+	if row.NamedSlug != nil {
+		out.Slug = *row.NamedSlug
+	}
+	out.Version = row.Version
+	return out
+}
+
+func (lr *ListResponse) withArtifact(row sqlc.Artifact) {
+	lr.ArtifactID = uuidStr(row.ArtifactID)
+	if row.NamedSlug != nil {
+		lr.Slug = *row.NamedSlug
+	}
+	lr.Version = row.Version
+}
+
+func sourceFromRequest(r *http.Request) string {
+	if _, ok := r.Context().Value(embedArtifactKey{}).(string); ok {
+		return "embed"
+	}
+	return "web"
 }
 
 // ─── mention typeahead ───────────────────────────────────────────────
@@ -637,18 +968,15 @@ func (s *Service) buildEvent(ctx context.Context, action slacknotify.Action, art
 	}, nil
 }
 
-// docOwner returns the address that OWNS the document: the creator of the
-// slug's EARLIEST version, mirroring pgstore.IsDocOwner, falling back to this
-// row's creator for a slugless artifact (which has no lineage) or when the
-// lookup fails. Not row.Creator, which versioning reassigns to whoever pushed
-// the latest version — a delegated writer publishing v2 should not inherit the
-// owner's notifications, and the "somebody was mentioned who can't read this"
-// line is only actionable in the inbox of the person who can widen access.
+// docOwner returns the address that OWNS the document, falling back to this
+// row's creator when the lookup fails. Not row.Creator, which versioning
+// reassigns to whoever pushed the latest version — a delegated writer
+// publishing v2 should not inherit the owner's notifications, and the
+// "somebody was mentioned who can't read this" line is only actionable in the
+// inbox of the person who can widen access.
 func (s *Service) docOwner(ctx context.Context, art sqlc.Artifact) string {
-	if art.NamedSlug != nil && *art.NamedSlug != "" {
-		if owner, err := s.art.SlugCreator(ctx, *art.NamedSlug); err == nil && owner != "" {
-			return owner
-		}
+	if owner, err := s.art.DocOwner(ctx, art); err == nil && owner != "" {
+		return owner
 	}
 	return art.Creator
 }
@@ -781,6 +1109,49 @@ func (s *Service) deleteComment(w http.ResponseWriter, r *http.Request) {
 // access, returning the artifact row so the handler can also consult the
 // per-doc comment switch. Returns ok=false (and writes the response) on any
 // failure.
+
+func (s *Service) gateSlug(w http.ResponseWriter, r *http.Request) (sqlc.Artifact, string, bool) {
+	slug := chi.URLParam(r, "slug")
+	caller := auth.EmailFromContext(r.Context())
+	var ver *int32
+	if raw := r.URL.Query().Get("version"); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 32)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "bad version")
+			return sqlc.Artifact{}, "", false
+		}
+		vv := int32(v)
+		ver = &vv
+	}
+	admin, err := s.art.HasPermission(r.Context(), caller, rbac.ManageArtifacts)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return sqlc.Artifact{}, "", false
+	}
+	var row sqlc.Artifact
+	if ver == nil && !admin {
+		row, err = s.art.GetLatestBySlugForCaller(r.Context(), slug, caller)
+	} else {
+		row, err = s.art.GetBySlug(r.Context(), slug, ver)
+		if err == nil {
+			var allowed bool
+			allowed, err = s.canReadRow(r.Context(), row, caller)
+			if !allowed && err == nil {
+				err = pgstore.ErrNotFound
+			}
+		}
+	}
+	if err != nil {
+		if errors.Is(err, pgstore.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "not found")
+		} else {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+		}
+		return sqlc.Artifact{}, "", false
+	}
+	return row, caller, true
+}
+
 func (s *Service) gateArtifact(w http.ResponseWriter, r *http.Request, idStr string) (uuid.UUID, sqlc.Artifact, string, bool) {
 	id, err := uuid.Parse(idStr)
 	if err != nil {
@@ -869,6 +1240,7 @@ func toComment(c sqlc.Comment) Comment {
 		t := c.EditedAt.Time
 		cmt.EditedAt = &t
 	}
+	cmt.Source = c.Source
 	return cmt
 }
 
@@ -928,6 +1300,35 @@ func uuidFrom(p pgtype.UUID) uuid.UUID {
 
 func uuidStr(p pgtype.UUID) string { return uuidFrom(p).String() }
 
+// WriteStatus maps a comment write failure to the status the REST front door
+// answers with. ok is false for anything it does not recognize, so a caller
+// outside this package can fall back to its own mapping rather than reporting
+// a refusal as a server error.
+func WriteStatus(err error) (status int, msg string, ok bool) {
+	switch {
+	case errors.Is(err, pgstore.ErrNotFound):
+		return http.StatusNotFound, "not found", true
+	case errors.Is(err, ErrEmptyBody):
+		return http.StatusBadRequest, "body required", true
+	case errors.Is(err, ErrQuoteNotFound):
+		return http.StatusBadRequest, ErrQuoteNotFound.Error(), true
+	case errors.Is(err, ErrQuoteUnsupported):
+		return http.StatusBadRequest, ErrQuoteUnsupported.Error(), true
+	case errors.Is(err, ErrQuoteIsSource):
+		return http.StatusBadRequest, ErrQuoteIsSource.Error(), true
+	case errors.Is(err, ErrCommentsDisabled):
+		return http.StatusForbidden, ErrCommentsDisabled.Error(), true
+	case errors.Is(err, ErrRateLimited):
+		return http.StatusTooManyRequests, ErrRateLimited.Error(), true
+	}
+	return http.StatusInternalServerError, err.Error(), false
+}
+
+func writeServiceErr(w http.ResponseWriter, err error) {
+	status, msg, _ := WriteStatus(err)
+	writeErr(w, status, msg)
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -937,5 +1338,3 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"detail": msg, "code": http.StatusText(code)})
 }
-
-var _ = errors.New // reserved for future typed errors

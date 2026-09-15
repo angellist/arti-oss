@@ -10,8 +10,8 @@ import (
 const IndexName = "artifacts"
 
 // EnsureIndex creates the artifacts index with the full mapping if it
-// doesn't already exist. Safe to call on every startup — the PUT is
-// a no-op when the index is already present.
+// doesn't already exist, and otherwise converges its dynamic settings.
+// Safe to call on every startup.
 func (c *Client) EnsureIndex(ctx context.Context) error {
 	if c == nil {
 		return nil
@@ -23,7 +23,12 @@ func (c *Client) EnsureIndex(ctx context.Context) error {
 	}
 	resp.Body.Close()
 	if resp.StatusCode == 200 {
-		return nil // already exists
+		// Hygiene only (a stray replica just leaves the cluster yellow), so a
+		// failure here must not take OpenSearch offline for this pod.
+		if err := c.syncReplicas(ctx); err != nil {
+			c.logger.Warn("opensearch: replica sync failed", "err", err)
+		}
+		return nil
 	}
 
 	body := map[string]any{
@@ -49,11 +54,29 @@ func (c *Client) EnsureIndex(ctx context.Context) error {
 	return nil
 }
 
+// The domain runs a single data node: a replica can never allocate and
+// would leave the cluster yellow for good.
+const numberOfReplicas = 0
+
+// syncReplicas applies the replica count to an existing index. The setting
+// is dynamic, so this is a cheap idempotent PUT on every boot.
+func (c *Client) syncReplicas(ctx context.Context) error {
+	body := map[string]any{"index": map[string]any{"number_of_replicas": numberOfReplicas}}
+	resp, err := c.do(ctx, "PUT", "/"+IndexName+"/_settings", body)
+	if err != nil {
+		return fmt.Errorf("opensearch: update index settings: %w", err)
+	}
+	if _, err := readBody(resp); err != nil {
+		return err
+	}
+	return nil
+}
+
 func indexSettings() map[string]any {
 	return map[string]any{
 		"index.knn":          true,
 		"number_of_shards":   1,
-		"number_of_replicas": 1,
+		"number_of_replicas": numberOfReplicas,
 		"refresh_interval":   "1s",
 		"max_result_window":  10000,
 		"analysis": map[string]any{

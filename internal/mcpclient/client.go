@@ -18,17 +18,26 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // ErrUnauthorized is returned when the upstream answers 401. The apps proxy
 // uses it to start the Runlayer OAuth handshake (mint an authorize URL).
 var ErrUnauthorized = errors.New("mcpclient: upstream requires authorization (401)")
 
-// Client is a reusable MCP-over-HTTP caller. Safe for concurrent use.
+// ErrResponseTooLarge is returned when one upstream response body exceeds
+// MaxResponseBytes. The body is not parsed: a truncated JSON-RPC message would
+// only fail later with a misleading syntax error.
+var ErrResponseTooLarge = errors.New("mcpclient: upstream response exceeds the size cap")
+
+// MaxResponseBytes caps one upstream response body. Paged tools are
+// expected to size their pages under it (e.g. via max_rows/max_bytes).
+const MaxResponseBytes = 16 << 20
+
+// Client is a reusable MCP-over-HTTP caller. Safe for concurrent use. It sets
+// no timeout of its own: the caller's ctx deadline bounds the whole CallTool.
 type Client struct{ httpc *http.Client }
 
-func New() *Client { return &Client{httpc: &http.Client{Timeout: 60 * time.Second}} }
+func New() *Client { return &Client{httpc: &http.Client{}} }
 
 const protocolVersion = "2025-06-18"
 
@@ -43,15 +52,17 @@ type rpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *rpcError       `json:"error,omitempty"`
+	Error   *RPCError       `json:"error,omitempty"`
 }
 
-type rpcError struct {
+// RPCError is the JSON-RPC `error` object an MCP server returns when the call
+// itself failed (unknown tool, bad arguments, server-side fault).
+type RPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
 
-func (e *rpcError) Error() string { return fmt.Sprintf("mcp error %d: %s", e.Code, e.Message) }
+func (e *RPCError) Error() string { return fmt.Sprintf("mcp error %d: %s", e.Code, e.Message) }
 
 // CallTool runs initialize (+ initialized when the server is stateful) then
 // tools/call, returning the raw JSON-RPC `result` (an MCP tool result with a
@@ -123,14 +134,20 @@ func (c *Client) do(ctx context.Context, endpoint, bearer, sess string, req rpcR
 		return rpcResponse{}, "", err
 	}
 	defer res.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 	outSess := res.Header.Get("Mcp-Session-Id")
+	raw, err := io.ReadAll(io.LimitReader(res.Body, MaxResponseBytes+1))
+	if err != nil {
+		return rpcResponse{}, outSess, fmt.Errorf("mcpclient: reading upstream response: %w", err)
+	}
 
 	if res.StatusCode == http.StatusUnauthorized {
 		return rpcResponse{}, outSess, ErrUnauthorized
 	}
 	if res.StatusCode >= 400 {
 		return rpcResponse{}, outSess, fmt.Errorf("mcpclient: upstream %d: %s", res.StatusCode, snippet(raw))
+	}
+	if len(raw) > MaxResponseBytes {
+		return rpcResponse{}, outSess, fmt.Errorf("%w (%d bytes)", ErrResponseTooLarge, MaxResponseBytes)
 	}
 	rr, err := parseRPC(raw, res.Header.Get("Content-Type"), req.ID)
 	return rr, outSess, err

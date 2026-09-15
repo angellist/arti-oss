@@ -6,6 +6,8 @@
 import { mountCommentsOverlay, type CommentsApi } from "../lib/commentsOverlay";
 import type { ThreadDTO } from "../lib/arti";
 
+type CommentWriteResponse = { thread: ThreadDTO; mentions_sent?: string[]; mentions_unreachable?: string[] };
+
 declare global {
   interface Window {
     __ARTI_COMMENTS__?: { artifactId: string; token: string; me?: { email: string; name?: string; picture?: string } };
@@ -30,7 +32,7 @@ if (cfg && cfg.artifactId && cfg.token) {
 
   const api: CommentsApi = {
     list: (id) => call("GET", `/artifacts/${id}/comments`),
-    create: (id, anchor, b) => call("POST", `/artifacts/${id}/comments`, { anchor, body: b }),
+    create: async (id, anchor, b) => (await call<CommentWriteResponse>("POST", `/artifacts/${id}/comments`, { anchor, body: b })).thread,
     reply: (tid, b) => call("POST", `/comments/${tid}/replies`, { body: b }),
     resolve: (tid) => call<void>("POST", `/comments/${tid}/resolve`),
     reopen: (tid) => call<void>("POST", `/comments/${tid}/reopen`),

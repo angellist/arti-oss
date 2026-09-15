@@ -15,6 +15,9 @@ import { usePathname } from "next/navigation";
 // than a 404. What is withheld is the data — the server 404s /api/users, and the
 // page skips the fetch entirely — so the notice reveals nothing beyond the
 // feature's existence.
+//
+// Help & Docs is the one entry that leaves this layout: the docs site has its
+// own rail, so it opens full-screen rather than inside the settings frame.
 export default function SettingsNav({ canManageRoles, showApiKeys }: { canManageRoles: boolean; showApiKeys?: boolean }) {
   const pathname = usePathname();
   const item = (href: string, label: string) => {
@@ -37,6 +40,15 @@ export default function SettingsNav({ canManageRoles, showApiKeys }: { canManage
       {canManageRoles ? item("/settings/users", "Users") : null}
       {item("/settings/groups", "User Groups")}
       {canManageRoles ? item("/settings/roles", "Roles and Permissions") : null}
+      {item("/settings/notifications", "Notifications")}
+      {item("/settings/appearance", "Appearance")}
+      {item("/settings/archived", "Archived")}
+      <Link
+        href="/help"
+        className="block rounded px-3 py-1.5 text-[13px] text-neutral-600 hover:bg-neutral-50"
+      >
+        Help &amp; Docs
+      </Link>
     </nav>
   );
 }

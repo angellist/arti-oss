@@ -5,6 +5,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { KINDS, type NewKind } from "@/lib/newartifact";
+import { useUpload } from "@/lib/upload-context";
+import { UploadIcon } from "./UploadButton";
 
 // A boxes-and-connector glyph, drawn at the same weight as SearchIcon /
 // BrowseIcon / UploadButton's arrow so the rail links read as one set.
@@ -72,13 +74,12 @@ const ICONS: Record<NewKind, (p: { className?: string }) => React.ReactElement> 
 const ORDER: NewKind[] = ["text", "diagram"];
 
 // NewMenu is the rail's authoring entry point: NEW, revealing the kinds arti can
-// create in the browser. Upload stays a separate rail link — it's a different
-// gesture (file picker / drag-and-drop, its own modal) rather than another kind
-// of document.
+// create in the browser plus Upload, which opens the shared upload modal.
 //
 // Opens on hover AND on click/Enter: hover alone is unreachable by keyboard and
 // unusable on touch.
 export default function NewMenu() {
+  const { open: openUpload } = useUpload();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -172,6 +173,18 @@ export default function NewMenu() {
             </Link>
           );
         })}
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            setOpen(false);
+            openUpload();
+          }}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-neutral-700 no-underline transition hover:bg-neutral-50 hover:text-neutral-900"
+        >
+          <UploadIcon className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
+          Upload a file
+        </button>
       </div>
     ) : null;
 

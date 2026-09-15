@@ -17,8 +17,9 @@ func TestExtractTokenPrefersSessionCookieOverProxyToken(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/app/demo", nil)
 	req.Header.Set(ProxyTokenHeader, "proxy-access-token")
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "session-cookie"})
-	if got := extractToken(req); got != "session-cookie" {
-		t.Fatalf("extractToken = %q, want the arti_session cookie", got)
+	got, source := extractToken(req)
+	if got != "session-cookie" || source != CredSourceCookie {
+		t.Fatalf("extractToken = %q/%q, want the arti_session cookie", got, source)
 	}
 }
 
@@ -27,8 +28,9 @@ func TestExtractTokenPrefersBearerOverCookie(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/x", nil)
 	req.Header.Set("Authorization", "Bearer explicit-bearer")
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "session-cookie"})
-	if got := extractToken(req); got != "explicit-bearer" {
-		t.Fatalf("extractToken = %q, want the bearer token", got)
+	got, source := extractToken(req)
+	if got != "explicit-bearer" || source != CredSourceBearer {
+		t.Fatalf("extractToken = %q/%q, want the bearer token", got, source)
 	}
 }
 
@@ -36,7 +38,8 @@ func TestExtractTokenPrefersBearerOverCookie(t *testing.T) {
 func TestExtractTokenFallsBackToProxyToken(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/app/demo", nil)
 	req.Header.Set(ProxyTokenHeader, "proxy-access-token")
-	if got := extractToken(req); got != "proxy-access-token" {
-		t.Fatalf("extractToken = %q, want the proxy token fallback", got)
+	got, source := extractToken(req)
+	if got != "proxy-access-token" || source != CredSourceProxy {
+		t.Fatalf("extractToken = %q/%q, want the proxy token fallback", got, source)
 	}
 }

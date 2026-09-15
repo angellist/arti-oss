@@ -18,6 +18,7 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/arti", () => ({
   getAggregates: async () => ({ scope_types: [], scopes: [], labels: [], content_types: [] }),
   getMe: async () => null,
+  listApiKeys: async () => [],
 }));
 
 // Not under test, and both reach for context the rail doesn't provide here.

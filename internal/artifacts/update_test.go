@@ -96,8 +96,13 @@ func TestUpdateMetadataRejectsNonCreator(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a forbidden error editing another user's artifact, got nil")
 	}
-	if !strings.Contains(err.Error(), "only the creator or an admin may edit") {
-		t.Errorf("error = %v, want creator/admin forbidden", err)
+	if !artifacts.IsForbidden(err) {
+		t.Errorf("error = %v, want a forbidden refusal", err)
+	}
+	// The message names the owner too since ownership became transferable: a
+	// document's owner edits its metadata, not only the version's creator.
+	if !strings.Contains(err.Error(), "may edit") {
+		t.Errorf("error = %v, want the edit refusal", err)
 	}
 }
 

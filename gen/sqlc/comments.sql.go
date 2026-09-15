@@ -13,9 +13,9 @@ import (
 )
 
 const addComment = `-- name: AddComment :one
-INSERT INTO comments (comment_id, thread_id, author, body, author_name, author_picture)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING comment_id, thread_id, author, body, created_at, edited_at, deleted_at, author_name, author_picture
+INSERT INTO comments (comment_id, thread_id, author, body, author_name, author_picture, source)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING comment_id, thread_id, author, body, created_at, edited_at, deleted_at, author_name, author_picture, source
 `
 
 type AddCommentParams struct {
@@ -25,6 +25,7 @@ type AddCommentParams struct {
 	Body          string
 	AuthorName    *string
 	AuthorPicture *string
+	Source        string
 }
 
 func (q *Queries) AddComment(ctx context.Context, arg AddCommentParams) (Comment, error) {
@@ -35,6 +36,7 @@ func (q *Queries) AddComment(ctx context.Context, arg AddCommentParams) (Comment
 		arg.Body,
 		arg.AuthorName,
 		arg.AuthorPicture,
+		arg.Source,
 	)
 	var i Comment
 	err := row.Scan(
@@ -47,6 +49,7 @@ func (q *Queries) AddComment(ctx context.Context, arg AddCommentParams) (Comment
 		&i.DeletedAt,
 		&i.AuthorName,
 		&i.AuthorPicture,
+		&i.Source,
 	)
 	return i, err
 }
@@ -122,7 +125,7 @@ func (q *Queries) DeleteThread(ctx context.Context, threadID pgtype.UUID) (int64
 }
 
 const getComment = `-- name: GetComment :one
-SELECT comment_id, thread_id, author, body, created_at, edited_at, deleted_at, author_name, author_picture FROM comments WHERE comment_id = $1
+SELECT comment_id, thread_id, author, body, created_at, edited_at, deleted_at, author_name, author_picture, source FROM comments WHERE comment_id = $1
 `
 
 func (q *Queries) GetComment(ctx context.Context, commentID pgtype.UUID) (Comment, error) {
@@ -138,6 +141,7 @@ func (q *Queries) GetComment(ctx context.Context, commentID pgtype.UUID) (Commen
 		&i.DeletedAt,
 		&i.AuthorName,
 		&i.AuthorPicture,
+		&i.Source,
 	)
 	return i, err
 }
@@ -163,7 +167,7 @@ func (q *Queries) GetThread(ctx context.Context, threadID pgtype.UUID) (CommentT
 }
 
 const listCommentsByArtifact = `-- name: ListCommentsByArtifact :many
-SELECT c.comment_id, c.thread_id, c.author, c.body, c.created_at, c.edited_at, c.deleted_at, c.author_name, c.author_picture FROM comments c
+SELECT c.comment_id, c.thread_id, c.author, c.body, c.created_at, c.edited_at, c.deleted_at, c.author_name, c.author_picture, c.source FROM comments c
 JOIN comment_threads t ON c.thread_id = t.thread_id
 WHERE t.artifact_id = $1 AND c.deleted_at IS NULL
 ORDER BY c.created_at
@@ -188,6 +192,7 @@ func (q *Queries) ListCommentsByArtifact(ctx context.Context, artifactID pgtype.
 			&i.DeletedAt,
 			&i.AuthorName,
 			&i.AuthorPicture,
+			&i.Source,
 		); err != nil {
 			return nil, err
 		}
@@ -200,7 +205,7 @@ func (q *Queries) ListCommentsByArtifact(ctx context.Context, artifactID pgtype.
 }
 
 const listCommentsByThread = `-- name: ListCommentsByThread :many
-SELECT comment_id, thread_id, author, body, created_at, edited_at, deleted_at, author_name, author_picture FROM comments
+SELECT comment_id, thread_id, author, body, created_at, edited_at, deleted_at, author_name, author_picture, source FROM comments
 WHERE thread_id = $1 AND deleted_at IS NULL
 ORDER BY created_at
 `
@@ -224,6 +229,7 @@ func (q *Queries) ListCommentsByThread(ctx context.Context, threadID pgtype.UUID
 			&i.DeletedAt,
 			&i.AuthorName,
 			&i.AuthorPicture,
+			&i.Source,
 		); err != nil {
 			return nil, err
 		}
@@ -299,7 +305,7 @@ func (q *Queries) SetThreadStatus(ctx context.Context, arg SetThreadStatusParams
 const updateComment = `-- name: UpdateComment :one
 UPDATE comments SET body = $2, edited_at = now()
 WHERE comment_id = $1 AND deleted_at IS NULL
-RETURNING comment_id, thread_id, author, body, created_at, edited_at, deleted_at, author_name, author_picture
+RETURNING comment_id, thread_id, author, body, created_at, edited_at, deleted_at, author_name, author_picture, source
 `
 
 type UpdateCommentParams struct {
@@ -320,6 +326,7 @@ func (q *Queries) UpdateComment(ctx context.Context, arg UpdateCommentParams) (C
 		&i.DeletedAt,
 		&i.AuthorName,
 		&i.AuthorPicture,
+		&i.Source,
 	)
 	return i, err
 }

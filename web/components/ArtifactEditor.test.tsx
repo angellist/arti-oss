@@ -18,6 +18,8 @@ const info: ArtifactInfo = {
   size_bytes: 10,
   sha256: null,
   creator: "a@b.com",
+  written_via: null,
+  written_via_name: null,
   scopes: [],
   labels: [],
   allowed_access: ["*"],

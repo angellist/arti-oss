@@ -1,7 +1,7 @@
 ---
 title: MCP tools
 order: 2
-summary: arti's own MCP server — the 12 tools it exposes at /mcp, their input schemas and results, and the OAuth flow MCP clients use to connect.
+summary: arti's own MCP server — the 15 tools it exposes at /mcp, their input schemas and results, and the OAuth flow MCP clients use to connect.
 ---
 
 # MCP tools
@@ -46,7 +46,7 @@ what the caller can read (their email + group memberships); admins with
 
 ## Tools
 
-12 tools (`internal/mcp/server.go:120`). `ident` accepts a UUID **or** a named slug.
+15 tools (`internal/mcp/server.go:120`). `ident` accepts a UUID **or** a named slug.
 `version` is optional — for a slug it defaults to the latest version the caller can read.
 
 ### `add_artifact`
@@ -126,7 +126,7 @@ only; editing a `kind:skill` artifact also requires `MANAGE_SKILLS`.
 | `labels` | string[] | no | replaces the set; `[]` clears |
 | `allowed_access` | string[] | no | glob-on-email; `[]` → creator-only |
 | `allowed_write` | string[] | no | subset of readers allowed to write; omit → writers follow readers, `[]` → creator-only writes (unioned into `allowed_access`) |
-| `comments_enabled` | bool | no | per-DOCUMENT comment switch — applies to every version of the slug, and only the artifact's OWNER (earliest version's creator) or an admin may set it |
+| `comments_enabled` | bool | no | per-DOCUMENT comment switch — applies to every version of the slug, and only the artifact's OWNER (first version's creator, unless transferred) or an admin may set it |
 
 **Returns:** the refreshed `ArtifactInfo`.
 
@@ -285,6 +285,46 @@ discovery documents (`internal/auth/wellknown.go`):
 Token lifetimes (`cmd/arti-server/cmd_serve.go:227`): access **7 days**, refresh
 **90 days**. The client secret is stored only as a hash. Use the returned access token as
 `Authorization: Bearer …` on `/mcp`.
+
+### `add_comment`
+
+Start a comment thread on an artifact, or add to its document-level thread.
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `ident` | string | yes | UUID or slug |
+| `version` | integer | no | pin a slug version |
+| `body` | string | yes | plain text comment body |
+| `quote` | string | no | prose as the page renders it, not raw markdown; omit for document-level, and on a PACKAGE or APP, whose comments are document-level only |
+
+**Returns:** `{ artifact_id, slug?, version?, thread, mentions_notified, mentions_unreachable }`.
+
+Quote rendered prose, not raw markdown. An address written as `@user@example.com`
+in the body sends that person a DM if they can read the artifact; quote prior
+mentions only when you mean to re-notify them.
+
+### `reply_to_comment`
+
+Reply to an existing thread.
+
+| Param | Type | Required |
+|---|---|---|
+| `thread_id` | string | yes |
+| `body` | string | yes |
+
+**Returns:** the created `Comment`. Mention behavior is the same as
+`add_comment`.
+
+### `resolve_comment`
+
+Mark a thread resolved, or reopen it. Resolving the same state twice is a no-op.
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `thread_id` | string | yes | |
+| `reopen` | boolean | no | `true` reopens instead of resolving |
+
+**Returns:** the updated `Thread`.
 
 ## See also
 

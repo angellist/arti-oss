@@ -26,6 +26,7 @@ func TestIsUploadAllowed(t *testing.T) {
 		{"DELETE", "/api/artifacts/abc", false},
 		{"PATCH", "/api/artifacts/abc", false},
 		{"POST", "/api/artifacts/abc/suggest-metadata", false},
+		{"POST", "/api/artifacts/by-slug/foo/owner", false},
 		{"GET", "/api/admin/users", false},
 		{"POST", "/mcp", false},
 	}

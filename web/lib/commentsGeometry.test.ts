@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
   computeShift,
-  minMarkerLeft,
+  columnLeft,
   railTop,
   CARD_FOOTPRINT,
   CARD_RIGHT,
+  CARD_WIDTH,
   RAIL_FOOTPRINT,
   SHIFT_GAP,
   SHIFT_LMIN,
@@ -113,32 +114,35 @@ describe("computeShift", () => {
   });
 });
 
-describe("minMarkerLeft", () => {
-  const chip = { viewportWidth: 1440, markerWidth: 44 };
+describe("columnLeft", () => {
+  const col = { viewportWidth: 1440 };
 
   it("hugs the document's right edge when there is room", () => {
-    expect(minMarkerLeft({ ...chip, containerRight: 900 })).toBe(908);
+    expect(columnLeft({ ...col, containerRight: 900 })).toBe(920);
   });
 
-  it("never pushes a chip under the rail on a full-width document", () => {
+  it("keeps a whole card on screen and clear of the rail on a full-width doc", () => {
     // The doc runs the whole viewport (a served page): hugging it would put the
-    // chip at 1448 — off-screen, and through the rail on the way out.
-    const left = minMarkerLeft({ ...chip, containerRight: 1440 });
-    expect(left + chip.markerWidth).toBeLessThanOrEqual(chip.viewportWidth - RAIL_FOOTPRINT);
-  });
-
-  it("caps the chip at the card column's right edge, so both share one edge", () => {
-    const left = minMarkerLeft({ ...chip, containerRight: 1440 });
-    expect(left + chip.markerWidth).toBe(chip.viewportWidth - CARD_RIGHT);
-  });
-
-  it("clears the rail on a narrow window too", () => {
-    const left = minMarkerLeft({ containerRight: 390, viewportWidth: 400, markerWidth: 44 });
-    expect(left + 44).toBeLessThanOrEqual(400 - RAIL_FOOTPRINT);
+    // column at 1460 — off-screen, and through the rail on the way out.
+    const left = columnLeft({ ...col, containerRight: 1440 });
+    expect(left + CARD_WIDTH).toBe(col.viewportWidth - CARD_RIGHT);
+    expect(left + CARD_WIDTH).toBeLessThanOrEqual(col.viewportWidth - RAIL_FOOTPRINT);
   });
 
   it("never goes negative on a viewport narrower than the gutter itself", () => {
-    expect(minMarkerLeft({ containerRight: 100, viewportWidth: 100, markerWidth: 44 })).toBe(8);
+    expect(columnLeft({ containerRight: 100, viewportWidth: 100 })).toBe(8);
+  });
+
+  // The whole point of sharing SHIFT_GAP with computeShift: a doc that had to
+  // move to make room lands with its right edge exactly one gap left of the
+  // card column, so the hug and the cap agree instead of the column sitting a
+  // few px short of where the shift was computed for.
+  it("lands exactly on the card column once the doc has shifted for it", () => {
+    const m = base({ docLeft: 700, docRight: 1050 });
+    const { doc } = computeShift(m);
+    expect(columnLeft({ viewportWidth: m.viewportWidth, containerRight: m.docRight - doc })).toBe(
+      m.viewportWidth - CARD_FOOTPRINT,
+    );
   });
 });
 

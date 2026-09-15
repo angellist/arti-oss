@@ -23,7 +23,8 @@ A time-limited URL that opens the document for **anyone holding it**, with no
 AngelList account and no sign-in. The URL is the whole credential: whoever has
 it can read the document until the link expires or you revoke it.
 
-Only the document's **owner** — the creator of its earliest version — or an
+Only the document's **owner** — whoever created its first version, unless
+ownership has since been transferred — or an
 administrator can create one. That is the same authority it takes to change the
 document's access list, because publishing a document to the internet is a
 larger act than widening who inside AngelList can read it. Someone who can

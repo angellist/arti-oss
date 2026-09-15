@@ -149,7 +149,8 @@ func (f loginFinisher) finish(w http.ResponseWriter, r *http.Request, email, nam
 	}
 
 	// Browser flow — mint arti_session cookie and redirect.
-	jwt, err := f.signer.Sign(Claims{Email: email, Name: name, Picture: picture, Scopes: []string{"user"}, TTL: f.accessTTL})
+	jwt, err := f.signer.Sign(Claims{Email: email, Name: name, Picture: picture,
+		Scopes: []string{"user"}, Typ: TokenTypeSession, TTL: f.accessTTL})
 	if err != nil {
 		http.Error(w, "sign session: "+err.Error(), http.StatusInternalServerError)
 		return

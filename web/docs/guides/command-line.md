@@ -162,6 +162,19 @@ arti add ./my-skill/ --slug my-skill --label skill --entry-point skill.md
 arti add bundle.zip --type package --slug my-bundle
 ```
 
+The zip holds **every** file under the directory. Nothing is filtered and nothing
+is rejected, so a working directory goes up whole — including `.git/`, whose
+`config` carries your remote URLs and whose `logs/` carry your commit history to
+everyone who can read the artifact. `node_modules/`, `.venv/`, `__pycache__/` and
+editor leftovers (`*.bak`, `*.orig`, `*~`) travel the same way.
+
+Publish a copy that holds only what the artifact serves:
+
+```sh
+rsync -a --exclude .git --exclude node_modules ./my-app/ /tmp/my-app/
+arti add /tmp/my-app --type app --slug my-app
+```
+
 ## Get an artifact
 
 `arti get` accepts a UUID or a slug. Metadata prints to `stderr`, the body to

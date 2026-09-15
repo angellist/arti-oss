@@ -143,13 +143,13 @@ func TestComments_ListForCaller(t *testing.T) {
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("create: %d (%s)", rec.Code, rec.Body)
 		}
-		var th Thread
-		json.Unmarshal(rec.Body.Bytes(), &th)
-		return th.ID
+		var out WriteResponse
+		json.Unmarshal(rec.Body.Bytes(), &out)
+		return out.Thread.ID
 	}
 	mkThread("alpha")
 	resolved := mkThread("gamma")
-	if rec := do("POST", "/api/comments/"+resolved+"/resolve", ""); rec.Code != http.StatusNoContent {
+	if rec := do("POST", "/api/comments/"+resolved+"/resolve", ""); rec.Code != http.StatusOK {
 		t.Fatalf("resolve: %d", rec.Code)
 	}
 
@@ -210,12 +210,12 @@ func TestComments_FlowAndAccess(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: got %d (%s)", rec.Code, rec.Body)
 	}
-	var created Thread
+	var created WriteResponse
 	json.Unmarshal(rec.Body.Bytes(), &created)
-	if len(created.Comments) != 1 || created.Comments[0].Body != "first" {
-		t.Fatalf("created thread bad: %+v", created)
+	if len(created.Thread.Comments) != 1 || created.Thread.Comments[0].Body != "first" {
+		t.Fatalf("created thread bad: %+v", created.Thread)
 	}
-	tid := created.ID
+	tid := created.Thread.ID
 
 	// owner lists → 1 thread
 	rec = do("GET", "/api/artifacts/"+id+"/comments", owner, "")
@@ -292,13 +292,11 @@ func TestComments_FlowAndAccess(t *testing.T) {
 		}
 	}
 
-	// recreate a doc thread to exercise resolve below
 	rec = do("POST", "/api/artifacts/"+id+"/comments", owner, `{"anchor":{"type":"doc"},"body":"again"}`)
 	json.Unmarshal(rec.Body.Bytes(), &created)
-	tid = created.ID
+	tid = created.Thread.ID
 
-	// resolve the doc thread
-	if rec := do("POST", "/api/comments/"+tid+"/resolve", owner, ""); rec.Code != http.StatusNoContent {
+	if rec := do("POST", "/api/comments/"+tid+"/resolve", owner, ""); rec.Code != http.StatusOK {
 		t.Fatalf("resolve: got %d", rec.Code)
 	}
 	rec = do("GET", "/api/artifacts/"+id+"/comments", owner, "")
@@ -345,7 +343,7 @@ func TestComments_DisabledDocument(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("seed comment: got %d (%s)", rec.Code, rec.Body)
 	}
-	var seeded Thread
+	var seeded WriteResponse
 	json.Unmarshal(rec.Body.Bytes(), &seeded)
 
 	if _, err := art.SetCommentsEnabled(ctx, uuidFrom(row.ArtifactID), false); err != nil {
@@ -375,11 +373,11 @@ func TestComments_DisabledDocument(t *testing.T) {
 	// switch back rather than write around it.
 	for _, c := range []struct{ method, path, body string }{
 		{"POST", "/api/artifacts/" + id + "/comments", `{"anchor":{"type":"doc"},"body":"after"}`},
-		{"POST", "/api/comments/" + seeded.ID + "/replies", `{"body":"after"}`},
-		{"POST", "/api/comments/" + seeded.ID + "/resolve", ""},
-		{"POST", "/api/comments/" + seeded.ID + "/reopen", ""},
-		{"PUT", "/api/comments/" + seeded.ID + "/comments/" + seeded.Comments[0].ID, `{"body":"edited"}`},
-		{"DELETE", "/api/comments/" + seeded.ID + "/comments/" + seeded.Comments[0].ID, ""},
+		{"POST", "/api/comments/" + seeded.Thread.ID + "/replies", `{"body":"after"}`},
+		{"POST", "/api/comments/" + seeded.Thread.ID + "/resolve", ""},
+		{"POST", "/api/comments/" + seeded.Thread.ID + "/reopen", ""},
+		{"PUT", "/api/comments/" + seeded.Thread.ID + "/comments/" + seeded.Thread.Comments[0].ID, `{"body":"edited"}`},
+		{"DELETE", "/api/comments/" + seeded.Thread.ID + "/comments/" + seeded.Thread.Comments[0].ID, ""},
 	} {
 		if rec := do(c.method, c.path, c.body); rec.Code != http.StatusForbidden {
 			t.Fatalf("%s %s with comments off: want 403, got %d (%s)", c.method, c.path, rec.Code, rec.Body)

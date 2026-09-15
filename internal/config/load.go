@@ -50,7 +50,7 @@ func Defaults() *Config {
 			Device: Device{
 				TokenTTL:       Duration(24 * time.Hour),
 				TokenMaxTTL:    Duration(720 * time.Hour),
-				MaxUploadBytes: 26214400, // 25 MiB
+				MaxUploadBytes: 209715200, // 200 MiB
 				CodeRPM:        10,
 			},
 			APIKeys: APIKeys{
@@ -64,6 +64,10 @@ func Defaults() *Config {
 			OpenRPM: 120,
 			MintRPM: 30,
 		},
+		Comments: Comments{
+			GlobalRPM:   30,
+			ArtifactRPM: 10,
+		},
 		// No default administrators: admin capability is granted only by
 		// explicit configuration (or existing DB role assignments).
 		Admin: Admin{},
@@ -73,7 +77,9 @@ func Defaults() *Config {
 		Apps: Apps{
 			// Same-origin only; deployments allowlist trusted embedding
 			// origins explicitly.
-			FrameAncestors: "'self'",
+			FrameAncestors:  "'self'",
+			CallTimeoutMax:  Duration(90 * time.Second),
+			CallMaxInflight: 16,
 		},
 		LLM: LLM{
 			DefaultModel:  "claude-sonnet-4-6",
@@ -268,6 +274,8 @@ func bindings(c *Config) []binding {
 		duration("ARTI_SHARE_MAX_TTL", &c.Share.MaxTTL),
 		integer("ARTI_SHARE_OPEN_RPM", &c.Share.OpenRPM),
 		integer("ARTI_SHARE_MINT_RPM", &c.Share.MintRPM),
+		integer("ARTI_COMMENTS_GLOBAL_RPM", &c.Comments.GlobalRPM),
+		integer("ARTI_COMMENTS_ARTIFACT_RPM", &c.Comments.ArtifactRPM),
 		str("ARTI_OBO_CALLBACK_BASE", &c.Auth.OBO.CallbackBase),
 		str("ARTI_OBO_ENC_KEY", &c.Auth.OBO.EncKey),
 
@@ -284,6 +292,8 @@ func bindings(c *Config) []binding {
 		// Apps
 		str("ARTI_APP_MCP_SERVERS", &c.Apps.MCPServersJSON),
 		str("ARTI_APP_FRAME_ANCESTORS", &c.Apps.FrameAncestors),
+		duration("ARTI_APP_CALL_TIMEOUT_MAX", &c.Apps.CallTimeoutMax),
+		integer("ARTI_APP_CALL_MAX_INFLIGHT", &c.Apps.CallMaxInflight),
 
 		// Embedding
 		str("ARTI_EMBED_SURFACES", &c.Embedding.SurfacesJSON),

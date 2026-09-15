@@ -1,8 +1,9 @@
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
+import AccessDenied from "@/components/AccessDenied";
 import ArtifactViewer from "@/components/ArtifactViewer";
 import FullPageView from "@/components/FullPageView";
-import { ArtiError, fetchContent, fetchPackageFile, getBySlug, getMe, listPackageFiles } from "@/lib/arti";
+import { ArtiError, fetchContent, fetchPackageFile, getBySlug, getDenialBySlug, getMe, listPackageFiles } from "@/lib/arti";
 import { fullPageKind, isFullPageView, resolvePackageEntry, textScaleFromParam } from "@/lib/viewer";
 import { PackageRailProvider, SearchRailProvider } from "@/lib/rail-context";
 
@@ -44,9 +45,14 @@ export default async function BySlug({
       getMe(cookie).catch(() => ({ email: "", name: "", is_admin: false })),
     ]);
   } catch (e) {
-    // No artifact under this slug (or no access) → render the standard 404
-    // page instead of letting the ArtiError bubble up as a 500 wall.
-    if (e instanceof ArtiError && (e.status === 404 || e.status === 403)) notFound();
+    // The read gives the same 404 for a missing artifact and a restricted one,
+    // so ask the denial route which it was: a payload means the reader followed
+    // a real link and needs to know who to ask, anything else is a plain 404.
+    if (e instanceof ArtiError && (e.status === 404 || e.status === 403)) {
+      const denial = await getDenialBySlug(slug, undefined, cookie).catch(() => null);
+      if (denial) return <AccessDenied info={denial} />;
+      notFound();
+    }
     throw e;
   }
 

@@ -3,9 +3,9 @@
 import { useUpload } from "@/lib/upload-context";
 
 // A non-emoji upload glyph that inherits text color (stroke = currentColor),
-// matching SearchIcon's weight so the rail's SEARCH / UPLOAD entries read as
-// one set.
-function UploadIcon({ className }: { className?: string }) {
+// matching SearchIcon's weight so the rail entries read as one set. Also used
+// by the NEW menu's Upload item.
+export function UploadIcon({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -23,11 +23,10 @@ function UploadIcon({ className }: { className?: string }) {
   );
 }
 
-// UploadButton is the "create artifact" affordance in the left rail. It opens
-// the shared upload modal (owned by UploadProvider, which also handles page
-// drag-and-drop). Styled as a rail section link — same type scale and leading
-// icon as SEARCH / BROWSE ALL — and rendered directly below "Browse All"
-// (search mode) or above the file tree (package mode).
+// UploadButton is the rail's upload entry in package mode, where there is no
+// NEW menu to carry it. It opens the shared upload modal (owned by
+// UploadProvider, which also handles page drag-and-drop) and is styled as a
+// rail section link, above the file tree.
 export default function UploadButton() {
   const { open } = useUpload();
   return (

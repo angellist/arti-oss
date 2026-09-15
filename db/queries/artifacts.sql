@@ -4,9 +4,9 @@ INSERT INTO artifacts (
     title, description, content_type,
     inline_content, blob_ref, sha256, size_bytes,
     creator, scope, scopes, labels, metadata, allowed_access, allowed_write,
-    comments_enabled
+    comments_enabled, written_via, written_via_name
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
 )
 RETURNING *;
 

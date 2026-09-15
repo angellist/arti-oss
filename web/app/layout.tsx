@@ -4,6 +4,7 @@ import "./globals.css";
 import SideNav from "@/components/SideNav";
 import { RailModeShell } from "@/lib/rail-context";
 import { UploadProvider } from "@/lib/upload-context";
+import { themeBootstrapScript } from "@/lib/appearance";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -31,10 +32,17 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
+    // suppressHydrationWarning: the theme script writes data-theme onto this
+    // element before React hydrates, which is the point — the server cannot
+    // know a per-browser choice.
     <html
       lang="en"
+      suppressHydrationWarning
       className={`${geistSans.variable} ${petrona.variable} h-full antialiased`}
     >
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript() }} />
+      </head>
       <body className="min-h-full bg-neutral-50">
         <RailModeShell>
           <UploadProvider>

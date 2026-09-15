@@ -47,7 +47,10 @@ includes `APP`).
 | `content_type` | string | MIME |
 | `size_bytes` | int64 \| null | |
 | `sha256` | string \| null | |
-| `creator` | string | email |
+| `creator` | string | email — the identity the write authenticated AS |
+| `owner` | string | email — who the DOCUMENT belongs to. Distinct from `creator`, which names whoever pushed THIS version. Single-artifact responses only |
+| `written_via` | string \| null | the credential that MADE the write: `apikey:<id>`, `device:<family>`, `token` (CLI or MCP), `session`, `service`. `null` on documents written before attribution shipped, which means unknown — not "a person in a browser" |
+| `written_via_name` | string \| null | that credential's name at write time (an API key's name); `null` when it has none |
 | `scopes` | string[] | e.g. `["a:bt-auto-route","u:alice"]` |
 | `labels` | string[] | |
 | `allowed_access` | string[] | glob-on-email patterns; `["*"]` = any authed reader; `[]` = creator-only |
@@ -72,6 +75,8 @@ Registered by `artifacts.Mount` (`internal/artifacts/server.go:764`).
 | GET | `/api/artifacts/aggregates` | Label/scope histograms for the catalog sidebar |
 | GET | `/api/artifacts/{id}` | Fetch metadata + serve content |
 | GET | `/api/artifacts/{id}/meta` | Metadata only |
+| POST | `/api/artifacts/{id}/views` | Record one human-facing view |
+| GET | `/api/artifacts/{id}/views` | Aggregate view stats (viewer rows owner/admin-only) |
 | GET | `/api/artifacts/{id}/files` | PACKAGE/APP file manifest |
 | GET | `/api/artifacts/{id}/files/*` | One file inside a PACKAGE/APP |
 | PATCH | `/api/artifacts/{id}` | Edit mutable fields |
@@ -178,7 +183,8 @@ Given `{ filename, content_type, artifact_type?, sample }`, returns
 ### GET `/api/artifacts` and `/api/artifacts/search`
 
 List/search query params: `limit` (default 50), `offset` (default 0), `type`,
-`creator`, `scope`, `label` (repeatable), `include_archived`. Search additionally
+`creator`, `scope`, `label` (repeatable), `via` (the writing credential, glob-aware
+— e.g. `via=apikey:3f2a…` or `via=apikey:*`), `include_archived`. Search additionally
 requires `q`. Both return `{ "artifacts": ArtifactInfo[], "total": int }`. Non-admins see
 only artifacts they can read (their email + group memberships); admins with
 `MANAGE_ARTIFACTS` see all.
@@ -193,7 +199,7 @@ additionally requires `MANAGE_SKILLS`. Response `200` + updated `ArtifactInfo`.
 not per-version:** the server writes them to every version of the slug
 (archived versions included, so unarchiving can't resurrect a stale setting),
 and a new version inherits them. They are settable only by the artifact's
-OWNER (its earliest version's creator) or an admin — not by a delegated
+OWNER (its first version's creator, unless transferred) or an admin — not by a delegated
 writer, and not by the creator of the patched version if that differs from
 the owner. For the ACL fields the owner's write is applied slug-wide even when
 the values match the patched version — that resend is how a slug whose
@@ -215,6 +221,23 @@ read — the historical behavior, and the state of every artifact created before
 this field existed. An empty `allowed_write` (`[]`) means creator-only writes
 while reads stay as `allowed_access`. The invariant is enforced server-side, so
 raw REST/MCP/CLI writers cannot create a write-but-not-read grant.
+
+### POST `/api/artifacts/by-slug/{slug}/owner`
+
+Transfer the document to a new owner. Body `{ "owner": "<email>" }`, response
+`{ "slug", "owner", "previous_owner" }`.
+
+Ownership is per-DOCUMENT and stored (`artifact_owners`, migration 0029). It is
+claimed by the slug's first version and moves only through this endpoint — not
+when someone else publishes a version, not when v1 is archived. It is the
+authority every document-level setting resolves to: the ACL, the comment
+switch, external share links, and this transfer itself.
+
+Authorization: the current owner or an admin (`MANAGE_ARTIFACTS`). The target
+must be a single email address — a glob or `group:` token is rejected, since
+ownership is one principal. Transferring grants the new owner read access on
+every version, so they cannot inherit a document they cannot open; the previous
+owner's own grants are left in place for the new owner to withdraw.
 
 ### DELETE `/api/artifacts/{id}` and `/api/artifacts/by-slug/{slug}`
 
@@ -249,16 +272,25 @@ caller can read.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/artifacts/{id}/comments` | List threads (with comments) |
-| POST | `/api/artifacts/{id}/comments` | Create a thread — body `{ anchor, body }` → `201` Thread |
+| GET | `/api/artifacts/by-slug/{slug}/comments` | List threads by slug (`?version=`, `?exclude_resolved=true`) |
+| GET | `/api/comments/{threadID}` | Fetch one thread (with comments) |
+| POST | `/api/artifacts/{id}/comments` | Create a thread — body `{ anchor?, quote?, body }` → `201` write envelope |
+| POST | `/api/artifacts/by-slug/{slug}/comments` | Create by slug — body `{ anchor?, quote?, body }` → `201` write envelope |
 | POST | `/api/comments/{threadID}/replies` | Reply — body `{ body }` → `201` Comment |
-| POST | `/api/comments/{threadID}/resolve` | Mark resolved → `204` |
-| POST | `/api/comments/{threadID}/reopen` | Reopen → `204` |
+| POST | `/api/comments/{threadID}/resolve` | Mark resolved → `200` Thread |
+| POST | `/api/comments/{threadID}/reopen` | Reopen → `200` Thread |
 | PUT | `/api/comments/{threadID}/comments/{commentID}` | Edit (author only) — body `{ body }` |
 | DELETE | `/api/comments/{threadID}/comments/{commentID}` | Delete (author only) → `204` |
 
 A **Thread** is `{ id, anchor, status (open\|resolved), created_by, created_at,
 resolved_by?, comments: Comment[] }`; a **Comment** is `{ id, author, author_name,
-author_picture?, body, created_at, edited_at? }`.
+author_picture?, body, source?, created_at, edited_at? }`. Create responses include
+`{ artifact_id, slug?, version?, thread, mentions_notified, mentions_unreachable }`
+so slug callers can see which version received the thread. `quote` is matched
+against rendered prose, not raw markdown. Addresses written as `@user@example.com`
+in the body send DMs when the address can read the artifact; unreachable mentions
+are echoed in the write response. Comment writes return `403` when
+`comments_enabled=false` and `429` when the per-principal comment write cap is hit.
 
 ## Comments embed (public, token-authed)
 
@@ -373,22 +405,26 @@ Self-serve, personal bearer keys for programmatic upload (`apikeys.NewService().
 `internal/apikeys/service.go`). A key looks like `arti_upload_XXXXX…`; arti stores only
 its SHA-256, so the plaintext is returned **once**, at creation. A key carries the
 `upload` scope — so an API-key-authed request runs through the same default-deny
-[upload-scope guard](#device) (create/append/read only, 25 MiB body cap) as a device
+[upload-scope guard](#device) (create/append/read only, same body cap) as a device
 token. Revocation and expiry are enforced at authentication (a revoked or expired key
 fails to authenticate). Managing your own keys needs no special permission; the
 cross-owner admin view needs `MANAGE_API_KEYS`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/keys` | Mint a key → `201` with the plaintext `key` (shown once) |
+| POST | `/api/keys` | Mint a key → `201` with the plaintext `key` (shown once). **Browser session only** |
 | GET | `/api/keys` | List your keys (`?all=true` → every owner, needs `MANAGE_API_KEYS`) |
+| GET | `/api/keys/usage` | Where your credentials have been used, and how many documents each wrote (`?all=true` → every owner, needs `MANAGE_API_KEYS`; `?days=` window, default 30, max 365) |
 | DELETE | `/api/keys/{id}` | Revoke (soft) — your own key, or any key with `MANAGE_API_KEYS` |
 
 ### POST `/api/keys`
 
-Requires a **full-access** credential (session cookie or CLI token) — an upload-scoped
-credential (a device token or another API key) is rejected `403`, and the mint route is
-IP-rate-limited (`ARTI_API_KEY_RPM`).
+Requires the **browser session** credential: the `arti_session` cookie, or the
+access token oauth2-proxy forwards for a browser. Every bearer token is rejected
+`403` — a CLI or MCP token, the service secret, and another API key alike — because
+a credential authenticates as its owner, so nothing downstream can tell a person
+from an agent holding that person's token. Create keys in Settings → API Keys.
+The route is also IP-rate-limited (`ARTI_API_KEY_RPM`).
 
 Body: `{ name, scopes?, ttl_days? }`. `name` is required. `scopes` defaults to
 `["upload"]` and must be exactly one supported scope (v1: only `upload`). `ttl_days`
@@ -415,6 +451,54 @@ Response `201` — the key view plus the one-time `key`:
 keys, newest first). `DELETE /api/keys/{id}` soft-revokes (`204`; `404` if it isn't yours
 and you lack `MANAGE_API_KEYS`). See the [Using the API](../guides/api.md#api-keys-self-serve)
 guide for the how-to.
+
+### GET / PUT `/api/notifications`
+
+The signed-in person's own Slack notification choices. No permission required: these
+govern messages sent to that caller, and the identity comes from the session, so a
+caller can only ever read and write their own. `GET` returns each category with its
+state, plus `slack_configured`, `deployment_enabled` and `can_manage_deployment`;
+`PUT {key, enabled}` sets one and returns the new state. Comment mentions default
+**on**; the credential categories default **off**. A change takes effect within 15
+seconds, without a deploy.
+
+### GET / PUT `/api/admin/notifications`
+
+The deployment-wide switch (`notifications.slack.enabled`), which stops every Slack
+message arti sends to anyone. `MANAGE_ARTIFACTS` only; anyone else gets `404`, as with
+the rest of the admin surface. It overrides personal choices in one direction only:
+off means nothing is sent, on returns everyone to what they chose.
+
+### GET `/api/keys/usage`
+
+Where each of the caller's credentials has been used, and how many live documents
+each has written:
+
+```json
+{
+  "sources": [
+    {
+      "cred": "apikey:3f2a…",
+      "ip": "34.72.11.8",
+      "user_agent": "python-requests/2.31",
+      "reads": 1240,
+      "writes": 12,
+      "first_seen": "2026-09-01T14:02:11Z",
+      "last_seen": "2026-09-04T17:29:02Z"
+    }
+  ],
+  "docs": { "apikey:3f2a…": 261 },
+  "days": 30
+}
+```
+
+`cred` matches the `written_via` stamped on the documents that credential wrote, so
+`GET /api/artifacts?via=<cred>` lists them. Rows are aggregated from daily counts per
+source, not per request, and are deleted after 90 days. An **API key** answering from a
+network (`/24` or `/64`) it has never answered from also DMs its owner; no other
+credential kind is notified about, because a person's own clients change address and
+user agent constantly. `?all=true` adds `owner_email` and covers every owner for a
+`MANAGE_API_KEYS` holder (and silently narrows to the caller's own for anyone else).
 
 ## MCP (authed)
 
@@ -465,7 +549,7 @@ Headless agents obtain a human-approved, **upload-scoped** token. Public except
 may only: `GET /api/me`, `GET /api/artifacts…` (read), `POST /api/artifacts` (create), and
 `POST /api/artifacts/by-slug/{slug}/append`. Everything else — delete, PATCH,
 suggest-metadata, admin, MCP — is rejected `403`, even for an admin's token. POST bodies
-are additionally capped at `ARTI_DEVICE_MAX_UPLOAD_BYTES` (default 25 MiB). TTLs:
+are additionally capped at `ARTI_DEVICE_MAX_UPLOAD_BYTES` (default 200 MiB). TTLs:
 `ARTI_DEVICE_TOKEN_TTL` (default 24h) and the family ceiling
 `ARTI_DEVICE_TOKEN_MAX_TTL` (default 720h). See [Configuration](configuration.md#auth).
 

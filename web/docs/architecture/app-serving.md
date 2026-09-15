@@ -43,9 +43,32 @@ Each call to the apps proxy runs through these checks:
 4. Load the APP and re-run the artifact read rule (defense in depth).
 5. Read `arti-app.json` fresh from the package; the `(server, tool)` pair must be
    in its `tools` allowlist or the call is rejected.
-6. Resolve the named server to a server config (URL + auth policy live
-   server-side — the app names a server, it can't supply a URL), then dispatch by
-   that server's auth mode.
+6. If the server is arti itself, run the tool in-process and stop here (see
+   below). Otherwise resolve the named server to a server config (URL + auth
+   policy live server-side — the app names a server, it can't supply a URL),
+   then dispatch by that server's auth mode.
+
+One tool-call body is capped at 200 MiB, the same ceiling `POST /api/artifacts`
+has. An app writing an artifact through the proxy therefore has no tighter limit
+than any other client, though a write bound for a remote server still has to
+survive that upstream's own limits.
+
+## arti's own tools run in-process
+
+A call to the `arti` or `arti-self` server naming one of arti's own tools —
+every read, plus `add_artifact`, `append_artifact`, `update_artifact` and
+`archive_artifact` — is dispatched in-process instead of being forwarded. It
+runs as the viewer, so the handlers re-resolve their groups and access and the
+app reaches exactly what that person already can. There is no consent popup and
+no dependence on an `arti` entry in `ARTI_APP_MCP_SERVERS`: the branch sits
+ahead of the server lookup, so arti access works on a deployment that configures
+no gateway at all.
+
+Writes are stamped to the APP, not to the viewer. The viewer presented no bearer
+of their own, so `written_via` records `app:<artifact-uuid>` with the app's
+title as its name, and the viewer remains the `creator`. Errors come back
+through the same table `POST /api/artifacts` answers from, so a version conflict
+is a 409 here too; a target the viewer cannot see arrives as a 404, never a 403.
 
 ## Server auth modes
 
@@ -55,7 +78,7 @@ Each configured server declares how arti authenticates the upstream call:
   permissions and audit trail. The viewer's per-user upstream token comes from
   the OBO broker. No token yet → the proxy returns an `authorize_url`; the page
   opens the consent popup and retries. Most built-in servers (notion, flowdash,
-  slack, linear, the arti self-MCP, …) route here.
+  slack, linear, …) route here. arti's own tools do not — see above.
 - **Service** — the built-in `llm` server. Dispatched in-process to the Anthropic
   Messages API with arti's service key; no OBO. The viewer email is used only for
   budgets and usage attribution. Serves exactly one tool, `complete`.

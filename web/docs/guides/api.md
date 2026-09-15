@@ -30,7 +30,7 @@ artifacts, nothing else.
 |---|---|---|---|---|
 | `arti_session` cookie | Humans in the web app | Automatic after SSO login | 7 days | Full |
 | CLI login | A person at a terminal | `arti login` (browser PKCE) | 7-day access, 90-day refresh | Full |
-| **API key** | A service/script you own | Self-serve — [Settings → API Keys](#api-keys-self-serve) or `POST /api/keys` | Up to 365 days (default 90); no auto-refresh | **Upload only** |
+| **API key** | A service/script you own | Self-serve, **in the web app only** — [Settings → API Keys](#api-keys-self-serve) | Up to 365 days (default 90); no auto-refresh | **Upload only** |
 | **Device flow** | A headless agent needing a human to vouch | [RFC 8628 device flow](../recipes/agent.md) — human approves once | 24-hour access (+30-day refresh for a standing agent) | **Upload only** |
 | Service secret | Service-to-service backends | Operator sets `ARTI_SERVICE_SECRET`; send `X-Arti-Service-Secret` | Static | Service principal |
 
@@ -38,8 +38,8 @@ Both upload-scoped credentials run through the **same** default-deny guard
 (`EnforceUploadScope`): they may only `GET /api/me`, read artifacts
 (`GET /api/artifacts…`), create (`POST /api/artifacts`), and append
 (`POST /api/artifacts/by-slug/{slug}/append`) — everything else is `403`, even for
-an admin. Both are also capped at **25 MiB per request** body
-(`ARTI_DEVICE_MAX_UPLOAD_BYTES`). See [Auth architecture](../architecture/auth.md).
+an admin. Both are also capped at **200 MiB per request** body
+(`ARTI_DEVICE_MAX_UPLOAD_BYTES`), the same ceiling every other write door has. See [Auth architecture](../architecture/auth.md).
 
 ### Which one when
 
@@ -82,16 +82,29 @@ A yellow badge appears on your user menu when any active key is within **7 days*
 of expiring — keys do **not** auto-refresh, so rotate before then (mint a new key,
 swap it into `ARTI_TOKEN`, revoke the old one).
 
-### Create one over REST
+### Keys are created in the web app, not over REST
 
-```sh
-curl -sX POST https://arti.example.com/api/keys \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{ "name": "ci-upload", "scopes": ["upload"], "ttl_days": 90 }'
-```
+`POST /api/keys` accepts only the browser session credential. A bearer token —
+the arti CLI's, an MCP client's, the service secret, or another API key — gets
+`403`, whatever the caller's own rights are.
 
-The `201` response carries the plaintext key **once**, as `key`:
+The reason is what happened without the restriction: an agent holding one
+person's CLI token minted a year-long key under that person's name, the key was
+then stored in a shared agent platform and used by other people, and every
+document it wrote read as that person's own work. A credential authenticates as
+its owner, so no permission check can tell the person from the agent. Requiring
+the session cookie asks for the one credential a script does not hold.
+
+Two consequences for automation:
+
+- Mint the key in [Settings → API Keys](#api-keys-self-serve) and put it in your
+  CI secret store. Rotation is the same act; there is no API to script it.
+- Both of these are **off by default** and live in Settings → Notifications, as
+  your own choice: a DM when a key appears under your name, and a DM the first
+  time one of your keys answers from a network it has never answered from. Only
+  keys are notified about, and everything is shown in Settings either way.
+
+The `201` response from the web app carries the plaintext key **once**, as `key`:
 
 ```json
 {
@@ -108,9 +121,9 @@ The `201` response carries the plaintext key **once**, as `key`:
 }
 ```
 
-Minting a key requires an existing full-access credential (a session cookie or a
-CLI token) — an upload-scoped credential can't mint more keys. List your keys with
-`GET /api/keys` and revoke one with `DELETE /api/keys/{id}`. Full shapes:
+Listing and revoking stay open to any full-access credential: `GET /api/keys`
+lists yours, `DELETE /api/keys/{id}` revokes one. Revocation is deliberately
+scriptable — a kill switch should be easy to reach. Full shapes:
 [REST API → API keys](../reference/rest-api.md#api-keys).
 
 ### Use it

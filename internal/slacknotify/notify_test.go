@@ -182,7 +182,9 @@ func (f *fakeClient) PostDM(_ context.Context, userID, _ string) error {
 }
 
 func newTestNotifier(c slackClient) *Notifier {
-	return &Notifier{client: c, cache: newIDCache(time.Hour, time.Hour), log: discardLogger()}
+	return &Notifier{client: c, cache: newIDCache(time.Hour, time.Hour), log: discardLogger(),
+		// Tests exercise the messages; the admin switch has its own tests.
+		allow: func(context.Context, string, string) bool { return true }}
 }
 
 func TestNotify_DMsResolvedRecipientsOnly(t *testing.T) {
@@ -346,4 +348,28 @@ func TestRenderMentions(t *testing.T) {
 			t.Fatalf("unexpected footer:\n%s", got)
 		}
 	})
+}
+
+// A comment fans out to several people, and each of them decides for
+// themselves. One person muting mentions must not silence the thread.
+func TestCommentGateIsPerRecipient(t *testing.T) {
+	c := &fakeClient{ids: map[string]string{"owner@x.com": "U1", "p1@x.com": "U2"}}
+	n := &Notifier{client: c, cache: newIDCache(time.Hour, time.Hour), log: discardLogger(),
+		allow: func(_ context.Context, recipient, _ string) bool { return recipient != "owner@x.com" }}
+
+	n.Notify(context.Background(), Event{
+		Owner:        "owner@x.com",
+		Actor:        "someone@x.com",
+		Participants: []string{"p1@x.com"},
+		Action:       ActionNewComment,
+	})
+
+	for _, id := range c.postedTo {
+		if id == "U1" {
+			t.Error("sent to the person who muted comment mentions")
+		}
+	}
+	if len(c.postedTo) == 0 {
+		t.Error("nobody was notified; one person's choice silenced the thread")
+	}
 }

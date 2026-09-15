@@ -48,7 +48,7 @@ export default function ArchivedTable({
     if (p <= 1) next.delete("page");
     else next.set("page", String(p));
     const qs = next.toString();
-    return qs ? `/archived?${qs}` : "/archived";
+    return qs ? `/settings/archived?${qs}` : "/settings/archived";
   }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));

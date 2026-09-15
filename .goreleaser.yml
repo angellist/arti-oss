@@ -1,6 +1,11 @@
 version: 2
 project_name: arti
 
+# Release notes come from CHANGELOG.md: release.yml passes the tag's section
+# with --release-notes, which this pipe loads and then returns early on.
+# The pipe must stay enabled — `disable: true` skips the load as well as the
+# generation, which leaves the release body empty. The grouping below only
+# applies if --release-notes is ever dropped.
 changelog:
   groups:
     - title: Breaking Changes

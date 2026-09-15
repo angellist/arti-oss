@@ -272,7 +272,7 @@ func mapErr(err error) *Error {
 		case 529:
 			return &Error{Status: 503, Code: "overloaded", Msg: ae.Error()}
 		}
-		return &Error{Status: 502, Code: "upstream", Msg: ae.Error()}
+		return &Error{Status: 503, Code: "upstream", Msg: ae.Error()}
 	}
-	return &Error{Status: 502, Code: "upstream", Msg: err.Error()}
+	return &Error{Status: 503, Code: "upstream", Msg: err.Error()}
 }

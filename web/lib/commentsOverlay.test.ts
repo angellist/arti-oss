@@ -846,6 +846,54 @@ describe("comments overlay host theme", () => {
     document.documentElement.style.colorScheme = "";
   });
 
+  // A real Window stands in for the parent so both sides of the exchange are
+  // identity-checked against the same object the code compares.
+  const fakeParent = () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const parent = frame.contentWindow!;
+    const posted: unknown[] = [];
+    vi.spyOn(parent, "postMessage").mockImplementation((data: unknown) => posted.push(data));
+    vi.spyOn(window, "parent", "get").mockReturnValue(parent);
+    return { parent, posted };
+  };
+
+  it("reports the measured theme to a parent frame", async () => {
+    // The full-page viewer's exit bubble wears this same capsule surface from
+    // the PARENT document, where the sandboxed page's background is
+    // unreadable — so it gets this measurement rather than its own guess.
+    const { posted } = fakeParent();
+    const dispose = mount((body) => { body.style.background = "#1a1a1a"; });
+    await Promise.resolve();
+
+    expect(posted).toEqual([{ source: "arti-theme", dark: true }]);
+    dispose();
+  });
+
+  it("answers a theme query from the parent, and stops on teardown", async () => {
+    const { parent, posted } = fakeParent();
+    const dispose = mount((body) => { body.style.background = "#1a1a1a"; });
+    await Promise.resolve();
+    posted.length = 0;
+
+    const query = (source: Window) =>
+      window.dispatchEvent(new MessageEvent("message", { data: { source: "arti-theme-query" }, source }));
+    query(parent);
+    expect(posted, "the parent may hydrate its listener after our mount").toEqual([
+      { source: "arti-theme", dark: true },
+    ]);
+
+    // Anyone other than the parent gets no answer.
+    const other = document.createElement("iframe");
+    document.body.append(other);
+    query(other.contentWindow!);
+    expect(posted).toHaveLength(1);
+
+    dispose();
+    query(parent);
+    expect(posted).toHaveLength(1);
+  });
+
   it("reads the page's text color when nothing paints a background", async () => {
     // An app that backgrounds a full-bleed wrapper leaves body/html transparent,
     // so the background says nothing — but light ink still means a dark page.
@@ -853,6 +901,234 @@ describe("comments overlay host theme", () => {
     await Promise.resolve();
 
     expect(document.documentElement.classList.contains("ac-dark")).toBe(true);
+    dispose();
+  });
+});
+
+// The margin column hugs the DOCUMENT, not the viewport's right edge: a card
+// and the bubble it collapses into share one left edge, parked just past the
+// prose, so a thread doesn't jump sideways as it is tucked away and brought
+// back. It gives up that alignment with the text only when the window is too
+// narrow to hold the whole card beside it.
+describe("comments overlay margin column", () => {
+  afterEach(() => {
+    document.documentElement.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  // CARD_FOOTPRINT / SHIFT_GAP, restated here on purpose: a test that imported
+  // the constants would move with them and stop asserting the placement.
+  const CAP = 422;
+  const GAP = 20;
+
+  const mount = (opts: { viewportWidth: number; docRight: number; threads: ThreadDTO[] }) => {
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    localStorage.removeItem("arti-cmt-min:artifact"); // minimized threads persist per artifact
+    Object.defineProperty(window, "innerWidth", { value: opts.viewportWidth, configurable: true });
+    const doc = document.createElement("article");
+    doc.dataset.artiDoc = "";
+    doc.innerHTML = "<p>Quoted text</p>";
+    document.body.append(doc);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.matches("article")) return new DOMRect(100, 0, opts.docRight - 100, 1000);
+      if (this.matches("mark")) return new DOMRect(100, 120, 200, 20);
+      return new DOMRect(0, 0, 100, 20);
+    });
+    return mountCommentsOverlay({
+      container: doc,
+      artifactId: "artifact",
+      me: { email: "test@example.com", name: "Test", is_admin: false },
+      api: {
+        list: async () => ({ threads: opts.threads }),
+        create: vi.fn(), reply: vi.fn(), resolve: vi.fn(), reopen: vi.fn(), del: vi.fn(), edit: vi.fn(),
+      },
+    });
+  };
+
+  const textThread = thread({ type: "text", quote: "Quoted text" }, "text-thread");
+
+  it("parks the card beside the prose, and its bubble on the same edge", async () => {
+    const dispose = mount({ viewportWidth: 1440, docRight: 700, threads: [textThread] });
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+
+    const card = document.querySelector<HTMLElement>("[data-tid='text-thread']")!;
+    expect(card.style.left).toBe(`${700 + GAP}px`);
+    expect(card.style.right, "left-positioned, or the two edges can't agree").toBe("auto");
+
+    document.querySelector<HTMLElement>("[data-min='text-thread']")!.click();
+    const bubble = document.querySelector<HTMLElement>("[data-mintid='text-thread']")!;
+    expect(bubble.style.left).toBe(card.style.left);
+    dispose();
+  });
+
+  it("stops at the card column's own edge once the window is too narrow", async () => {
+    // A near-full-width doc on a 900px window: hugging it would run the card
+    // off-screen, so the column stops where a whole card still fits and takes
+    // the overlap with the text instead.
+    const dispose = mount({ viewportWidth: 900, docRight: 880, threads: [textThread] });
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+
+    const card = document.querySelector<HTMLElement>("[data-tid='text-thread']")!;
+    expect(card.style.left).toBe(`${900 - CAP}px`);
+    dispose();
+  });
+
+  it("shows a bare bubble for a one-comment thread, and a count only past it", async () => {
+    const twoComments = thread({ type: "text", quote: "Quoted text" }, "text-thread");
+    twoComments.comments.push({
+      id: "second", author: "other@example.com", author_name: "Other",
+      body: "Second comment", created_at: "2026-01-01T00:05:00Z",
+    });
+    const one = mount({ viewportWidth: 1440, docRight: 700, threads: [textThread] });
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+    document.querySelector<HTMLElement>("[data-min='text-thread']")!.click();
+    expect(document.querySelector("[data-mintid='text-thread'] .ac-min-n")).toBeNull();
+    one();
+
+    document.documentElement.innerHTML = "";
+    const two = mount({ viewportWidth: 1440, docRight: 700, threads: [twoComments] });
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+    document.querySelector<HTMLElement>("[data-min='text-thread']")!.click();
+    expect(document.querySelector("[data-mintid='text-thread'] .ac-min-n")!.textContent).toBe("2");
+    two();
+  });
+
+  it("collapses an open card into its bubble on a click outside it", async () => {
+    const dispose = mount({ viewportWidth: 1440, docRight: 700, threads: [textThread] });
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+    vi.spyOn(window, "getSelection").mockReturnValue(null);
+    document.querySelector<HTMLElement>("[data-tid='text-thread']")!.click(); // → open
+
+    document.body.click();
+    expect(document.querySelector("[data-tid='text-thread']")).toBeNull();
+    expect(document.querySelector("[data-mintid='text-thread']")).not.toBeNull();
+    dispose();
+  });
+
+  it("leaves a thread alone when its card is not on screen", async () => {
+    // `active` outlives its card: the rail's own toggles leave the id set with
+    // nothing drawn, and a click on the page then has no card to dismiss.
+    const dispose = mount({ viewportWidth: 1440, docRight: 700, threads: [textThread] });
+    await Promise.resolve();
+    const comments = document.querySelector<HTMLElement>("[data-fab='comments']")!;
+    comments.click();
+    vi.spyOn(window, "getSelection").mockReturnValue(null);
+    document.querySelector<HTMLElement>("[data-tid='text-thread']")!.click(); // → open
+    comments.click(); // hide comments — the card goes, `active` stays
+
+    document.body.click();
+    comments.click(); // show them again
+    expect(document.querySelector("[data-mintid='text-thread']"), "no bubble the reader never asked for").toBeNull();
+    expect(document.querySelector("[data-tid='text-thread']")).not.toBeNull();
+    dispose();
+  });
+
+  it("leaves a card holding an unsent reply open", async () => {
+    const dispose = mount({ viewportWidth: 1440, docRight: 700, threads: [textThread] });
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+    vi.spyOn(window, "getSelection").mockReturnValue(null);
+    document.querySelector<HTMLElement>("[data-tid='text-thread']")!.click();
+    const ta = document.querySelector<HTMLTextAreaElement>("[data-reply='text-thread']")!;
+    ta.value = "half a thought";
+    ta.dispatchEvent(new Event("input"));
+
+    document.body.click();
+    expect(document.querySelector("[data-tid='text-thread']")).not.toBeNull();
+    dispose();
+  });
+});
+
+// A composer that opens — or grows — below the fold is unusable: the Comment
+// button and the last line you typed are off-screen, and the card is pinned to
+// its paragraph so scrolling isn't obvious. The overlay scrolls the page by the
+// overflow, and only ever in response to an edit; scroll and resize must not
+// trigger it, or a reader could never scroll an open card away.
+describe("comments overlay keeps the open composer in view", () => {
+  afterEach(() => {
+    document.documentElement.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  const belowFold = new DOMRect(720, 600, 344, 300); // bottom 900, in a 768px window
+
+  const mount = (cardRect: DOMRect) => {
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    localStorage.removeItem("arti-cmt-min:artifact");
+    const doc = document.createElement("article");
+    doc.dataset.artiDoc = "";
+    doc.innerHTML = "<p>Quoted text</p>";
+    document.body.append(doc);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.matches("article")) return new DOMRect(100, 0, 600, 1000);
+      if (this.matches("mark")) return new DOMRect(100, 120, 200, 20);
+      if (this.matches(".ac-card")) return cardRect;
+      return new DOMRect(0, 0, 100, 20);
+    });
+    return mountCommentsOverlay({
+      container: doc,
+      artifactId: "artifact",
+      me: { email: "test@example.com", name: "Test", is_admin: false },
+      api: {
+        list: async () => ({ threads: [thread({ type: "text", quote: "Quoted text" }, "text-thread")] }),
+        create: vi.fn(), reply: vi.fn(), resolve: vi.fn(), reopen: vi.fn(), del: vi.fn(), edit: vi.fn(),
+      },
+    });
+  };
+
+  const typeInto = () => {
+    vi.spyOn(window, "getSelection").mockReturnValue(null);
+    document.querySelector<HTMLElement>("[data-tid='text-thread']")!.click(); // → open
+    const ta = document.querySelector<HTMLTextAreaElement>("[data-reply='text-thread']")!;
+    ta.value = "a reply long enough to grow the box";
+    ta.dispatchEvent(new Event("input"));
+  };
+
+  it("scrolls by the overflow when the card hangs below the window", async () => {
+    const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation(() => {});
+    const dispose = mount(belowFold);
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+
+    typeInto();
+    // 900 (bottom) + 16 (gap) - 768 (window) — enough to clear the fold, and no
+    // more: the card's own top stays put below the header.
+    expect(scrollBy).toHaveBeenCalledWith({ top: 148, behavior: "smooth" });
+    dispose();
+  });
+
+  it("does not scroll for a card that already fits, or on a plain scroll", async () => {
+    const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation(() => {});
+    const dispose = mount(new DOMRect(720, 100, 344, 200));
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+
+    typeInto();
+    expect(scrollBy).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it("leaves an open card where the reader scrolled it", async () => {
+    const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation(() => {});
+    const dispose = mount(belowFold);
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+    vi.spyOn(window, "getSelection").mockReturnValue(null);
+    document.querySelector<HTMLElement>("[data-tid='text-thread']")!.click();
+    scrollBy.mockClear();
+
+    window.dispatchEvent(new Event("scroll"));
+    window.dispatchEvent(new Event("resize"));
+    expect(scrollBy, "a card that springs back would take the page hostage").not.toHaveBeenCalled();
     dispose();
   });
 });

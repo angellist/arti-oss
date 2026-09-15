@@ -1,9 +1,12 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
+@import "./themes.css";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* The page surface and its text, tracked to the live theme
+     (app/themes.css) rather than pinned to white/near-black. */
+  --background: var(--color-white);
+  --foreground: var(--color-neutral-900);
 }
 
 @theme inline {

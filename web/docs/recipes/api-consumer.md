@@ -260,7 +260,7 @@ HTTP status; `code` is a stable machine string for the common cases.
 | `404` | `not-found` | Missing, or you lack read access (access denial is masked as 404, not 403). |
 | `409` | `slug-exists` / `conflict` | `ensure_new` and slug taken; or a concurrent append lost the race. |
 | `410` | `idempotency-stale` | A cached idempotent reply points at a now-inaccessible artifact. |
-| `413` | `too-large` | Body over the limit (200 MiB global; 25 MiB for upload-scoped tokens). |
+| `413` | `too-large` | Body over the 200 MiB limit. |
 | `500` | `internal` | Server-side fault. |
 
 Treat `409 conflict` on append as retryable; `404` on a fetch means "gone or not

@@ -21,10 +21,13 @@ import {
   type ColumnKey,
   type ColumnPrefs,
 } from "@/lib/columns";
+import { appHref, artifactHref } from "@/lib/hrefs";
 import { relativeTime } from "@/lib/time";
 import { formatBytes } from "@/lib/format";
 import CreatorName from "@/components/CreatorName";
 import ColumnMenu from "@/components/ColumnMenu";
+import { LABEL_CHIP, SCOPE_CHIP, TYPE_PILL } from "@/lib/chips";
+import { BrowseIcon } from "@/components/BrowseIcon";
 import { SearchIcon } from "@/components/SearchIcon";
 
 const PAGE_SIZE = 50;
@@ -44,7 +47,7 @@ const NO_PINNED: readonly ColumnKey[] = [];
 // background anyway — the thead's own background scrolls out from under a
 // pinned cell and rows would show through.
 const HEADER_CELL = "sticky top-0 z-20 bg-neutral-50 ";
-const HEADER_RULE = "inset 0 -1px 0 0 rgb(229 229 229)"; // neutral-200
+const HEADER_RULE = "inset 0 -1px 0 0 var(--color-neutral-200)";
 const DROP_MARK = "rgb(37 99 235)"; // blue-600
 
 // Exported for its own test: getting this wrong is silent — the header keeps
@@ -606,6 +609,19 @@ export default function CatalogTable({
               placeholder="search — free text, or slug:foo label:bar type:APP … then press Enter"
               className="min-w-0 flex-1 rounded-md border border-neutral-200 bg-neutral-50 px-3 py-1.5 font-sans text-[13px] text-neutral-900 placeholder:text-neutral-400 focus:border-blue-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-200"
             />
+            {/* Browse All lives here rather than in the rail: it is a listing
+                destination, so it belongs beside the box people reach for when
+                they want to find something. It is only visible while the bar
+                is, which is the trade — the clean default listing no longer
+                offers it, and /browse is the direct URL. */}
+            <Link
+              href="/browse"
+              title="every distinct type, label, scope and content type, with counts"
+              className="flex shrink-0 items-center gap-1.5 rounded-md border border-neutral-200 px-2.5 py-1.5 text-[12px] text-neutral-600 transition hover:bg-neutral-50 hover:text-neutral-800"
+            >
+              <BrowseIcon className="h-3.5 w-3.5 shrink-0" />
+              Browse All
+            </Link>
             <Link
               href="/help/guides/search"
               target="_blank"
@@ -677,6 +693,36 @@ export default function CatalogTable({
             "auto" column that absorbed the slack instead would read better at
             the default width but collapse to ZERO once enough optional columns
             are switched on — which is exactly when the title matters most. */}
+        {/* Phones get one card per artifact instead of the table. The columns
+            sum to ~860px, so on a 375px screen a row is read through a sliding
+            window with the slug, type, labels and dates off to the right. The
+            card carries a FIXED set of fields rather than the visible columns:
+            column prefs, resize and reorder are desktop affordances, and the
+            header that drives them is hidden here too. */}
+        <div className="sm:hidden">
+          {rows.map((a) => (
+            <ArtifactCard
+              key={a.artifact_id}
+              a={a}
+              terms={terms}
+              slugFilterHref={slugFilterHref}
+              // Archive lives only in the drill-in, exactly as in the table's
+              // actions column — the same permission check, not a second one.
+              archive={
+                drilledIntoSlug
+                  ? {
+                      allowed: canActOn(a),
+                      busy: busy === a.artifact_id,
+                      onClick: () => doArchive(a),
+                    }
+                  : null
+              }
+            />
+          ))}
+          {rows.length === 0 ? (
+            <p className="px-4 py-12 text-center text-neutral-400">no artifacts</p>
+          ) : null}
+        </div>
         <table
           ref={tableRef}
           // An explicit pixel width is what makes table-layout:fixed actually
@@ -687,7 +733,10 @@ export default function CatalogTable({
           // and the wrapper scrolls when they are not.
           style={{ width: `${totalWidth}px`, minWidth: "100%" }}
           className={
-            "min-w-full table-fixed bg-white text-[13px] leading-snug [&_mark]:rounded-sm [&_mark]:bg-amber-100 [&_mark]:text-inherit " +
+            // hidden below `sm`: the cards above replace it there, and a
+            // display:none table contributes no width, so the horizontal
+            // scroll goes away with it.
+            "hidden min-w-full table-fixed bg-white text-[13px] leading-snug sm:table [&_mark]:rounded-sm [&_mark]:bg-amber-100 [&_mark]:text-inherit " +
             (resizingKey ? "select-none" : "")
           }
         >
@@ -905,7 +954,7 @@ export default function CatalogTable({
         />
       ) : null}
 
-      <nav className="flex shrink-0 items-center justify-between border-t border-neutral-200 bg-white px-6 py-2 text-[11px] text-neutral-500">
+      <nav className="flex shrink-0 items-center justify-between border-t border-neutral-200 bg-white px-4 py-2 text-[11px] text-neutral-500 sm:px-6">
         <span>
           {total === 0 ? (
             "no artifacts"
@@ -939,6 +988,11 @@ export default function CatalogTable({
   );
 }
 
+// The "open app" pill in a row's actions, kept here because only this table
+// renders it.
+const APP_CHIP =
+  "inline-flex shrink-0 items-center rounded-md border border-neutral-200 bg-white px-2 py-0.5 text-[11px] font-medium text-neutral-600 shadow-sm transition hover:bg-neutral-50 hover:text-neutral-900";
+
 function isColVisible(cols: ColumnDef[], key: ColumnKey): boolean {
   return cols.some((c) => c.key === key);
 }
@@ -962,26 +1016,14 @@ function Cell({
   const dash = <span className="text-neutral-300">—</span>;
   switch (col.key) {
     case "title": {
-      const localURL = a.named_slug
-        ? a.version != null
-          ? `/s/${a.named_slug}/${a.version}`
-          : `/s/${a.named_slug}`
-        : `/a/${a.artifact_id}`;
       // APP rows get a "Visit app" launcher to the running app at
       // /app/{ident} (Go-served, version-pinned) — same target as the
       // view-mode toolbar button, so an app is one click from the list.
-      const appHref =
-        a.artifact_type === "APP"
-          ? a.named_slug
-            ? a.version != null
-              ? `/app/${a.named_slug}/${a.version}`
-              : `/app/${a.named_slug}`
-            : `/app/${a.artifact_id}`
-          : null;
+      const runURL = appHref(a);
       return (
         <>
           <div className="flex items-start gap-2">
-            <Link href={localURL} className="group text-[15px] font-medium text-blue-700">
+            <Link href={artifactHref(a)} className="group text-[15px] font-medium text-blue-700">
               {a.highlights?.title?.[0] ? (
                 // OpenSearch already returns a highlighted title fragment;
                 // render it so matched terms are marked in the title, not just
@@ -999,16 +1041,13 @@ function Cell({
                 </span>
               ) : null}
             </Link>
-            {appHref ? (
-              // Plain <a> (not Link): /app/{ident} is served by the Go edge, not
-              // a Next route, so it needs a full navigation. Pushed to the
-              // column's right edge (ml-auto) and styled neutral rather than
-              // blue: it's secondary to the title link, and a stack of blue
-              // chips down the list shouted over the titles. shrink-0 so a
-              // wrapping title never squeezes the label.
+            {runURL ? (
+              // Pushed to the column's right edge (ml-auto) and styled neutral
+              // rather than blue: it's secondary to the title link, and a stack
+              // of blue chips down the list shouted over the titles.
               <a
-                href={appHref}
-                className="ml-auto inline-flex shrink-0 items-center rounded-md border border-neutral-200 bg-white px-2 py-0.5 text-[11px] font-medium text-neutral-600 shadow-sm transition hover:bg-neutral-50 hover:text-neutral-900"
+                href={runURL}
+                className={"ml-auto " + APP_CHIP}
                 title="open the running app, full-page"
                 aria-label="open the running app"
               >
@@ -1059,7 +1098,7 @@ function Cell({
             <Link
               key={`scope:${sc}`}
               href={`/?q=${encodeURIComponent("scope:" + sc)}`}
-              className="inline-block rounded-full bg-purple-50 px-2 py-0.5 text-[11px] text-purple-800 ring-1 ring-purple-200 transition hover:bg-purple-100"
+              className={SCOPE_CHIP}
               title="filter by this scope"
             >
               <Highlighted text={sc} terms={terms} />
@@ -1069,7 +1108,7 @@ function Cell({
             <Link
               key={`label:${l}`}
               href={`/?q=${encodeURIComponent("label:" + l)}`}
-              className="inline-block rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] text-neutral-700 ring-1 ring-neutral-200 transition hover:bg-neutral-200"
+              className={LABEL_CHIP}
               title="filter by this label"
             >
               <Highlighted text={l} terms={terms} />
@@ -1082,10 +1121,7 @@ function Cell({
     case "type":
       return (
         <>
-          <span
-            className="inline-block rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-600"
-            title={a.content_type}
-          >
+          <span className={TYPE_PILL} title={a.content_type}>
             {a.artifact_type}
           </span>
           {/* The MIME type rides along under the pill only while it has no
@@ -1094,6 +1130,17 @@ function Cell({
             <div className="mt-0.5 truncate text-[11px] text-neutral-400">{a.content_type}</div>
           ) : null}
         </>
+      );
+    case "views":
+      return a.view_count == null ? (
+        dash
+      ) : (
+        <span
+          className="whitespace-nowrap text-neutral-500"
+          title={`${a.view_count} views · ${a.view_count_30d ?? 0} in the last 30 days`}
+        >
+          {a.view_count}
+        </span>
       );
     case "content_type":
       return <span className="block truncate text-neutral-500">{a.content_type}</span>;
@@ -1142,6 +1189,146 @@ function Cell({
         </span>
       );
   }
+}
+
+// ArtifactCard is one catalog row on a phone: the fields the table spreads
+// across six columns, stacked in reading order. The title is the link rather
+// than the whole card — one <Link> around everything would nest the slug link,
+// the chips and the app launcher inside an anchor, which is invalid and stops
+// them working.
+function ArtifactCard({
+  a,
+  terms,
+  slugFilterHref,
+  archive,
+}: {
+  a: ArtifactInfo;
+  terms: string[];
+  slugFilterHref: (slug: string) => string;
+  // Non-null only in the single-slug drill-in, mirroring the table's actions
+  // column. `allowed` is the caller's canActOn verdict, so the card never
+  // re-derives who may archive.
+  archive: { allowed: boolean; busy: boolean; onClick: () => void } | null;
+}) {
+  const archived = !!a.deleted_at;
+  const runURL = appHref(a);
+  const comments = (a.comment_count ?? 0) > 0 || (a.open_thread_count ?? 0) > 0;
+  return (
+    <div className={"border-b border-neutral-100 px-4 py-3 " + (archived ? "bg-neutral-50/60" : "")}>
+      {/* Dim the content, not the whole card: an archived row's own unarchive
+          button must not look disabled (same reasoning as the table's
+          per-cell dimming). */}
+      <div className={archived ? "opacity-50" : ""}>
+        <div className="flex items-start gap-2">
+          <Link href={artifactHref(a)} className="text-[15px] font-medium leading-snug text-blue-700">
+            {a.highlights?.title?.[0] ? (
+              <span dangerouslySetInnerHTML={{ __html: sanitizeHighlight(a.highlights.title[0]) }} />
+            ) : (
+              <span>{a.title}</span>
+            )}
+            {a.artifact_type === "PACKAGE" ? (
+              <span className="ml-1.5" title="multi-file PACKAGE artifact" aria-label="package">
+                📦
+              </span>
+            ) : null}
+          </Link>
+        </div>
+        <HighlightSnippets highlights={a.highlights} />
+        <div className="mt-1 truncate font-mono text-[11.5px] text-neutral-500">
+          {a.named_slug ? (
+            <Link
+              href={slugFilterHref(a.named_slug)}
+              className="text-blue-700"
+              title="filter to every version of this slug"
+            >
+              <Highlighted text={a.named_slug} terms={terms} />
+            </Link>
+          ) : (
+            // No slug: the uuid is the only name this row has, and it is what
+            // its URL uses.
+            <span className="text-neutral-400">{a.artifact_id}</span>
+          )}
+          {a.version != null ? <span className="text-neutral-400"> · v{a.version}</span> : null}
+          {archived ? (
+            <span
+              className="ml-1.5 rounded bg-neutral-200 px-1 py-0.5 text-[10px] uppercase tracking-wide text-neutral-500"
+              title={`archived ${a.deleted_at}`}
+            >
+              archived
+            </span>
+          ) : null}
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <span className={TYPE_PILL} title={a.content_type}>
+            {a.artifact_type}
+          </span>
+          {a.labels.map((l) => (
+            <Link
+              key={`label:${l}`}
+              href={`/?q=${encodeURIComponent("label:" + l)}`}
+              className={LABEL_CHIP}
+              title="filter by this label"
+            >
+              <Highlighted text={l} terms={terms} />
+            </Link>
+          ))}
+          {a.scopes.map((sc) => (
+            <Link
+              key={`scope:${sc}`}
+              href={`/?q=${encodeURIComponent("scope:" + sc)}`}
+              className={SCOPE_CHIP}
+              title="filter by this scope"
+            >
+              <Highlighted text={sc} terms={terms} />
+            </Link>
+          ))}
+          {runURL ? (
+            <a href={runURL} className={APP_CHIP} aria-label="open the running app">
+              Visit app ↗
+            </a>
+          ) : null}
+        </div>
+        {/* One line, truncated: the tail (the MIME type) is the part worth
+            losing first on a narrow screen. */}
+        <div className="mt-1.5 truncate text-[11px] text-neutral-400">
+          <CreatorName email={a.creator} />
+          {a.size_bytes != null ? ` · ${formatBytes(a.size_bytes)}` : ""}
+          {" · "}
+          <span title={a.created_at}>{relativeTime(a.created_at)}</span>
+          {comments ? (
+            <>
+              {" · "}
+              <CommentsCell a={a} />
+            </>
+          ) : null}
+          {" · "}
+          {a.content_type}
+        </div>
+      </div>
+      {archive ? (
+        <button
+          type="button"
+          disabled={!archive.allowed || archive.busy}
+          onClick={archive.onClick}
+          className={
+            "mt-2 rounded-md border px-2 py-1 text-[11px] transition disabled:cursor-not-allowed disabled:opacity-40 " +
+            (archived
+              ? "border-neutral-200 bg-white text-neutral-700"
+              : "border-rose-200 bg-white text-rose-700")
+          }
+          title={
+            archive.allowed
+              ? archived
+                ? "restore this version"
+                : "archive this version"
+              : "only the creator or an admin can archive"
+          }
+        >
+          {archived ? "↩ unarchive" : "🗑 archive"}
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 // CommentsCell shows discussion volume on THIS version (comments are anchored
@@ -1202,6 +1389,10 @@ function AccessCell({ a }: { a: ArtifactInfo }) {
   );
 }
 
+// Prev/next are the one control a phone reader has to hit, so they get a
+// finger-sized box there and the desktop's compact one from `sm` up.
+const PAGE_LINK_BOX = "px-3 py-1.5 sm:px-2.5 sm:py-0.5";
+
 function PageLink({
   href,
   label,
@@ -1213,7 +1404,7 @@ function PageLink({
 }) {
   if (disabled) {
     return (
-      <span className="rounded border border-neutral-100 px-2.5 py-0.5 text-neutral-300">
+      <span className={"rounded border border-neutral-100 text-neutral-300 " + PAGE_LINK_BOX}>
         {label}
       </span>
     );
@@ -1221,7 +1412,7 @@ function PageLink({
   return (
     <Link
       href={href}
-      className="rounded border border-neutral-200 px-2.5 py-0.5 text-neutral-600 transition hover:bg-neutral-50"
+      className={"rounded border border-neutral-200 text-neutral-600 transition hover:bg-neutral-50 " + PAGE_LINK_BOX}
     >
       {label}
     </Link>

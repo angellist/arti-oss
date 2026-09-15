@@ -23,6 +23,13 @@ type ApiKey struct {
 	RevokedAt  pgtype.Timestamptz
 }
 
+type AppSetting struct {
+	Key       string
+	Enabled   bool
+	UpdatedAt pgtype.Timestamptz
+	UpdatedBy string
+}
+
 type Artifact struct {
 	ArtifactID      pgtype.UUID
 	ArtifactType    string
@@ -46,6 +53,8 @@ type Artifact struct {
 	Scopes          []string
 	AllowedWrite    []string
 	CommentsEnabled bool
+	WrittenVia      *string
+	WrittenViaName  *string
 }
 
 type Comment struct {
@@ -58,6 +67,7 @@ type Comment struct {
 	DeletedAt     pgtype.Timestamptz
 	AuthorName    *string
 	AuthorPicture *string
+	Source        string
 }
 
 type CommentThread struct {
@@ -69,6 +79,25 @@ type CommentThread struct {
 	CreatedAt  pgtype.Timestamptz
 	ResolvedBy *string
 	ResolvedAt pgtype.Timestamptz
+}
+
+type CredentialAlert struct {
+	Cred           string
+	OwnerEmail     string
+	Network        string
+	FirstAlertedAt pgtype.Timestamptz
+}
+
+type CredentialUsage struct {
+	Cred       string
+	Day        pgtype.Date
+	Ip         string
+	UserAgent  string
+	OwnerEmail string
+	Reads      int64
+	Writes     int64
+	FirstSeen  pgtype.Timestamptz
+	LastSeen   pgtype.Timestamptz
 }
 
 type DeviceAuth struct {
@@ -227,4 +256,11 @@ type UserIdpGroup struct {
 	Email      string
 	Groups     []string
 	CapturedAt pgtype.Timestamptz
+}
+
+type UserNotificationSetting struct {
+	UserEmail string
+	Key       string
+	Enabled   bool
+	UpdatedAt pgtype.Timestamptz
 }

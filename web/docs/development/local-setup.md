@@ -47,7 +47,7 @@ make dev-up        # Postgres :5436, MinIO :9210 (console :9211)
 ```
 
 This runs `deployments/docker-compose/docker-compose.yml`: a `postgres:16-alpine`
-(DB `arti_dev`, user/pass `postgres`/`postgres`) and `minio/minio` with a
+(DB `arti_dev`, user/pass `postgres`/`postgres`) and `quay.io/minio/minio` with a
 `minio-init` sidecar that creates the `arti-dev` and `arti-test` buckets. Tear
 down with `make dev-down`; nuke the volumes with `make dev-reset`.
 

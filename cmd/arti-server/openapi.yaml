@@ -32,6 +32,8 @@ components:
         modified_at:   { type: string, format: date-time }
         deleted_at:    { type: string, format: date-time, nullable: true }
         url:           { type: string }
+        view_count:    { type: integer, format: int64, nullable: true }
+        view_count_30d: { type: integer, format: int64, nullable: true }
     Error:
       type: object
       required: [detail, code]
@@ -78,6 +80,11 @@ paths:
     parameters:
       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
     get: { summary: Metadata, responses: { "200": { description: ok } } }
+  /api/artifacts/{id}/views:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    post: { summary: Record one human-facing artifact view, responses: { "204": { description: recorded } } }
+    get: { summary: Aggregate artifact views, responses: { "200": { description: view stats } } }
   /api/artifacts/{id}/files:
     parameters:
       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
@@ -101,6 +108,12 @@ paths:
     parameters:
       - { in: path, name: slug, required: true, schema: { type: string } }
     get: { summary: All versions, responses: { "200": { description: ok } } }
+  /api/artifacts/by-slug/{slug}/owner:
+    parameters:
+      - { in: path, name: slug, required: true, schema: { type: string } }
+    post:
+      summary: Transfer document ownership (current owner or admin only)
+      responses: { "200": { description: transferred }, "403": { description: not the owner } }
   /api/artifacts/by-slug/{slug}/files:
     parameters:
       - { in: path, name: slug, required: true, schema: { type: string } }
@@ -110,6 +123,66 @@ paths:
       - { in: path, name: slug, required: true, schema: { type: string } }
       - { in: path, name: path, required: true, schema: { type: string } }
     get: { summary: Single file in PACKAGE by slug, responses: { "200": { description: ok } } }
+  /api/artifacts/{id}/comments:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: List comment threads for an artifact
+      responses: { "200": { description: ok } }
+    post:
+      summary: Create a comment thread on an artifact
+      description: Body `{ anchor?, quote?, body }`; quote is rendered prose. Returns the artifact/version write envelope.
+      responses:
+        "201": { description: created }
+        "400": { description: bad body or quote not found }
+        "403": { description: commenting disabled }
+        "404": { description: not found }
+        "429": { description: rate limited }
+  /api/artifacts/by-slug/{slug}/comments:
+    parameters:
+      - { in: path, name: slug, required: true, schema: { type: string } }
+      - { in: query, name: version, schema: { type: integer } }
+      - { in: query, name: exclude_resolved, schema: { type: boolean } }
+    get:
+      summary: List comment threads by slug
+      responses: { "200": { description: ok } }
+    post:
+      summary: Create a comment thread by slug
+      description: Body `{ anchor?, quote?, body }`; quote is rendered prose. Returns the artifact/version write envelope.
+      responses:
+        "201": { description: created }
+        "400": { description: bad body or quote not found }
+        "403": { description: commenting disabled }
+        "404": { description: not found }
+        "429": { description: rate limited }
+  /api/comments/{threadID}:
+    parameters:
+      - { in: path, name: threadID, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: Fetch one comment thread
+      responses: { "200": { description: ok }, "404": { description: not found } }
+  /api/comments/{threadID}/replies:
+    parameters:
+      - { in: path, name: threadID, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Reply to a comment thread
+      responses:
+        "201": { description: created }
+        "403": { description: commenting disabled }
+        "404": { description: not found }
+        "429": { description: rate limited }
+  /api/comments/{threadID}/resolve:
+    parameters:
+      - { in: path, name: threadID, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Mark a comment thread resolved
+      responses: { "200": { description: ok }, "403": { description: commenting disabled }, "404": { description: not found }, "429": { description: rate limited } }
+  /api/comments/{threadID}/reopen:
+    parameters:
+      - { in: path, name: threadID, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Reopen a comment thread
+      responses: { "200": { description: ok }, "403": { description: commenting disabled }, "404": { description: not found }, "429": { description: rate limited } }
   # External timed share links. Present only when ARTI_SHARE_ENABLED is set;
   # the routes are unmounted otherwise, so they 404 rather than 403.
   /api/artifacts/{id}/shares:

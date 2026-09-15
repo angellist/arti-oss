@@ -14,10 +14,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/extension"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/mdtext"
 	"github.com/angellist/arti-oss/internal/store/pgstore"
 )
 
@@ -42,6 +41,7 @@ func (s *Service) ServeForEmbed(w http.ResponseWriter, r *http.Request, surface,
 		return false
 	}
 	aid := pgstore.UUIDFromPG(row.ArtifactID).String()
+	tw := &writeErrTracker{ResponseWriter: w}
 
 	switch row.ArtifactType {
 	case pgstore.TypeApp:
@@ -51,12 +51,16 @@ func (s *Service) ServeForEmbed(w http.ResponseWriter, r *http.Request, surface,
 		// nil stale notice: an embed pins a version deliberately (surface
 		// config), and its host owns the surrounding chrome — a "newer version"
 		// strip inside someone else's iframe is arti chrome in the wrong place.
-		return s.serveAppRow(w, r, row, caller, frameAncestors, s.embedFilesBase(surface, caller, aid), "", nil, nil) == nil
+		served = s.serveAppRow(tw, r, row, caller, frameAncestors, s.embedFilesBase(surface, caller, aid), "", nil, nil) == nil
 	case pgstore.TypePackage:
-		return s.serveEmbedPackageEntry(w, r, row, caller, frameAncestors, s.embedFilesBase(surface, caller, aid))
+		served = s.serveEmbedPackageEntry(tw, r, row, caller, frameAncestors, s.embedFilesBase(surface, caller, aid))
+	default:
+		served = s.serveEmbedBody(tw, r, row, frameAncestors)
 	}
-
-	return s.serveEmbedBody(w, r, row, frameAncestors)
+	if served && tw.err == nil {
+		s.recordView(r, row, caller, "embed")
+	}
+	return served
 }
 
 // ServeForEmbedPinned is ServeForEmbed for a viewer-mode surface. It resolves
@@ -74,16 +78,22 @@ func (s *Service) ServeForEmbedPinned(w http.ResponseWriter, r *http.Request, su
 		return false, false
 	}
 	aid := pgstore.UUIDFromPG(row.ArtifactID).String()
+	tw := &writeErrTracker{ResponseWriter: w}
 	if pinnedArtifactID == "" || !strings.EqualFold(aid, pinnedArtifactID) {
 		return false, true
 	}
 	switch row.ArtifactType {
 	case pgstore.TypeApp:
-		return s.serveAppRow(w, r, row, viewer, frameAncestors, s.embedFilesBase(surface, viewer, aid), "", nil, nil) == nil, false
+		served = s.serveAppRow(tw, r, row, viewer, frameAncestors, s.embedFilesBase(surface, viewer, aid), "", nil, nil) == nil
 	case pgstore.TypePackage:
-		return s.serveEmbedPackageEntry(w, r, row, viewer, frameAncestors, s.embedFilesBase(surface, viewer, aid)), false
+		served = s.serveEmbedPackageEntry(tw, r, row, viewer, frameAncestors, s.embedFilesBase(surface, viewer, aid))
+	default:
+		served = s.serveEmbedBody(tw, r, row, frameAncestors)
 	}
-	return s.serveEmbedBody(w, r, row, frameAncestors), false
+	if served && tw.err == nil {
+		s.recordView(r, row, viewer, "embed-viewer")
+	}
+	return served, false
 }
 
 // ServeForEmbedUser is ServeForEmbed for a user-mode surface: there is NO
@@ -101,15 +111,20 @@ func (s *Service) ServeForEmbedUser(w http.ResponseWriter, r *http.Request, surf
 		return false
 	}
 	aid := pgstore.UUIDFromPG(row.ArtifactID).String()
+	tw := &writeErrTracker{ResponseWriter: w}
 
 	switch row.ArtifactType {
 	case pgstore.TypeApp:
-		return s.serveAppRow(w, r, row, "", frameAncestors, s.embedFilesBaseUser(surface, aid), surface, origins, nil) == nil
+		served = s.serveAppRow(tw, r, row, "", frameAncestors, s.embedFilesBaseUser(surface, aid), surface, origins, nil) == nil
 	case pgstore.TypePackage:
-		return s.serveEmbedPackageEntry(w, r, row, "", frameAncestors, s.embedFilesBaseUser(surface, aid))
+		served = s.serveEmbedPackageEntry(tw, r, row, "", frameAncestors, s.embedFilesBaseUser(surface, aid))
+	default:
+		served = s.serveEmbedBody(tw, r, row, frameAncestors)
 	}
-
-	return s.serveEmbedBody(w, r, row, frameAncestors)
+	if served && tw.err == nil {
+		s.recordView(r, row, "", "embed-user")
+	}
+	return served
 }
 
 // serveEmbedBody renders a single-body artifact (TEXT / ATTACHMENT) for an
@@ -338,12 +353,7 @@ func renderMarkdownDoc(src []byte, title string) []byte {
 	// single "~", which mangles prose like "~1000×" / "(~$5)". We substitute a
 	// double-tilde-only strikethrough (doubleTildeStrikethrough) and keep the
 	// rest of GFM (tables, autolinks, task lists).
-	md := goldmark.New(goldmark.WithExtensions(
-		extension.Table,
-		extension.Linkify,
-		extension.TaskList,
-		doubleTildeStrikethrough,
-	))
+	md := mdtext.New()
 	if err := md.Convert(src, &content); err != nil {
 		content.Reset()
 		content.WriteString("<pre>")

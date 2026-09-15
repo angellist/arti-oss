@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
 	"github.com/angellist/arti-oss/internal/artifacts"
@@ -27,7 +28,7 @@ import (
 )
 
 // Server exposes the artifacts.Service as MCP tools. The comments service is
-// optional and read-only here (list_comments); nil disables that tool.
+// optional; nil disables the comment tools.
 type Server struct {
 	svc      *artifacts.Service
 	comments *comments.Service
@@ -175,7 +176,7 @@ func toolSpecs() []toolSpec {
 		},
 		{
 			Name:        "update_artifact",
-			Description: "Update an existing artifact's METADATA in place — title, description, scopes, labels, and/or allowed_access — WITHOUT creating a new version. Use this to LABEL or re-describe a doc that was published bare: labels and description are the two fields browse/search surface, so fixing them is how you make an existing artifact findable. Content and artifact_type are immutable: to change the body, call add_artifact with the same named_slug to publish a new version. `ident` is a UUID (edits that exact version) or a slug (edits the latest version you can read). Title/description/labels/scopes are per-version: sibling versions keep theirs, so edit them individually if needed. allowed_access/allowed_write are per-DOCUMENT: an owner/admin edit applies to EVERY version of the slug (archived included), and even re-sending the current values re-converges any drifted versions — so avoid re-sending ACL fields on every routine metadata touch. Only fields you pass are changed; omit a field to leave it untouched, or pass an empty value to clear it (e.g. allowed_access:[] = creator-only, description:\"\" = no description). allowed_write is the subset of readers who may write (omit = writers follow readers; [] = creator-only writes); it is unioned into allowed_access. Creator-or-MANAGE_ARTIFACTS only; editing a kind:skill artifact also requires MANAGE_SKILLS. comments_enabled is the per-DOCUMENT comment switch (false turns commenting off for every version of the slug, hiding all comment controls and refusing new comments); unlike the other fields it is settable only by the artifact's OWNER (the earliest version's creator) or an admin.",
+			Description: "Update an existing artifact's METADATA in place — title, description, scopes, labels, and/or allowed_access — WITHOUT creating a new version. Use this to LABEL or re-describe a doc that was published bare: labels and description are the two fields browse/search surface, so fixing them is how you make an existing artifact findable. Content and artifact_type are immutable: to change the body, call add_artifact with the same named_slug to publish a new version. `ident` is a UUID (edits that exact version) or a slug (edits the latest version you can read). Title/description/labels/scopes are per-version: sibling versions keep theirs, so edit them individually if needed. allowed_access/allowed_write are per-DOCUMENT: an owner/admin edit applies to EVERY version of the slug (archived included), and even re-sending the current values re-converges any drifted versions — so avoid re-sending ACL fields on every routine metadata touch. Only fields you pass are changed; omit a field to leave it untouched, or pass an empty value to clear it (e.g. allowed_access:[] = creator-only, description:\"\" = no description). allowed_write is the subset of readers who may write (omit = writers follow readers; [] = creator-only writes); it is unioned into allowed_access. Creator-or-MANAGE_ARTIFACTS only; editing a kind:skill artifact also requires MANAGE_SKILLS. comments_enabled is the per-DOCUMENT comment switch (false turns commenting off for every version of the slug, hiding all comment controls and refusing new comments); unlike the other fields it is settable only by the artifact's OWNER (its first version's creator, unless ownership was transferred) or an admin.",
 			InputSchema: map[string]any{
 				"type":     "object",
 				"required": []string{"ident"},
@@ -309,6 +310,44 @@ func toolSpecs() []toolSpec {
 				},
 			},
 		},
+		{
+			Name:        "add_comment",
+			Description: "Start a comment thread on an artifact, or add to its document-level thread. `ident` is a UUID or slug; `version` is optional for slugs. Pass `quote` with prose as it renders on the page, not raw markdown: the markers are not on the page, so a quote carrying them is refused and told so. PACKAGE and APP artifacts take document-level comments only, so omit `quote` there. An address written as @user@example.com in the body sends that person a DM if they can read the artifact; quote prior mentions only when you mean to re-notify them.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"ident", "body"},
+				"properties": map[string]any{
+					"ident":   str(),
+					"version": map[string]any{"type": "integer"},
+					"body":    str(),
+					"quote":   str(),
+				},
+			},
+		},
+		{
+			Name:        "reply_to_comment",
+			Description: "Reply to an existing comment thread. `thread_id` comes from list_comments or add_comment. An address written as @user@example.com in the body sends that person a DM if they can read the artifact; quote prior mentions only when you mean to re-notify them.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"thread_id", "body"},
+				"properties": map[string]any{
+					"thread_id": str(),
+					"body":      str(),
+				},
+			},
+		},
+		{
+			Name:        "resolve_comment",
+			Description: "Mark a comment thread resolved, or reopen it with reopen=true. Resolving is idempotent; resolve only threads you opened or were explicitly asked to resolve.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"thread_id"},
+				"properties": map[string]any{
+					"thread_id": str(),
+					"reopen":    map[string]any{"type": "boolean"},
+				},
+			},
+		},
 	}
 }
 
@@ -354,6 +393,12 @@ func (s *Server) dispatch(ctx context.Context, name string, args json.RawMessage
 		return s.toolReadPkg(ctx, args)
 	case "list_comments":
 		return s.toolListComments(ctx, args)
+	case "add_comment":
+		return s.toolAddComment(ctx, args)
+	case "reply_to_comment":
+		return s.toolReplyToComment(ctx, args)
+	case "resolve_comment":
+		return s.toolResolveComment(ctx, args)
 	}
 	return nil, fmt.Errorf("unknown tool %q", name)
 }
@@ -771,28 +816,126 @@ func (s *Server) toolListComments(ctx context.Context, raw json.RawMessage) (any
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return nil, err
 	}
-	if a.Ident == "" {
-		return nil, errors.New("ident is required")
-	}
-	caller := auth.EmailFromContext(ctx)
-	// Resolve ident → the artifact UUID whose comments we read. A UUID names a
-	// specific version; a slug resolves to the latest version the caller can
-	// read (GetBySlug enforces access and returns that version's id).
-	id, err := uuid.Parse(a.Ident)
+	row, err := s.resolveArtifactRow(ctx, a.Ident, a.Version)
 	if err != nil {
-		info, gerr := s.svc.GetBySlug(ctx, a.Ident, a.Version, caller)
-		if gerr != nil {
-			return nil, gerr
-		}
-		if id, err = uuid.Parse(info.ArtifactID); err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
-	out, err := s.comments.ListForCaller(ctx, id, caller, !a.ExcludeResolved)
+	id, err := uuid.Parse(row.ArtifactID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.comments.ListForCaller(ctx, id, auth.EmailFromContext(ctx), !a.ExcludeResolved)
+	if err != nil {
+		return nil, err
+	}
+	out.ArtifactID = row.ArtifactID
+	out.Slug = derefString(row.NamedSlug)
+	out.Version = row.Version
+	return toolReply(out), nil
+}
+
+func (s *Server) toolAddComment(ctx context.Context, raw json.RawMessage) (any, error) {
+	if s.comments == nil {
+		return nil, errors.New("comments are not available")
+	}
+	var a struct {
+		Ident   string `json:"ident"`
+		Version *int32 `json:"version,omitempty"`
+		Body    string `json:"body"`
+		Quote   string `json:"quote"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, err
+	}
+	row, err := s.resolveArtifactRow(ctx, a.Ident, a.Version)
+	if err != nil {
+		return nil, err
+	}
+	id, err := uuid.Parse(row.ArtifactID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.comments.AddForCaller(ctx, id, auth.EmailFromContext(ctx), comments.AddInput{Body: a.Body, Quote: a.Quote, Source: "mcp"})
 	if err != nil {
 		return nil, err
 	}
 	return toolReply(out), nil
+}
+
+func (s *Server) toolReplyToComment(ctx context.Context, raw json.RawMessage) (any, error) {
+	if s.comments == nil {
+		return nil, errors.New("comments are not available")
+	}
+	var a struct {
+		ThreadID string `json:"thread_id"`
+		Body     string `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, err
+	}
+	tid, err := uuid.Parse(a.ThreadID)
+	if err != nil {
+		return nil, errors.New("bad thread_id")
+	}
+	out, err := s.comments.ReplyForCaller(ctx, tid, auth.EmailFromContext(ctx), comments.ReplyInput{Body: a.Body, Source: "mcp"})
+	if err != nil {
+		return nil, err
+	}
+	return toolReply(out), nil
+}
+
+func (s *Server) toolResolveComment(ctx context.Context, raw json.RawMessage) (any, error) {
+	if s.comments == nil {
+		return nil, errors.New("comments are not available")
+	}
+	var a struct {
+		ThreadID string `json:"thread_id"`
+		Reopen   bool   `json:"reopen"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, err
+	}
+	tid, err := uuid.Parse(a.ThreadID)
+	if err != nil {
+		return nil, errors.New("bad thread_id")
+	}
+	status := "resolved"
+	if a.Reopen {
+		status = "open"
+	}
+	out, err := s.comments.SetStatusForCaller(ctx, tid, auth.EmailFromContext(ctx), status, "mcp")
+	if err != nil {
+		return nil, err
+	}
+	return toolReply(out), nil
+}
+
+// resolveArtifactRow turns a comment tool's ident into the artifact it names,
+// enforcing the caller's read access. It reads metadata only: comment threads
+// live in Postgres, so a blob-store outage must not take commenting down with
+// it.
+func (s *Server) resolveArtifactRow(ctx context.Context, ident string, version *int32) (artifacts.ArtifactInfo, error) {
+	if ident == "" {
+		return artifacts.ArtifactInfo{}, errors.New("ident is required")
+	}
+	caller := auth.EmailFromContext(ctx)
+	if id, err := uuid.Parse(ident); err == nil {
+		return s.svc.Get(ctx, id, caller)
+	}
+	return s.svc.GetBySlug(ctx, ident, version, caller)
+}
+
+func uuidFromPg(p pgtype.UUID) uuid.UUID {
+	var u uuid.UUID
+	copy(u[:], p.Bytes[:])
+	return u
+}
+
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func isTextual(ct string) bool {

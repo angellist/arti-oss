@@ -20,9 +20,13 @@ import (
 // safe to re-run at any time. Run as `arti-server reindex`. Configuration
 // comes from internal/config; the batch size is REINDEX_BATCH_SIZE
 // (search.reindex_batch_size).
-type ReindexCmd struct{}
+type ReindexCmd struct {
+	// The document pass re-reads every artifact's body from S3; the flag
+	// sweep only reads Postgres, so repairing drifted flags is cheap.
+	FlagsOnly bool `help:"skip the document pass; only recompute the is_latest flag for every slug"`
+}
 
-func (*ReindexCmd) Run(_ *kong.Context) error {
+func (c *ReindexCmd) Run(_ *kong.Context) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	// Same as serve: keep package-level slog calls on the JSON handler so
 	// Datadog parses their level instead of guessing from the stream.
@@ -85,7 +89,7 @@ func (*ReindexCmd) Run(_ *kong.Context) error {
 	batchSize := int32(cfg.Search.ReindexBatchSize)
 	start := time.Now()
 
-	for {
+	for !c.FlagsOnly {
 		res, lerr := pgstoreInst.List(ctx, pgstore.ListInput{
 			Limit:           batchSize,
 			Offset:          offset,
@@ -114,12 +118,13 @@ func (*ReindexCmd) Run(_ *kong.Context) error {
 		offset += batchSize
 	}
 
-	logger.Info("reindex: documents indexed, sweeping is_latest flags",
+	logger.Info("reindex: sweeping is_latest flags",
 		"total_indexed", total,
+		"flags_only", c.FlagsOnly,
 		"elapsed", time.Since(start).Round(time.Second))
 
-	// Second pass: fix is_latest flags per slug. rowToDoc defaults to
-	// is_latest=true, but only the highest non-deleted version should
+	// Second pass: fix is_latest flags per slug. IndexArtifact writes every
+	// doc with is_latest=true, but only the highest non-deleted version should
 	// be true. Collect distinct slugs, then update each.
 	slugSet := make(map[string]struct{})
 	offset = 0

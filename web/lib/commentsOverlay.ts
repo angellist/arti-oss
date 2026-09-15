@@ -22,7 +22,7 @@ import {
 } from "./arti";
 import {
   computeShift as computeShiftFrom,
-  minMarkerLeft,
+  columnLeft,
   railTop,
   CARD_RIGHT,
   CARD_WIDTH,
@@ -186,7 +186,7 @@ const CSS = `
 .ac-av img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .ac-who{font-size:12px;font-weight:600;color:#1c1c1a}
 .ac-when{font-size:10.5px;color:#9b9b95;margin-left:6px}
-.ac-text{font-size:12.5px;color:#33332e;margin-top:3px;white-space:pre-wrap;word-wrap:break-word}
+.ac-text{font-size:12.5px;line-height:1.5;color:#33332e;margin-top:3px;white-space:pre-wrap;word-wrap:break-word}
 /* The composer is a separate object from the discussion above it, so it sits
    further away than two messages sit from each other. */
 .ac-reply{display:flex;margin-top:16px}
@@ -268,6 +268,9 @@ const CSS = `
    band that puts the box on an integer offset (7.5 + 1.5 = 9) — which is why
    it holds at 1x, 2x and 3x instead of only at the DPR it was tuned on. */
 .ac-min .ac-min-n{font-size:11px;color:#9b9b95;font-weight:700;margin-top:3px}
+/* A one-comment thread shows no count, so trim the padding to the bubble's own
+   box — otherwise the pill keeps the width its missing digit used to need. */
+.ac-min:not(:has(.ac-min-n)){padding:0 6px}
 /* Same bubble as the rail's comments toggle, at the card-chrome icon size —
    the minimized thread reads as "this is a comment", in the same hand. */
 .ac-min svg{display:block;width:13px;height:13px}
@@ -454,8 +457,31 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   // dark block in CSS). The flag rides <html> like ac-doc-shift does, so it
   // reaches every root we append there — the layer, the rail, the selection
   // button — plus the lightbox and toast, which are created later.
-  const applyTheme = () => document.documentElement.classList.toggle("ac-dark", hostIsDark());
+  // Posted out too: the full-page viewer's exit bubble wears this same surface
+  // from the parent document, where this page's background is unreadable.
+  const reportTheme = (dark: boolean) => {
+    if (window.parent === window) return;
+    try {
+      window.parent.postMessage({ source: "arti-theme", dark }, "*");
+    } catch {
+      /* a parent we can't post to is one that doesn't need the flag */
+    }
+  };
+  const applyTheme = () => {
+    const dark = hostIsDark();
+    document.documentElement.classList.toggle("ac-dark", dark);
+    reportTheme(dark);
+  };
   applyTheme();
+  // Either side can be ready first — this page's mount may land before the
+  // parent has hydrated its listener — so the parent asks as well, and the
+  // answer to a query is the same measurement, taken now.
+  const onThemeQuery = (e: MessageEvent) => {
+    if (e.source !== window.parent) return;
+    const data = e.data as { source?: unknown } | null;
+    if (data?.source === "arti-theme-query") reportTheme(hostIsDark());
+  };
+  window.addEventListener("message", onThemeQuery);
   // A served page's dark styles usually come from its own prefers-color-scheme
   // rules, so its background flips under us when the OS theme is switched.
   const scheme = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
@@ -874,7 +900,11 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // (e.g. `&quot;` → `&quot`), which the browser decodes back to `"` and that
     // would terminate the title attribute early and corrupt the element.
     const tip = t.comments[0] ? AV(t.comments[0].body.slice(0, 140)) : "";
-    return `<div class="ac-min" data-mintid="${t.id}" title="${tip}">${icon("bubble")}<span class="ac-min-n">${t.comments.length}</span></div>`;
+    // The count is only worth the space once a thread is a conversation: most
+    // threads are one comment, and a "1" beside every bubble is noise that says
+    // nothing the bubble doesn't already say.
+    const n = t.comments.length > 1 ? `<span class="ac-min-n">${t.comments.length}</span>` : "";
+    return `<div class="ac-min" data-mintid="${t.id}" title="${tip}">${icon("bubble")}${n}</div>`;
   }
   function draftCard(): string {
     // Show the quoted snippet from the start (same chip as a saved card), not a
@@ -1271,6 +1301,30 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     padEl.style.height = px + "px";
   }
 
+  // ── keeping the open composer on screen ─────────────────────────────
+  // Set by the actions that change what the card IS — a draft opening, a
+  // composer growing under the typing — and consumed by the next place(). It is
+  // deliberately never set from scroll or resize: a card that sprang back every
+  // time it was scrolled away would take the page hostage.
+  let revealPending = false;
+  const REVEAL_GAP = 16;
+  const placeRevealing = () => { revealPending = true; place(); };
+
+  // Scroll just enough to bring the open card's bottom inside the viewport.
+  // Runs after setScrollPad, which is what makes the room to scroll into when
+  // the card hangs below the last line of the document.
+  function revealOpenCard(vh: number, top0: number) {
+    const c =
+      layer.querySelector<HTMLElement>(".ac-card.ac-draft") ??
+      (active ? layer.querySelector<HTMLElement>(`.ac-card[data-tid="${active}"]`) : null);
+    if (!c) return;
+    const r = c.getBoundingClientRect();
+    // Never so far that the card's own top slides under the header: a card
+    // taller than the window shows its beginning, not its end.
+    const by = Math.min(r.bottom + REVEAL_GAP - vh, r.top - top0);
+    if (by > 1) window.scrollBy({ top: by, behavior: "smooth" });
+  }
+
   function place() {
     applyDocShift();
     applyRailY(); // re-clamp the (draggable) rail against the current viewport / header
@@ -1326,7 +1380,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // no viewport clamp — a card whose highlight has scrolled off scrolls off
     // with it. (`right`/`gap` from above.)
     // Union top of a column item's highlight marks. Only the top drives the
-    // stack; text cards and minimized markers share ONE stack (both right-
+    // stack; text cards and minimized markers share ONE stack (both left-
     // aligned to the same edge) so a marker never collides with a neighbour.
     const colTop = (c: HTMLElement): number | null => {
       const marks = c.dataset.draft
@@ -1342,6 +1396,8 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     let prevDocBottom = -Infinity;
     let maxColBottom = -Infinity; // lowest card/bubble bottom (viewport px) → drives scroll padding
     const containerRight = container ? container.getBoundingClientRect().right : vw - right;
+    // One left edge for the whole column — cards and collapsed bubbles alike.
+    const colX = columnLeft({ containerRight, viewportWidth: vw });
     const colEls = [
       ...cards.filter((c) => !isPinCard(c)),
       ...Array.from(layer.querySelectorAll<HTMLElement>(".ac-min")),
@@ -1359,7 +1415,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
           // (or marker) just hides; it's still reachable from the panel.
           const parked = c.dataset.draft || c.dataset.tid === active;
           if (!parked) { c.style.display = "none"; return; }
-          c.style.display = ""; c.style.right = right + "px"; c.style.left = "auto"; c.style.top = top0 + "px"; c.style.clipPath = "none";
+          c.style.display = ""; c.style.left = colX + "px"; c.style.right = "auto"; c.style.top = top0 + "px"; c.style.clipPath = "none";
           return;
         }
         c.style.display = "";
@@ -1373,18 +1429,11 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
         const docY = Math.max(top + sY - 2, prevDocBottom + gap);
         prevDocBottom = docY + h;
         const vTop = docY - sY; // viewport top once projected
-        if (c.dataset.mintid) {
-          // Collapsed bubbles hug the text: park them just past the doc's
-          // (possibly left-shifted) right edge — the left side of the comment
-          // gutter — instead of way out at the card column, and never further
-          // right than the cards themselves (which would put them off-screen
-          // under the rail on a full-width doc). See minMarkerLeft.
-          c.style.left = minMarkerLeft({ containerRight, viewportWidth: vw, markerWidth: c.offsetWidth || 44 }) + "px";
-          c.style.right = "auto";
-        } else {
-          c.style.right = right + "px";
-          c.style.left = "auto";
-        }
+        // The column hugs the text rather than the viewport's right edge, so a
+        // card opens beside the paragraph it annotates and a bubble collapses
+        // into the same left edge it expanded from. See columnLeft.
+        c.style.left = colX + "px";
+        c.style.right = "auto";
         c.style.top = vTop + "px";
         maxColBottom = Math.max(maxColBottom, vTop + h);
         // Pass UNDER the sticky header rather than over it: clip away the part
@@ -1401,6 +1450,11 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       setScrollPad(maxColBottom - natBottom + 24);
     } else {
       setScrollPad(0);
+    }
+
+    if (revealPending) {
+      revealPending = false;
+      revealOpenCard(vh, top0);
     }
   }
 
@@ -1545,7 +1599,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     ta: HTMLTextAreaElement,
     card: HTMLElement | null,
     send: HTMLButtonElement | null,
-    reflow: () => void = place,
+    reflow: () => void = placeRevealing,
   ) {
     const sync = () => {
       const has = ta.value.trim().length > 0;
@@ -1571,8 +1625,9 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   function wire() {
     layer.querySelectorAll<HTMLTextAreaElement>(".ac-reply textarea, .ac-edit-input").forEach((ta) => {
       autosize(ta);
-      // As the card grows taller, restack the margin cards so they don't overlap.
-      ta.addEventListener("input", () => { if (autosize(ta)) place(); });
+      // As the card grows taller, restack the margin cards so they don't
+      // overlap — and keep the box that just grew inside the window.
+      ta.addEventListener("input", () => { if (autosize(ta)) placeRevealing(); });
     });
     // Reply composers: buttons on engage, send disabled while empty.
     layer.querySelectorAll<HTMLTextAreaElement>("[data-reply]").forEach((ta) => {
@@ -1872,6 +1927,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     pendingRange = null;
     commentsOn = true;
     panelOpen = false;
+    revealPending = true; // a selection near the bottom edge opens its composer below the fold
     render();
   };
 
@@ -2111,15 +2167,25 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     requestAnimationFrame(() => { placePending = false; if (!dead) place(); });
   });
 
-  // Clicking off an open PIN card hides it (pins are transient — re-open by
-  // clicking the pin again). Highlight/text cards are unaffected: they stay.
+  // Clicking anywhere off an open card puts it away: a text thread tucks into
+  // its margin bubble, a pin card just closes (its pin already plays that role).
+  // Unsent work is never discarded this way — a card mid-edit, one holding a
+  // half-typed reply, and an uncommitted draft all stay open.
   const onDocClick = (e: MouseEvent) => {
-    if (!active) return;
+    if (!active || draft || editing) return;
     const t = find(active);
-    if (!t || t.anchor.type !== "pin") return;
+    if (!t) return;
     if ((e.target as HTMLElement).closest(".ac-card,.ac-pin,.ac-fabs,.ac-float,.ac-panel,.ac-lb,.ac-mm")) return;
-    active = null;
-    render();
+    // `active` outlives its card: hiding comments and opening the all-comments
+    // panel both leave the id set with nothing drawn. There is no card to click
+    // off of then, and tucking that thread away would persist a bubble the
+    // reader never asked for.
+    const card = layer.querySelector<HTMLElement>(`.ac-card[data-tid="${active}"]`);
+    if (!card) return;
+    const ta = card.querySelector("textarea");
+    if (ta && ta.value.trim()) return;
+    if (t.anchor.type === "pin") { active = null; render(); return; }
+    collapseThread(active);
   };
   const onScrollResize = () => { place(); positionFloat(); };
 
@@ -2226,6 +2292,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     if (closeLightbox) closeLightbox(); // remove an open lightbox AND its Escape listener
     padEl?.remove(); // drop the scroll-area spacer we appended to the doc body
     scheme?.removeEventListener?.("change", applyTheme);
+    window.removeEventListener("message", onThemeQuery);
     document.documentElement.classList.remove("ac-dark"); // undo the theme flag
     document.documentElement.classList.remove("ac-doc-shift"); // undo the left-bias
     document.documentElement.style.removeProperty("--ac-shift");

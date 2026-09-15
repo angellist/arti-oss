@@ -104,7 +104,7 @@ from arti's device-authorization flow (RFC 8628); see
 
 ## What the tools do
 
-arti's MCP server exposes 12 tools (`internal/mcp/server.go`). The exhaustive
+arti's MCP server exposes 15 tools (`internal/mcp/server.go`). The exhaustive
 schemas live in the [MCP tools reference](../reference/mcp-tools.md); the shape:
 
 | Tool | Purpose |
@@ -121,10 +121,16 @@ schemas live in the [MCP tools reference](../reference/mcp-tools.md); the shape:
 | `list_package_files` | List entries inside a PACKAGE. |
 | `read_package_file` | Read one file out of a PACKAGE. |
 | `list_comments` | Read comment threads on an artifact. |
+| `add_comment` | Start a document-level or quote-anchored comment thread. |
+| `reply_to_comment` | Reply to an existing comment thread. |
+| `resolve_comment` | Resolve or reopen a comment thread. |
 
 These mirror the [CLI](command-line.md) and [REST API](../reference/rest-api.md),
 and respect the same access rules — a caller only reads what their token is
-allowed to read, and writes are attributed to the token's email.
+allowed to read, and writes are attributed to the token's email. Comment writes
+require read access, honor the document's `comments_enabled` switch, and are
+rate-limited per principal (`ARTI_COMMENTS_GLOBAL_RPM`,
+`ARTI_COMMENTS_ARTIFACT_RPM`).
 
 ## How an agent uses it
 

@@ -1,8 +1,110 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getMe, listApiKeys, createApiKey, revokeApiKey, hasPerm } from "@/lib/arti";
-import type { ApiKey, CreatedApiKey, Me } from "@/lib/types";
+import { getMe, listApiKeys, createApiKey, revokeApiKey, getCredentialUsage, hasPerm } from "@/lib/arti";
+import type { ApiKey, CreatedApiKey, CredentialSource, CredentialUsage, Me } from "@/lib/types";
+
+// credRef is the reference a key's writes are stamped with
+// (artifacts.written_via), and the key under which its usage is recorded.
+function credRef(k: ApiKey): string {
+  return `apikey:${k.id}`;
+}
+
+// newSourceDays is how long a source counts as new in the table. Slack only
+// carries a key answering from a new network now, so this list is where the
+// rest of the story lives and recent arrivals have to be visible at a glance.
+const newSourceDays = 7;
+
+function isNewSource(src: CredentialSource): boolean {
+  if (!src.first_seen) return false;
+  const age = Date.now() - new Date(src.first_seen).getTime();
+  return age < newSourceDays * 24 * 60 * 60 * 1000;
+}
+
+// SourcesCell shows how many places a key has been used from. More than one is
+// the signal worth reading: a key issued for one pipeline that answers from
+// several addresses has been copied somewhere.
+function SourcesCell({
+  sources,
+  expanded,
+  onToggle,
+}: {
+  sources: CredentialSource[];
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  if (sources.length === 0) {
+    return <span className="text-neutral-400">—</span>;
+  }
+  const fresh = sources.filter(isNewSource).length;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="rounded px-1 text-[12px] text-blue-600 hover:bg-blue-50"
+      aria-expanded={expanded}
+    >
+      {sources.length} {sources.length === 1 ? "source" : "sources"}
+      {fresh > 0 && (
+        <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800">
+          {fresh} new
+        </span>
+      )}
+      <span className="ml-1 text-[10px] text-neutral-400">{expanded ? "▾" : "▸"}</span>
+    </button>
+  );
+}
+
+// SourceList is the expanded detail: every address and client a key has
+// answered from in the window, oldest-first-seen shown so a newcomer stands
+// out against the source it was issued for.
+function SourceList({ sources, colSpan }: { sources: CredentialSource[]; colSpan: number }) {
+  return (
+    <tr className="border-t border-neutral-100 bg-neutral-50/60">
+      <td colSpan={colSpan} className="py-2 pl-6 pr-6">
+        <table className="w-full">
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wide text-neutral-400">
+              <th className="pb-1 pr-3 font-medium">Address</th>
+              <th className="pb-1 pr-3 font-medium">Client</th>
+              <th className="pb-1 pr-3 font-medium">Reads</th>
+              <th className="pb-1 pr-3 font-medium">Writes</th>
+              <th className="pb-1 pr-3 font-medium">First seen</th>
+              <th className="pb-1 font-medium">Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sources.map((src) => (
+              <tr key={`${src.ip}|${src.user_agent}`} className="text-[11px] text-neutral-600">
+                <td className="py-0.5 pr-3 font-mono">
+                  {src.ip || "—"}
+                  {isNewSource(src) && (
+                    <span className="ml-1.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-800">
+                      new
+                    </span>
+                  )}
+                </td>
+                <td className="py-0.5 pr-3 font-mono" title={src.user_agent}>
+                  {src.user_agent ? src.user_agent.slice(0, 40) : "—"}
+                </td>
+                <td className="py-0.5 pr-3">{src.reads}</td>
+                <td className="py-0.5 pr-3">{src.writes}</td>
+                <td className="py-0.5 pr-3"><DateCell s={src.first_seen} /></td>
+                <td className="py-0.5"><DateCell s={src.last_seen} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </td>
+    </tr>
+  );
+}
+
+// sourcesFor picks the usage rows belonging to one key, newest activity first.
+function sourcesFor(usage: CredentialUsage | null, k: ApiKey): CredentialSource[] {
+  if (!usage) return [];
+  return usage.sources.filter((s) => s.cred === credRef(k));
+}
 
 function keyStatus(k: ApiKey): "Revoked" | "Expired" | "Active" {
   if (k.revoked_at) return "Revoked";
@@ -36,15 +138,20 @@ function statusBadge(status: "Revoked" | "Expired" | "Active") {
 function KeyRow({
   k,
   showOwner,
+  sources,
+  docs,
   onRevoke,
 }: {
   k: ApiKey;
   showOwner: boolean;
+  sources: CredentialSource[];
+  docs: number;
   onRevoke: (id: string) => Promise<void>;
 }) {
   const status = keyStatus(k);
   const inactive = status !== "Active";
   const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   const revoke = async () => {
     if (!window.confirm(`Revoke key "${k.name}"? This cannot be undone.`)) return;
@@ -57,8 +164,10 @@ function KeyRow({
   };
 
   const rowClass = "border-t border-neutral-100 " + (inactive ? "opacity-50" : "");
+  const columns = showOwner ? 11 : 10;
 
   return (
+    <>
     <tr className={rowClass}>
       <td className={"py-2 pl-6 pr-3 text-[12px] " + (inactive ? "text-neutral-400" : "text-neutral-900")}>
         {k.name}
@@ -73,6 +182,23 @@ function KeyRow({
       <td className="py-2 px-3 text-[12px] text-neutral-600"><DateCell s={k.created_at} /></td>
       <td className="py-2 px-3 text-[12px] text-neutral-600"><DateCell s={k.expires_at} /></td>
       <td className="py-2 px-3 text-[12px] text-neutral-600"><DateCell s={k.last_used_at} /></td>
+      <td className="py-2 px-3 text-[12px]">
+        <SourcesCell sources={sources} expanded={expanded} onToggle={() => setExpanded(!expanded)} />
+      </td>
+      <td className="py-2 px-3 text-[12px] text-neutral-600">
+        {docs > 0 ? (
+          // Every document this key wrote, which is the question asked once a
+          // key turns out to have been shared.
+          <a
+            className="text-blue-600 hover:underline"
+            href={`/?q=${encodeURIComponent(`via:${credRef(k)}`)}`}
+          >
+            {docs}
+          </a>
+        ) : (
+          <span className="text-neutral-400">0</span>
+        )}
+      </td>
       <td className="py-2 px-3">{statusBadge(status)}</td>
       <td className="py-2 pl-3 pr-6">
         {status === "Active" && (
@@ -87,6 +213,8 @@ function KeyRow({
         )}
       </td>
     </tr>
+    {expanded && <SourceList sources={sources} colSpan={columns} />}
+    </>
   );
 }
 
@@ -149,6 +277,8 @@ export default function ApiKeysPage() {
   const [err, setErr] = useState("");
   const [revokeErr, setRevokeErr] = useState("");
   const [allErr, setAllErr] = useState("");
+  const [usage, setUsage] = useState<CredentialUsage | null>(null);
+  const [allUsage, setAllUsage] = useState<CredentialUsage | null>(null);
 
   // Create form state
   const [name, setName] = useState("");
@@ -166,9 +296,16 @@ export default function ApiKeysPage() {
     // keys-load failure must NOT discard a successful getMe. Seq-guarded so a
     // slow older load() can't clobber a newer one's result (e.g. null out `me`).
     const seq = ++loadSeq.current;
-    const [meRes, keysRes] = await Promise.allSettled([getMe(), listApiKeys()]);
+    const [meRes, keysRes, usageRes] = await Promise.allSettled([
+      getMe(),
+      listApiKeys(),
+      // Usage is additive detail: a failure here must leave the key list
+      // intact, so it settles independently and simply shows no sources.
+      getCredentialUsage(),
+    ]);
     if (seq !== loadSeq.current) return; // superseded by a newer load()
     setMe(meRes.status === "fulfilled" ? meRes.value : null);
+    setUsage(usageRes.status === "fulfilled" ? usageRes.value : null);
     if (keysRes.status === "fulfilled") {
       setKeys(keysRes.value);
       setErr("");
@@ -186,9 +323,13 @@ export default function ApiKeysPage() {
     const seq = ++loadAllSeq.current;
     setAllErr(""); // clear at start so an in-flight retry doesn't keep the table hidden
     try {
-      const all = await listApiKeys(true);
+      const [all, allUse] = await Promise.all([
+        listApiKeys(true),
+        getCredentialUsage(true).catch(() => null),
+      ]);
       if (seq !== loadAllSeq.current) return; // a newer loadAll won — ignore stale success
       setAllKeys(all);
+      setAllUsage(allUse);
     } catch {
       if (seq !== loadAllSeq.current) return; // superseded — don't surface a stale error
       // Scope to the admin panel — must NOT set the shared `err`, which the
@@ -246,6 +387,8 @@ export default function ApiKeysPage() {
         <th className="py-2 px-3 font-medium">Created</th>
         <th className="py-2 px-3 font-medium">Expires</th>
         <th className="py-2 px-3 font-medium">Last used</th>
+        <th className="py-2 px-3 font-medium">Used from</th>
+        <th className="py-2 px-3 font-medium">Docs</th>
         <th className="py-2 px-3 font-medium">Status</th>
         <th className="py-2 pl-3 pr-6 font-medium" />
       </tr>
@@ -347,7 +490,14 @@ export default function ApiKeysPage() {
               {tableHeaders(false)}
               <tbody>
                 {keys.map((k) => (
-                  <KeyRow key={k.id} k={k} showOwner={false} onRevoke={handleRevoke} />
+                  <KeyRow
+                    key={k.id}
+                    k={k}
+                    showOwner={false}
+                    sources={sourcesFor(usage, k)}
+                    docs={usage?.docs[credRef(k)] ?? 0}
+                    onRevoke={handleRevoke}
+                  />
                 ))}
               </tbody>
             </table>
@@ -378,7 +528,14 @@ export default function ApiKeysPage() {
                   {tableHeaders(true)}
                   <tbody>
                     {allKeys.map((k) => (
-                      <KeyRow key={k.id} k={k} showOwner={true} onRevoke={handleRevoke} />
+                      <KeyRow
+                        key={k.id}
+                        k={k}
+                        showOwner={true}
+                        sources={sourcesFor(allUsage, k)}
+                        docs={allUsage?.docs[credRef(k)] ?? 0}
+                        onRevoke={handleRevoke}
+                      />
                     ))}
                   </tbody>
                 </table>

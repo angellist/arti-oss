@@ -260,16 +260,21 @@ func (s *Service) handleDoc(w http.ResponseWriter, r *http.Request) {
 		s.serveShell(w, chi.URLParam(r, "surface"), surf)
 		return
 	}
+	// These refusals must stay frameable. http.Error keeps the global
+	// X-Frame-Options: SAMEORIGIN, so an embedder sees a browser-level "refused to
+	// connect" and the reason — sitting in the response body — never reaches
+	// anyone. The CSP still limits who may frame it to the surface's own origins.
 	if !secretOK(surf, r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeEmbedError(w, surf.Origin, http.StatusForbidden, "forbidden")
 		return
 	}
 	if slug == "" {
-		http.Error(w, "missing slug", http.StatusBadRequest)
+		writeEmbedError(w, surf.Origin, http.StatusBadRequest, "missing slug")
 		return
 	}
 	if !slugAllowed(surf.SlugAllow, slug) {
-		http.Error(w, "slug not allowed for this surface", http.StatusForbidden)
+		writeEmbedError(w, surf.Origin, http.StatusForbidden,
+			"slug not allowed for this surface: "+slug)
 		return
 	}
 	// Deployment docs change; never let a browser/intermediary reuse a cached
@@ -543,6 +548,23 @@ func (s *Service) writeGatePage(w http.ResponseWriter, surface string, surf Surf
 	// cross-site; this makes it explicit on the one page that mints the URL.
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	_, _ = w.Write([]byte(gatePageHTML))
+}
+
+// writeEmbedError renders a refusal the embedder can actually read. Same framing
+// headers as writePlaceholder, so the surface's own origins see the reason
+// instead of a browser-level connection error; every other origin is still
+// refused by frame-ancestors.
+func writeEmbedError(w http.ResponseWriter, origins OriginList, status int, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors "+frameAncestors(origins))
+	w.Header().Del("X-Frame-Options")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8">`+
+		`<style>body{margin:0;font:13px/1.5 -apple-system,system-ui,sans-serif;color:#666;padding:24px}`+
+		`code{font:12px ui-monospace,monospace;color:#b3261e}</style></head><body>`+
+		`<p>This panel could not be served.</p><p><code>%s</code></p></body></html>`,
+		html.EscapeString(msg))
 }
 
 func writePlaceholder(w http.ResponseWriter, origins OriginList, slug string) {

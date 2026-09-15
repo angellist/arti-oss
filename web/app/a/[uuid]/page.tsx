@@ -1,8 +1,9 @@
 import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
+import AccessDenied from "@/components/AccessDenied";
 import ArtifactViewer from "@/components/ArtifactViewer";
 import FullPageView from "@/components/FullPageView";
-import { ArtiError, fetchContent, fetchPackageFile, getMe, getMeta, listPackageFiles } from "@/lib/arti";
+import { ArtiError, fetchContent, fetchPackageFile, getDenialByID, getMe, getMeta, listPackageFiles } from "@/lib/arti";
 import { fullPageKind, isFullPageView, isTextualContentType, resolvePackageEntry, textScaleFromParam } from "@/lib/viewer";
 import { PackageRailProvider, SearchRailProvider } from "@/lib/rail-context";
 
@@ -65,9 +66,13 @@ export default async function ByID({
       getMe(cookie).catch(() => ({ email: "", name: "", is_admin: false })),
     ]);
   } catch (e) {
-    // Same handling the slug route already has: an unknown or unreadable
-    // artifact renders the 404 page instead of a 500 wall.
-    if (e instanceof ArtiError && (e.status === 404 || e.status === 403)) notFound();
+    // Same handling the slug route already has: ask the denial route whether
+    // this was a restricted artifact, and fall back to the 404 page.
+    if (e instanceof ArtiError && (e.status === 404 || e.status === 403)) {
+      const denial = await getDenialByID(uuid, cookie).catch(() => null);
+      if (denial) return <AccessDenied info={denial} />;
+      notFound();
+    }
     throw e;
   }
 

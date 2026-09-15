@@ -86,6 +86,7 @@ func (s *Service) httpShareDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordShareOpen(r, linkID)
+	s.recordView(r, row, "", "share")
 }
 
 // recordShareOpen appends the audit row, and is called only where a document

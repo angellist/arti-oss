@@ -34,28 +34,31 @@ export const RAIL_GAP = 8;
 export const RAIL_FOOTPRINT = RAIL_RIGHT + RAIL_WIDTH + RAIL_GAP;
 
 /**
- * Left edge (px) of a collapsed-thread marker ("comment chip").
+ * Left edge (px) of the margin column — cards and collapsed-thread chips alike.
  *
- * The chip hugs the text — it parks just past the document's right edge, which
- * is the LEFT side of the comment gutter, so it reads as belonging to the
- * paragraph it annotates. On a wide document (a full-width served page) that
- * position runs off the viewport and lands under the rail, which is bug-shaped:
- * the chip was clamped only to `viewportWidth - width - 8`, i.e. exactly the
- * strip the rail occupies. So the hug is capped at the CARD column's right edge
- * instead: chips and cards share one stack, and sharing a right edge both keeps
- * them visually aligned and leaves the rail's footprint free (CARD_RIGHT=78 >
- * RAIL_FOOTPRINT=42).
+ * One function for both because they must share a LEFT edge: a chip is the
+ * collapsed form of the card that replaces it, and two differently-aligned
+ * columns make a thread jump sideways as it is tucked away and brought back.
+ *
+ * The column hugs the text: it parks SHIFT_GAP past the document's right edge,
+ * so on a window wide enough for both it sits entirely in the gutter and covers
+ * no prose. The cap is the card column's own left edge — past that a card would
+ * run under the rail and off the viewport — so on a narrow window the column
+ * stops there and overlaps the text by whatever computeShift could not clear.
+ * Using SHIFT_GAP as the hug gap is what makes the two meet exactly: once the
+ * doc has shifted as far as it needs to, `docRight + SHIFT_GAP` IS
+ * `viewportWidth - CARD_FOOTPRINT`, so the column lands on the cap rather than
+ * a few px short of it.
  */
-export function minMarkerLeft(m: {
+export function columnLeft(m: {
   /** container.getBoundingClientRect().right, after the doc shift */
   containerRight: number;
   viewportWidth: number;
-  markerWidth: number;
-  /** gap between the doc's right edge and the chip */
+  /** gap between the doc's right edge and the column */
   gap?: number;
 }): number {
-  const hug = m.containerRight + (m.gap ?? 8);
-  const rightLimit = m.viewportWidth - CARD_RIGHT - m.markerWidth;
+  const hug = m.containerRight + (m.gap ?? SHIFT_GAP);
+  const rightLimit = m.viewportWidth - CARD_FOOTPRINT;
   return Math.round(Math.max(8, Math.min(hug, rightLimit)));
 }
 

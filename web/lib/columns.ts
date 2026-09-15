@@ -26,6 +26,7 @@ export type ColumnKey =
   | "creator"
   | "scope"
   | "type"
+  | "views"
   | "content_type"
   | "description"
   | "size"
@@ -115,6 +116,16 @@ export const COLUMNS: ColumnDef[] = [
     minWidth: 72,
     defaultVisible: true,
     help: "TEXT / PACKAGE / APP / ATTACHMENT",
+  },
+  {
+    key: "views",
+    label: "views",
+    sort: "views",
+    width: 88,
+    minWidth: 64,
+    defaultVisible: true,
+    numeric: true,
+    help: "views across every version of the slug",
   },
   {
     key: "created",

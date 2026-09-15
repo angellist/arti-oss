@@ -42,10 +42,19 @@ func (ix *Indexer) Enabled() bool { return ix != nil && ix.client.Enabled() }
 // Errors are logged but not returned — indexing is best-effort to avoid
 // blocking writes.
 func (ix *Indexer) IndexArtifact(ctx context.Context, row sqlc.Artifact) {
+	ix.IndexVersion(ctx, row, true)
+}
+
+// IndexVersion indexes one version with an explicit is_latest. A caller
+// re-indexing a version that is NOT its slug's latest live one must pass
+// false: indexing is a whole-document replace, so a true here makes that
+// version answer every latest-per-slug search until the next SetLatestFlag
+// sweep happens to run.
+func (ix *Indexer) IndexVersion(ctx context.Context, row sqlc.Artifact, isLatest bool) {
 	if ix == nil {
 		return
 	}
-	doc := rowToDoc(row)
+	doc := rowToDoc(row, isLatest)
 
 	// An artifact labelled index:skip-fulltext keeps every metadata field —
 	// title, description, labels, slug, creator — and only withholds its body
@@ -193,7 +202,7 @@ func (ix *Indexer) readContent(ctx context.Context, row sqlc.Artifact) ([]byte, 
 	return io.ReadAll(rc)
 }
 
-func rowToDoc(row sqlc.Artifact) Doc {
+func rowToDoc(row sqlc.Artifact, isLatest bool) Doc {
 	id := pgstore.UUIDFromPG(row.ArtifactID).String()
 	return Doc{
 		ArtifactID:    id,
@@ -210,15 +219,14 @@ func rowToDoc(row sqlc.Artifact) Doc {
 		CreatedAt:     row.CreatedAt.Time,
 		ModifiedAt:    row.ModifiedAt.Time,
 		IsDeleted:     row.DeletedAt.Valid,
-		// Every write indexes is_latest:true; UpdateLatestFlags then clears the
-		// flag on older versions asynchronously. During that window a slug can
-		// briefly have >1 doc with is_latest:true, so a LatestPerSlug search can
-		// return duplicate versions of a slug until the flags settle — unlike
-		// Postgres, which collapses to MAX(version) in SQL (cursor-bot).
+		// A new version indexes true and UpdateLatestFlags clears the older
+		// docs asynchronously, so a slug can briefly have >1 doc flagged and a
+		// LatestPerSlug search can return duplicate versions until the flags
+		// settle — unlike Postgres, which collapses to MAX(version) in SQL.
 		// TODO(arti#87): make LatestPerSlug robust to flag lag via OpenSearch
 		// field collapsing on named_slug (top hit by version desc) instead of
 		// relying on the is_latest flag.
-		IsLatest:  true,
+		IsLatest:  isLatest,
 		SizeBytes: row.SizeBytes,
 	}
 }

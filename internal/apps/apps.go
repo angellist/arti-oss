@@ -2,8 +2,9 @@
 // APP artifacts. An APP is a sandboxed single-page app served by arti; its JS
 // calls window.arti.callTool(server, tool, args), which POSTs here. This
 // service authenticates the call with the scoped app token arti injected into
-// the page, enforces the app's arti-app.json tool allowlist, resolves the
-// named upstream MCP server, and forwards a single tools/call — attaching the
+// the page and enforces the app's arti-app.json tool allowlist. arti's own
+// tools it then runs in-process as the viewer; for every other server it
+// resolves the named upstream and forwards a single tools/call — attaching the
 // viewer's per-user upstream credential (OBO) when the server requires auth.
 //
 // It is mounted OUTSIDE arti's cookie-auth middleware (like the comments embed
@@ -15,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,7 +28,9 @@ import (
 	"github.com/google/uuid"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/artifacts"
 	"github.com/angellist/arti-oss/internal/auth"
+	"github.com/angellist/arti-oss/internal/comments"
 	"github.com/angellist/arti-oss/internal/httperr"
 	"github.com/angellist/arti-oss/internal/mcpclient"
 	"github.com/angellist/arti-oss/internal/pkgzip"
@@ -81,6 +85,9 @@ const (
 	embedFilesScopePrefix = "app-files:"
 	// ManifestPath is the per-app tool-allowlist file inside the APP zip.
 	ManifestPath = "arti-app.json"
+	// maxToolCallBytes caps one tool-call body at the same ceiling every other
+	// write door has, so an app is never the tighter path.
+	maxToolCallBytes = artifacts.MaxUploadBytes
 )
 
 // ServerConfig is a named upstream MCP server an APP may reach. Apps reference
@@ -111,18 +118,21 @@ type Completer interface {
 	RunCompletion(ctx context.Context, viewer, appID string, args map[string]any) (result json.RawMessage, httpStatus int, errBody json.RawMessage)
 }
 
-// ArtiReader runs one of arti's OWN read tools in-process, as the caller in ctx
-// (set via auth.WithIdentity), returning the MCP content envelope. Implemented
-// by *mcp.Server (CallToolInProcess). nil ⇒ arti reads fall back to the OBO
-// path. Lets an APP read other artifacts (as the viewer) with no consent popup.
-type ArtiReader interface {
+// ArtiTools runs one of arti's OWN tools in-process, as the caller in ctx (set
+// via auth.WithIdentity), returning the MCP content envelope. Implemented by
+// *mcp.Server (CallToolInProcess). nil ⇒ arti calls fall back to the OBO path.
+// Lets an APP reach other artifacts (as the viewer) with no consent popup.
+type ArtiTools interface {
 	CallToolInProcess(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
 }
 
-// artiReadTools is the set of arti tools served in-process (read-only). Writes
-// are intentionally excluded: they keep the OBO path so attribution/audit is
-// unchanged. Anything not here (or any non-"arti" server) takes the OBO path.
-var artiReadTools = map[string]bool{
+// artiInProcess is the set of arti's own tools served in-process — reads and
+// writes alike. An app's access to arti must not depend on leaving the
+// cluster: routing a write out to a gateway and back made every write wait on
+// an internet round trip that could time out, for a hop that authorizes
+// nothing the in-process call doesn't. Anything not here (or any non-arti
+// server) still takes the OBO path.
+var artiInProcess = map[string]bool{
 	"get_artifact":           true,
 	"read_artifact":          true,
 	"read_package_file":      true,
@@ -131,24 +141,63 @@ var artiReadTools = map[string]bool{
 	"search_artifacts":       true,
 	"list_artifact_versions": true,
 	"list_comments":          true,
+	"add_comment":            true,
+	"reply_to_comment":       true,
+	"resolve_comment":        true,
+	"add_artifact":           true,
+	"append_artifact":        true,
+	"update_artifact":        true,
+	"archive_artifact":       true,
 }
+
+// isArtiSelf reports whether server names this arti instance. Both spellings
+// exist: "arti-self" is the built-in, "arti" is what a deployment's gateway
+// map calls it and what app manifests in the wild already declare.
+func isArtiSelf(server string) bool { return server == "arti" || server == "arti-self" }
 
 // Service is the apps proxy.
 type Service struct {
-	art        *pgstore.Store
-	signer     *auth.JWTSigner
-	mcp        *mcpclient.Client
-	servers    map[string]ServerConfig
-	tokens     TokenProvider // may be nil (no OBO wired)
-	completer  Completer     // may be nil (no llm wired)
-	artiReader ArtiReader    // may be nil (arti reads fall back to OBO)
-	logger     *slog.Logger
-	rejects    rejectSampler
+	art       *pgstore.Store
+	signer    *auth.JWTSigner
+	mcp       *mcpclient.Client
+	servers   map[string]ServerConfig
+	tokens    TokenProvider // may be nil (no OBO wired)
+	completer Completer     // may be nil (no llm wired)
+	arti      ArtiTools     // may be nil (arti calls fall back to OBO)
+	logger    *slog.Logger
+	rejects   rejectSampler
+
+	maxTimeout time.Duration // cap on a call's requested timeout_ms
+	inflight   chan struct{} // upstream calls in progress; nil = unbounded
 }
 
-// SetArtiReader wires the in-process arti read path (see ArtiReader). Optional;
-// when unset, arti read tools take the OBO path like any other server.
-func (s *Service) SetArtiReader(r ArtiReader) { s.artiReader = r }
+// ProxyPath is the tool-call endpoint. The router exempts it from the blanket
+// request timeout because the proxy sets its own per-call deadline.
+const ProxyPath = "/api/apps/mcp"
+
+const (
+	// defaultCallTimeout applies when the app sends no timeout_ms.
+	defaultCallTimeout = 60 * time.Second
+	// DefaultMaxCallTimeout caps timeout_ms. arti must answer before the edge
+	// does (nginx reads for 95s, Cloudflare for 100s) or the app gets an HTML
+	// error page instead of arti's JSON error.
+	DefaultMaxCallTimeout = 90 * time.Second
+	// DefaultMaxInflight bounds concurrent upstream calls per pod: each one may
+	// buffer MaxResponseBytes twice while it is parsed, so inflight × 2 ×
+	// MaxResponseBytes must stay well under the pod memory limit.
+	DefaultMaxInflight = 16
+)
+
+// upstreamFailStatus is the HTTP status for every upstream-side failure the
+// proxy reports. Never 502 or 504: Cloudflare fronts the public ingress and
+// replaces an origin 502/504 with its own HTML error page, which carries no
+// CORS headers, so the sandboxed APP page sees "Failed to fetch" and never the
+// JSON body. 503 passes through untouched.
+const upstreamFailStatus = http.StatusServiceUnavailable
+
+// SetArtiTools wires the in-process arti path (see ArtiTools). Optional; when
+// unset, arti's tools take the OBO path like any other server.
+func (s *Service) SetArtiTools(t ArtiTools) { s.arti = t }
 
 func New(art *pgstore.Store, signer *auth.JWTSigner, servers map[string]ServerConfig, tokens TokenProvider, completer Completer, logger *slog.Logger) *Service {
 	if servers == nil {
@@ -157,7 +206,35 @@ func New(art *pgstore.Store, signer *auth.JWTSigner, servers map[string]ServerCo
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{art: art, signer: signer, mcp: mcpclient.New(), servers: servers, tokens: tokens, completer: completer, logger: logger}
+	s := &Service{art: art, signer: signer, mcp: mcpclient.New(), servers: servers, tokens: tokens, completer: completer, logger: logger}
+	s.SetLimits(DefaultMaxCallTimeout, DefaultMaxInflight)
+	return s
+}
+
+// SetLimits sets the cap on a call's requested timeout and the number of
+// upstream calls one process relays at once (0 = unbounded).
+func (s *Service) SetLimits(maxTimeout time.Duration, maxInflight int) {
+	if maxTimeout <= 0 {
+		maxTimeout = DefaultMaxCallTimeout
+	}
+	s.maxTimeout = maxTimeout
+	s.inflight = nil
+	if maxInflight > 0 {
+		s.inflight = make(chan struct{}, maxInflight)
+	}
+}
+
+// callTimeout is the deadline for one call: the app's timeout_ms, clamped to
+// the cap; the default when it asked for none.
+func (s *Service) callTimeout(ms int) time.Duration {
+	if ms <= 0 {
+		return defaultCallTimeout
+	}
+	d := time.Duration(ms) * time.Millisecond
+	if s.maxTimeout > 0 && d > s.maxTimeout {
+		d = s.maxTimeout
+	}
+	return d
 }
 
 // SignAppToken mints the scoped token injected into a served APP page. Wired to
@@ -350,12 +427,12 @@ func (s *Service) VerifyEmbedFilesToken(tok string) (artifactID string, err erro
 // MountProxy registers the proxy endpoint on the PUBLIC group (its own Bearer
 // auth + CORS). Mount this OUTSIDE the cookie-auth middleware.
 func (s *Service) MountProxy(r chi.Router) {
-	r.Options("/api/apps/mcp", func(w http.ResponseWriter, _ *http.Request) { setCORS(w); w.WriteHeader(http.StatusNoContent) })
+	r.Options(ProxyPath, func(w http.ResponseWriter, _ *http.Request) { setCORS(w); w.WriteHeader(http.StatusNoContent) })
 	r.Group(func(g chi.Router) {
 		g.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { setCORS(w); next.ServeHTTP(w, req) })
 		})
-		g.Post("/api/apps/mcp", s.handleMCP)
+		g.Post(ProxyPath, s.handleMCP)
 	})
 }
 
@@ -364,6 +441,7 @@ type proxyReq struct {
 	Server    string         `json:"server"`
 	Tool      string         `json:"tool"`
 	Arguments map[string]any `json:"arguments"`
+	TimeoutMs int            `json:"timeout_ms,omitempty"`
 }
 
 func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
@@ -395,7 +473,7 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req proxyReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxToolCallBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
 		return
 	}
@@ -434,42 +512,36 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !man.allows(req.Server, req.Tool) {
-		writeErr(w, http.StatusForbidden, "tool "+req.Server+"/"+req.Tool+" is not in this app's arti-app.json allowlist")
+		writeUpstreamCode(w, http.StatusForbidden, "not_allowlisted", req.Server, req.Tool,
+			"tool "+req.Server+"/"+req.Tool+" is not in this app's arti-app.json allowlist")
 		return
 	}
+	// The app's budget covers the tool call only, not arti's own lookups above:
+	// a deadline that fired while reading the manifest surfaced as a bare 400.
+	timeout := s.callTimeout(req.TimeoutMs)
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
 
-	// 4. Resolve the named server (URL + auth policy live server-side).
-	sc, known := s.servers[req.Server]
-	if !known {
-		writeErr(w, http.StatusBadRequest, "unknown server "+req.Server+" (not configured on this arti)")
-		return
-	}
-
-	// 4b. arti's own READ tools run in-process as the viewer — no OBO hop, no
-	// consent popup, and works even where Runlayer is unreachable (e.g. local
-	// dev). Access is identical to a normal arti read: the in-process MCP
-	// handlers take the caller from the context set here and re-resolve
-	// groups/access, so the app reads exactly what this viewer already can.
-	// Keyed on the server NAMES "arti" and "arti-self" (= this instance) and
-	// the read-only allowlist; writes fall through to the server's configured
-	// path so their attribution is unchanged. Covering arti-self here means
-	// reads work viewer-attributed on ANY deployment — with auth enabled its
-	// HTTP fallback (127.0.0.1, credential-free) would just 401.
-	if (req.Server == "arti" || req.Server == "arti-self") && s.artiReader != nil && artiReadTools[req.Tool] {
+	// 4. arti's own tools run in-process as the viewer — reads and writes both.
+	// No OBO hop, no consent popup, and no dependence on an `arti` entry in
+	// ARTI_APP_MCP_SERVERS, so this works on a deployment that configures no
+	// gateway at all and where Runlayer is unreachable (local dev). Access is
+	// identical to calling arti directly: the in-process handlers take the
+	// caller from the context set here and re-resolve groups/access, so an app
+	// reads and writes exactly what this viewer already can. The write is
+	// stamped to the APP rather than to the viewer, who presented no bearer of
+	// their own — see auth.WithAppCredential. Deliberately ahead of the server
+	// lookup below: arti access must not be a deployment's to withhold.
+	if isArtiSelf(req.Server) && s.arti != nil && artiInProcess[req.Tool] {
 		argsJSON, merr := json.Marshal(req.Arguments)
 		if merr != nil {
 			writeErr(w, http.StatusBadRequest, "bad arguments: "+merr.Error())
 			return
 		}
-		out, rerr := s.artiReader.CallToolInProcess(auth.WithIdentity(r.Context(), email), req.Tool, argsJSON)
+		actx := auth.WithAppCredential(auth.WithIdentity(ctx, email), req.AppID, row.Title)
+		out, rerr := s.arti.CallToolInProcess(actx, req.Tool, argsJSON)
 		if rerr != nil {
-			// Missing/forbidden target → 404 (so an app can't probe restricted
-			// artifacts); anything else is an upstream-style 502.
-			if errors.Is(rerr, pgstore.ErrNotFound) {
-				writeErr(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeErr(w, http.StatusBadGateway, "arti read: "+rerr.Error())
+			s.writeInProcessErr(w, r, req.Server, req.Tool, timeout, rerr)
 			return
 		}
 		if len(out) == 0 {
@@ -481,7 +553,15 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5a. Built-in completion (the `llm` server, Auth:"service") — dispatched
+	// 5. Resolve the named server (URL + auth policy live server-side).
+	sc, known := s.servers[req.Server]
+	if !known {
+		writeUpstreamCode(w, http.StatusBadRequest, "unknown_server", req.Server, req.Tool,
+			"unknown server "+req.Server+" (not configured on this arti)")
+		return
+	}
+
+	// 6. Built-in completion (the `llm` server, Auth:"service") — dispatched
 	// in-process to the Anthropic Messages API with arti's service key. No OBO,
 	// no mcpclient: a completion has no per-user upstream data. The viewer's
 	// email is used only for budget + usage attribution inside the completer.
@@ -496,7 +576,7 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotImplemented, "server "+req.Server+" needs the llm service, which is not configured on this arti")
 			return
 		}
-		result, status, errBody := s.completer.RunCompletion(r.Context(), email, req.AppID, req.Arguments)
+		result, status, errBody := s.completer.RunCompletion(ctx, email, req.AppID, req.Arguments)
 		w.Header().Set("Content-Type", "application/json")
 		if status != 0 {
 			w.WriteHeader(status)
@@ -508,7 +588,7 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Attach the per-user upstream credential (OBO) when required.
+	// 7. Attach the per-user upstream credential (OBO) when required.
 	var bearer string
 	if sc.Auth == "oauth" {
 		if s.tokens == nil {
@@ -527,8 +607,22 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 		bearer = b
 	}
 
-	// 6. Forward one tools/call upstream.
-	result, callErr := s.mcp.CallTool(r.Context(), sc.ResourceURL, bearer, req.Tool, req.Arguments)
+	// 8. Forward one tools/call upstream, if this pod has room for another.
+	if s.inflight != nil {
+		select {
+		case s.inflight <- struct{}{}:
+			defer func() { <-s.inflight }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error": "proxy_busy", "server": req.Server, "tool": req.Tool, "retry_after": 1,
+				"detail": fmt.Sprintf("arti is already relaying %d upstream calls; retry in a moment.", cap(s.inflight)),
+				"code":   http.StatusText(http.StatusServiceUnavailable),
+			})
+			return
+		}
+	}
+	result, callErr := s.mcp.CallTool(ctx, sc.ResourceURL, bearer, req.Tool, req.Arguments)
 	if errors.Is(callErr, mcpclient.ErrUnauthorized) {
 		// A 401 only means "re-consent" for oauth (OBO) servers — the stored
 		// token expired/was revoked. For auth:"none" servers (e.g. arti-self) a
@@ -539,11 +633,12 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 			s.writeAuthRequired(w, r.Context(), email, sc)
 			return
 		}
-		writeErr(w, http.StatusBadGateway, "upstream rejected the call (401) for server "+req.Server)
+		writeUpstreamCode(w, upstreamFailStatus, "upstream_error", req.Server, req.Tool,
+			"upstream rejected the call (401) for server "+req.Server)
 		return
 	}
 	if callErr != nil {
-		s.writeUpstreamErr(w, r, req.Server, req.Tool, callErr)
+		s.writeUpstreamErr(w, r, req.Server, req.Tool, timeout, callErr)
 		return
 	}
 	if len(result) == 0 {
@@ -659,17 +754,77 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 //
 // A cancelled request means the viewer closed the app mid-call, which is
 // neither an upstream nor a server fault, so it answers 499 and logs nothing. A
-// deadline is a real fault and stays logged: chi's 60s Timeout produced a
-// quarter of that prod day's failures, and those name the slowest upstreams.
-// httperr.ClientGone draws that line.
-func (s *Service) writeUpstreamErr(w http.ResponseWriter, r *http.Request, server, tool string, err error) {
+// deadline is a real fault and stays logged. httperr.ClientGone draws that line.
+//
+// Every failure carries a stable `error` code so an app can react to it
+// instead of pattern-matching a message; the status is always
+// upstreamFailStatus (see there for why not 502/504). "upstream_timeout": the
+// upstream may well have finished the work after arti stopped waiting (a
+// Snowflake statement keeps running and its result stays retrievable by
+// handle), so the right recovery is to resume, not to re-run — re-running is
+// how one slow query became three. "upstream_response_too_large": the fix is a
+// smaller page. "tool_error": a JSON-RPC error object, the tool itself
+// refused, so a retry cannot help. Anything else is "upstream_error".
+func (s *Service) writeUpstreamErr(w http.ResponseWriter, r *http.Request, server, tool string, timeout time.Duration, err error) {
 	if httperr.ClientGone(r, err) {
 		w.WriteHeader(httperr.StatusClientClosedRequest)
 		return
 	}
 	s.logger.Error("apps proxy: upstream failed",
-		"server", server, "tool", tool, "err", err)
-	writeErr(w, http.StatusBadGateway, "upstream: "+err.Error())
+		"server", server, "tool", tool, "timeout", timeout, "err", err)
+	var rpcErr *mcpclient.RPCError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		writeUpstreamCode(w, upstreamFailStatus, "upstream_timeout", server, tool,
+			fmt.Sprintf("upstream %s/%s did not answer within %s. Work the call started may still be running "+
+				"upstream; resume it (e.g. by statement handle) rather than re-running it, ask the tool to "+
+				"return sooner, or pass a larger timeout_ms to callTool (capped at %s).", server, tool, timeout, s.maxTimeout))
+	case errors.Is(err, mcpclient.ErrResponseTooLarge):
+		writeUpstreamCode(w, upstreamFailStatus, "upstream_response_too_large", server, tool,
+			fmt.Sprintf("upstream %s/%s returned more than %d bytes in one response; request smaller pages "+
+				"(e.g. max_rows/max_bytes).", server, tool, mcpclient.MaxResponseBytes))
+	case errors.As(err, &rpcErr):
+		writeUpstreamCode(w, upstreamFailStatus, "tool_error", server, tool,
+			fmt.Sprintf("upstream %s/%s returned error %d: %s", server, tool, rpcErr.Code, rpcErr.Message))
+	default:
+		writeUpstreamCode(w, upstreamFailStatus, "upstream_error", server, tool, "upstream: "+err.Error())
+	}
+}
+
+// writeInProcessErr answers a failed in-process arti tool call. A deadline is
+// the same timeout as any upstream's. Otherwise comments.WriteStatus and
+// artifacts.WriteStatus are the tables the REST front doors answer from, so a
+// conflict stays a 409 here rather than arriving as a generic failure; a target
+// the viewer cannot see reaches it as ErrNotFound (the access layer's own
+// choice, so an app can't probe), and 403 is reserved for a refusal on a
+// document the viewer CAN see. A 500 becomes upstreamFailStatus like any other
+// upstream fault.
+func (s *Service) writeInProcessErr(w http.ResponseWriter, r *http.Request, server, tool string, timeout time.Duration, err error) {
+	if errors.Is(err, context.DeadlineExceeded) || httperr.ClientGone(r, err) {
+		s.writeUpstreamErr(w, r, server, tool, timeout, err)
+		return
+	}
+	status, msg, ok := comments.WriteStatus(err)
+	code := "comment-error"
+	if !ok {
+		status, code, msg = artifacts.WriteStatus(err)
+	}
+	if status == http.StatusInternalServerError {
+		status, msg = upstreamFailStatus, "arti: "+msg
+	}
+	writeUpstreamCode(w, status, code, server, tool, msg)
+}
+
+// writeUpstreamCode is writeErr plus a machine-readable `error` code and the
+// server/tool the call was for.
+func writeUpstreamCode(w http.ResponseWriter, status int, code, server, tool, detail string) {
+	writeJSON(w, status, map[string]string{
+		"error":  code,
+		"server": server,
+		"tool":   tool,
+		"detail": detail,
+		"code":   http.StatusText(status),
+	})
 }
 
 // Rejection-log sampling: at most rejectLogBurst lines per rejectLogWindow,

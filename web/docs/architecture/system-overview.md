@@ -74,6 +74,10 @@ All of these are arti-server, distinguished by mount point and auth model:
   bearer-authed. A hand-maintained OpenAPI spec is served at `/openapi.yaml`
   (note it lags the code). See [Data model](data-model.md) and the
   [REST API reference](../reference/rest-api.md).
+- **Artifact views** — human-facing deliveries are recorded separately from
+  API, CLI, and MCP reads. Counts are scoped to a named slug across all its
+  versions, while each event retains the served version; viewer identities are
+  shown only to the document owner or an administrator.
 - **MCP server** — a minimal JSON-RPC 2.0 MCP server mounted at `/mcp` inside the
   authed group, exposing artifact operations as tools. Same auth as REST.
 - **Apps proxy** — the governed back end for APP artifacts: a sandboxed app's JS

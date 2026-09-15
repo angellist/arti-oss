@@ -72,7 +72,7 @@ Headless agents obtain a human-approved, upload-scoped token. See the
 |---|---|---|
 | `ARTI_DEVICE_TOKEN_TTL` | `24h` | Access-token lifetime for device tokens. |
 | `ARTI_DEVICE_TOKEN_MAX_TTL` | `720h` | Ceiling on how long a refreshable token family stays valid (30 days). |
-| `ARTI_DEVICE_MAX_UPLOAD_BYTES` | `26214400` | Per-request POST body cap for upload-scoped tokens (25 MiB). Also applies to [API-key](#api-keys) uploads. |
+| `ARTI_DEVICE_MAX_UPLOAD_BYTES` | `209715200` | Per-request POST body cap for upload-scoped tokens (200 MiB, matching the global limit). Also applies to [API-key](#api-keys) uploads. Lower it to hold a deployment's upload credentials below that. |
 | `ARTI_DEVICE_CODE_RPM` | `10` | Per-IP rate limit (requests/min) on the public `POST /auth/device/code`. `0` disables. |
 | `ARTI_OAUTH_REGISTER_RPM` | `10` | Per-IP rate limit (requests/min) on the public `POST /oauth/register` (MCP dynamic client registration). `0` disables. |
 
@@ -80,7 +80,7 @@ Headless agents obtain a human-approved, upload-scoped token. See the
 
 Self-serve, upload-scoped bearer keys minted at `POST /api/keys`. See the
 [API-key endpoints](rest-api.md#api-keys) and the [Using the API](../guides/api.md#api-keys-self-serve)
-guide. Upload enforcement (allowlist + 25 MiB body cap) is shared with the device flow
+guide. Upload enforcement (allowlist + body cap) is shared with the device flow
 above.
 
 | Variable | Default | Meaning |
@@ -111,6 +111,8 @@ The governed proxy for APP artifacts and the upstream MCP servers they may reach
 |---|---|---|
 | `ARTI_APP_MCP_SERVERS` | `""` | JSON map `name → { resource_url, auth, scope }` of upstream MCP servers, merged over the built-in defaults (`arti-self`, `llm`). A bad value fails startup. |
 | `ARTI_APP_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` source list for served APP HTML **and for served artifact HTML bodies** — which origins may iframe an arti app, or the full-page viewer's nested content frame (`X-Frame-Options` is dropped for those responses so this list is authoritative; it is checked against every ancestor, so the inner frame needs it whenever the viewer itself is embedded). Non-HTML bodies keep `X-Frame-Options: SAMEORIGIN`. Kept in sync with `ARTI_CATALOG_FRAME_ANCESTORS` (the build-time catalog-viewer default). |
+| `ARTI_APP_CALL_TIMEOUT_MAX` | `90s` | Cap on the per-call `timeout_ms` an APP may pass to `window.arti.callTool` (default when unset: 60s). Keep it under the edge's read timeout — arti's public ingress reads for 95s and Cloudflare for 100s — so a slow upstream yields arti's structured 503 `upstream_timeout`, not an edge error page. |
+| `ARTI_APP_CALL_MAX_INFLIGHT` | `16` | Upstream tool calls one arti-server process relays at once; each may buffer up to 16 MiB twice while parsed. Beyond it the proxy answers 503 `proxy_busy` with `Retry-After: 1`. `0` removes the bound. |
 
 ## OBO broker
 
@@ -152,7 +154,7 @@ shared secrets. Empty disables the `/embed/*` routes. See
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ARTI_SLACK_BOT_TOKEN` | `""` | Bot user OAuth token (`xoxb-…`) for the "Arti" Slack app; empty → comment-notification DMs disabled. Requires bot scopes `users:read.email`, `chat:write`, `im:write`. |
+| `ARTI_SLACK_BOT_TOKEN` | `""` | Bot user OAuth token (`xoxb-…`) for the "Arti" Slack app; empty → no DMs at all. Requires bot scopes `users:read.email`, `chat:write`, `im:write`. The token makes notifications **possible**; each person then chooses what they receive in Settings → Notifications (comment mentions default on, credential notifications default off), under one admin switch that can stop everything. |
 
 ## Web frontend (Next.js)
 

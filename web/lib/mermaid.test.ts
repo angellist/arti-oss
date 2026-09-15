@@ -114,4 +114,21 @@ describe("renderMermaidIn", () => {
     await renderMermaidIn(container);
     expect(render).toHaveBeenCalledTimes(2);
   });
+
+  // The theme lives in one attribute on <html>; this is the only consumer that
+  // reads it outside CSS, so a rename there goes unnoticed until a diagram
+  // renders dark ink on dark chrome.
+  it("hands mermaid a dark palette when the page is dark", async () => {
+    document.documentElement.dataset.theme = "dark";
+    render.mockResolvedValue({ svg: "<svg></svg>" });
+    initialize.mockClear();
+    vi.resetModules();
+    const fresh = await import("./mermaid");
+    const container = document.createElement("div");
+    container.innerHTML =
+      '<div class="mermaid" data-mermaid-placeholder><pre>flowchart TD\nA --> B</pre></div>';
+    await fresh.renderMermaidIn(container);
+    delete document.documentElement.dataset.theme;
+    expect(initialize.mock.calls[0][0].themeVariables.primaryTextColor).toBe("#ededed");
+  });
 });

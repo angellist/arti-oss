@@ -208,8 +208,8 @@ export function renderMarkdown(src: string): { frontmatter: string | null; html:
 // pre blocks live in globals.css (unlayered .prose/pre rules), not here.
 export const PROSE_CLASSNAME = `
   prose prose-sm prose-neutral mx-auto max-w-[800px] break-words
-  px-4 py-8 leading-[1.45]
-  sm:px-6 sm:py-10
+  px-4 py-5 leading-[1.45]
+  sm:px-6 sm:py-7
   prose-headings:font-semibold prose-headings:tracking-tight
   prose-h1:text-[1.57em] prose-h2:text-[1.28em] prose-h3:text-[1.06em]
   prose-h1:mt-0 prose-h1:mb-[15px] prose-h2:mt-[23px] prose-h2:mb-[9px] prose-h3:mt-[12px] prose-h3:mb-[4px]

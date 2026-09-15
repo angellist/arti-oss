@@ -9,7 +9,8 @@ import { useRailMode } from "@/lib/rail-context";
 import SideNavSearch from "./SideNavSearch";
 import SideNavPackage from "./SideNavPackage";
 import SideNavHelp from "./SideNavHelp";
-import SideNavUserMenu from "./SideNavUserMenu";
+import SideNavSettings from "./SideNavSettings";
+import SideNavAccount from "./SideNavAccount";
 import UploadButton from "./UploadButton";
 
 const COLLAPSE_KEY = "arti.rail.collapsed";
@@ -146,6 +147,7 @@ export default function SideNav() {
           // just below the search box (see SideNavSearch).
           <div className="space-y-4">
             <UploadButton />
+            <SideNavSettings />
             <SideNavPackage manifest={mode.manifest} selected={mode.selected} onSelect={mode.setSelected} />
           </div>
         ) : mode.kind === "help" ? (
@@ -159,8 +161,10 @@ export default function SideNav() {
           </Suspense>
         )}
       </div>
+      {/* The rail foot holds the identity and the one action that belongs to
+          it. Everything that used to share this menu is a tab under Settings. */}
       <div className="border-t border-neutral-100 px-4 py-3 text-[12px] text-neutral-500">
-        <SideNavUserMenu me={me} />
+        <SideNavAccount me={me} />
       </div>
     </>
   );
@@ -212,6 +216,9 @@ export default function SideNav() {
               // params (no pathname change), so usePathname alone
               // wouldn't catch them.
               const t = e.target as HTMLElement;
+              // A submenu trigger (NEW) is the exception: closing the drawer
+              // unmounts its menu before any item can be tapped.
+              if (t.closest('[aria-haspopup="menu"]')) return;
               if (t.closest("a, button")) setMobileOpen(false);
             }}
           >

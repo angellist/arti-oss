@@ -222,10 +222,63 @@ func (s *Service) shareMintAuthority(ctx context.Context, row sqlc.Artifact, cal
 	if admin {
 		return liveOwner, nil
 	}
-	if liveOwner != "" && !strings.EqualFold(liveOwner, caller) {
+	owner, err := s.store.DocOwner(ctx, row)
+	if err != nil {
+		return "", err
+	}
+	ambiguous, err := s.lineageAmbiguous(ctx, row, owner)
+	if err != nil {
+		return "", err
+	}
+	if ambiguous {
 		return "", errForbidden("this slug's ownership is ambiguous — its earliest live version was created by someone else, so external sharing is refused until that is resolved or an admin acts")
 	}
 	return liveOwner, nil
+}
+
+// lineageAmbiguous decides whether a slug's live content belongs to whoever
+// owns it. Two situations look identical from the outside — the live lineage
+// was written by someone who is not the owner — and only the timing separates
+// them:
+//
+//   - A HAND-OFF. The owner received the document from the person who wrote it.
+//     The live lineage predates the transfer, and refusing here would mean
+//     nobody could ever share a document they were given.
+//   - A RECLAIM. The previous owner archived the lineage and republished under
+//     the same name. Ownership does not move on archive, so the stored owner is
+//     still the transferee — who never received THIS content and must not be
+//     able to publish it to the internet.
+//
+// So a mismatch is ambiguous unless ownership was deliberately transferred and
+// the live lineage already existed when that happened. A slug whose ownership
+// was only ever claimed keeps the stricter rule: any mismatch is a dispute.
+//
+// This replaced a comparison against the CALLER, which read correctly only
+// while caller, owner and author could not diverge — true of every document
+// until ownership became transferable, and false of every one that has moved.
+func (s *Service) lineageAmbiguous(ctx context.Context, row sqlc.Artifact, owner string) (bool, error) {
+	if row.NamedSlug == nil || *row.NamedSlug == "" {
+		return false, nil
+	}
+	facts, err := s.store.LiveLineageFacts(ctx, *row.NamedSlug)
+	if err != nil {
+		if errors.Is(err, pgstore.ErrNoOwner) || errors.Is(err, pgstore.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	// Nothing live: nobody currently occupies the slug, and minting is refused
+	// on an archived document anyway.
+	if facts.LiveCreator == "" {
+		return false, nil
+	}
+	if strings.EqualFold(facts.LiveCreator, owner) {
+		return false, nil
+	}
+	if !facts.Transferred {
+		return true, nil
+	}
+	return facts.LiveCreatedAt.After(facts.OwnerSetAt), nil
 }
 
 // shareDocAuthority loads the artifact behind an id and applies shareAuthority.

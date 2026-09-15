@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/angellist/arti-oss/gen/sqlc"
@@ -48,5 +49,11 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (auth.Cl
 		defer cancel()
 		_ = a.store.TouchAPIKey(bg, id)
 	}(row.ID)
-	return auth.Claims{Email: row.OwnerEmail, Scopes: row.Scopes, Typ: auth.TokenTypeAPIKey}, nil
+	return auth.Claims{
+		Email:   row.OwnerEmail,
+		Scopes:  row.Scopes,
+		Typ:     auth.TokenTypeAPIKey,
+		KeyID:   uuid.UUID(row.ID.Bytes).String(),
+		KeyName: row.Name,
+	}, nil
 }

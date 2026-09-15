@@ -27,11 +27,13 @@ import (
 	"github.com/angellist/arti-oss/internal/auth"
 	"github.com/angellist/arti-oss/internal/comments"
 	"github.com/angellist/arti-oss/internal/config"
+	"github.com/angellist/arti-oss/internal/credusage"
 	"github.com/angellist/arti-oss/internal/embed"
 	"github.com/angellist/arti-oss/internal/groups"
 	"github.com/angellist/arti-oss/internal/httperr"
 	"github.com/angellist/arti-oss/internal/llm"
 	"github.com/angellist/arti-oss/internal/mcp"
+	"github.com/angellist/arti-oss/internal/notifysettings"
 	"github.com/angellist/arti-oss/internal/obo"
 	"github.com/angellist/arti-oss/internal/rbac"
 	"github.com/angellist/arti-oss/internal/roles"
@@ -167,7 +169,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	root.Use(chimid.RealIP)
 	root.Use(reqLogger(logger))
 	root.Use(chimid.Recoverer)
-	root.Use(chimid.Timeout(60 * time.Second))
+	root.Use(timeoutExcept(60*time.Second, apps.ProxyPath))
 	root.Use(securityHeaders)
 
 	// Public routes ─────────────────────────────────────────────────
@@ -345,11 +347,46 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		authMiddleware = auth.RequireAuth(authCfg)
 	}
 	commentsSvc := comments.NewService(pool, pgstoreInst, signer)
+	commentsSvc.SetRateLimit(cfg.Comments.GlobalRPM, cfg.Comments.ArtifactRPM)
 	// Slack DM notifications on comment events (nil when no bot token → off).
-	if notifier := slacknotify.New(cfg.Notifications.SlackBotToken, logger); notifier != nil {
+	notifier := slacknotify.New(cfg.Notifications.SlackBotToken, logger)
+	// Every Slack DM is gated on its recipient's own setting, under one
+	// deployment switch an admin can use to stop everything. A bot token makes
+	// notifications possible; who receives what is decided per person. Before
+	// this, the token alone turned them on and the only way to stop one
+	// misfiring was to roll the service back.
+	notifySettings := notifysettings.New(pgstoreInst, logger)
+	if notifier != nil {
+		notifier.SetGate(func(ctx context.Context, recipient, category string) bool {
+			return notifySettings.EnabledFor(ctx, recipient, notifysettings.Category(category))
+		})
 		commentsSvc.SetNotifier(notifier, cfg.Server.BaseURL)
-		logger.Info("slack comment notifications enabled")
+		svc.SetNotifier(notifier)
+		slacknotify.SetBaseURL(cfg.Server.BaseURL)
+		logger.Info("slack notifications available; each category is off until an admin enables it")
+	} else {
+		logger.Info("slack notifications unavailable (no bot token)")
 	}
+
+	// Credential usage: which credential is used from where, recorded for all
+	// of them, and a DM to a KEY's owner the first time it answers from a new
+	// network. A nil notifier leaves the records in place and drops the DM.
+	var newSourceAlert func(context.Context, credusage.NewSource)
+	if notifier != nil {
+		newSourceAlert = func(ctx context.Context, ev credusage.NewSource) {
+			name := ev.CredName
+			if name == "" {
+				name = ev.Cred
+			}
+			notifier.NotifyNewCredentialSource(ctx, ev.OwnerEmail, slacknotify.NewCredentialSource{
+				CredName: name, Network: ev.Network, IP: ev.IP, UserAgent: ev.UserAgent, Writes: ev.Writes,
+			})
+		}
+	}
+	credRecorder := credusage.New(pgstoreInst, newSourceAlert, logger).
+		WithAlertGate(func(ctx context.Context, owner string) bool {
+			return notifySettings.EnabledFor(ctx, owner, notifysettings.CredentialNewSource)
+		})
 	// Inject the comments overlay into served HTML pages, authed by a scoped
 	// token minted here.
 	svc.SetEmbedTokenFn(commentsSvc.SignEmbedToken)
@@ -453,11 +490,12 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	}
 
 	// One MCP server instance, shared by the /mcp route and the apps proxy's
-	// in-process arti-read short-circuit (so an APP can read other artifacts as
-	// the viewer with no OBO consent popup; see apps.Service.SetArtiReader).
+	// in-process arti short-circuit (so an APP can read AND write artifacts as
+	// the viewer without leaving the cluster; see apps.Service.SetArtiTools).
 	mcpSrv := mcp.NewServer(svc, commentsSvc)
 	appsSvc := apps.New(pgstoreInst, signer, appServers, oboBroker, completer, logger)
-	appsSvc.SetArtiReader(mcpSrv)
+	appsSvc.SetLimits(time.Duration(cfg.Apps.CallTimeoutMax), cfg.Apps.CallMaxInflight)
+	appsSvc.SetArtiTools(mcpSrv)
 	svc.SetAppTokenFn(appsSvc.SignAppToken)
 	svc.SetAppTokenVerifyFn(appsSvc.VerifyEmbedToken)
 	svc.SetEmbedFilesTokenFn(appsSvc.SignEmbedFilesToken)
@@ -530,16 +568,31 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		r.Use(gzipRequestBody(int64(artifacts.MaxUploadBytes)))
 		r.Use(authMiddleware)
 		r.Use(auth.EnforceUploadScope(pgstoreInst, int64(cfg.Auth.Device.MaxUploadBytes)))
+		// After auth: the credential it resolves is what gets counted, and
+		// what the access log above needs handed back to it.
+		r.Use(captureLogIdent)
+		r.Use(credRecorder.Middleware)
 		r.Post("/auth/device/revoke", auth.DeviceRevokeHandler(devCfg))
 		artifacts.Mount(r, svc)
 		artifacts.MountShareAdmin(r, svc, ipRateLimiter(cfg.Share.MintRPM))
 		commentsSvc.Mount(r)
 		admin.NewService(pool, pgstoreInst).Mount(r)
+		notifysettings.NewService(notifySettings, func(ctx context.Context, email string) (bool, error) {
+			return pgstoreInst.HasPermission(ctx, email, rbac.ManageArtifacts)
+		}, notifier != nil).Mount(r)
 		groups.NewService(pgstoreInst).Mount(r)
 		roles.NewService(pgstoreInst).Mount(r)
-		apikeys.NewService(pgstoreInst, cfg.Auth.APIKeys.MaxTTL.Std(), func(ctx context.Context, email string) (bool, error) {
+		keysSvc := apikeys.NewService(pgstoreInst, cfg.Auth.APIKeys.MaxTTL.Std(), func(ctx context.Context, email string) (bool, error) {
 			return pgstoreInst.HasPermission(ctx, email, rbac.ManageAPIKeys)
-		}).Mount(r, ipRateLimiter(cfg.Auth.APIKeys.MintRPM))
+		}).WithUsage(pgstoreInst)
+		if notifier != nil {
+			keysSvc.OnMint(func(ctx context.Context, ev apikeys.Minted) {
+				notifier.NotifyKeyMinted(ctx, ev.OwnerEmail, slacknotify.MintedKey{
+					Name: ev.Name, KeyPrefix: ev.KeyPrefix, Scopes: ev.Scopes, ExpiresAt: ev.ExpiresAt,
+				})
+			})
+		}
+		keysSvc.Mount(r, ipRateLimiter(cfg.Auth.APIKeys.MintRPM))
 		r.Handle("/mcp", mcpSrv.Handler())
 	})
 	root.Group(func(r chi.Router) {
@@ -549,6 +602,8 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 			r.Use(auth.RequireAuthOrRedirect(authCfg, "/auth/login"))
 		}
 		r.Use(auth.EnforceUploadScope(pgstoreInst, int64(cfg.Auth.Device.MaxUploadBytes)))
+		r.Use(captureLogIdent)
+		r.Use(credRecorder.Middleware)
 		artifacts.MountApp(r, svc)
 	})
 
@@ -595,12 +650,19 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// Credential usage counts live in memory between flushes; the flush loop
+	// stops with the server so the last interval is written, not dropped.
+	recorderCtx, stopRecorder := context.WithCancel(context.Background())
+	defer stopRecorder()
+	go credRecorder.Run(recorderCtx)
+
 	// Graceful shutdown on SIGTERM/SIGINT.
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
 		logger.Info("shutting down")
+		stopRecorder()
 		shutdownCtx, c2 := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c2()
 		_ = srv.Shutdown(shutdownCtx)
@@ -626,6 +688,11 @@ func reqLogger(l *slog.Logger) func(http.Handler) http.Handler {
 			}
 			start := time.Now()
 			ww := chimid.NewWrapResponseWriter(w, r.ProtoMajor)
+			// This middleware sits above authentication, so the context it
+			// holds predates the caller's identity. captureLogIdent, inside
+			// the authed group, fills this holder on the way past.
+			ident := &logIdent{}
+			r = r.WithContext(context.WithValue(r.Context(), logIdentKey{}, ident))
 			next.ServeHTTP(ww, r)
 
 			// A client that hangs up mid-request cancels the request context,
@@ -652,12 +719,49 @@ func reqLogger(l *slog.Logger) func(http.Handler) http.Handler {
 			if status >= 500 && httperr.ClientGone(r, nil) {
 				status = httperr.StatusClientClosedRequest
 			}
-			l.Info("http",
+			// Identity is logged alongside the request because `who did this`
+			// was previously unanswerable from arti's logs: an API key
+			// authenticates as its owner, so the email alone cannot separate a
+			// person from an agent holding their key. cred names the
+			// credential; ip is the edge-managed client address.
+			attrs := []any{
 				"m", r.Method, "p", redactLogPath(r.URL.Path),
 				"s", status, "b", ww.BytesWritten(),
-				"d", time.Since(start).Milliseconds())
+				"d", time.Since(start).Milliseconds(),
+			}
+			if ident.email != "" {
+				attrs = append(attrs, "email", ident.email)
+			}
+			if ident.cred != "" {
+				attrs = append(attrs, "cred", ident.cred, "ip", ident.ip)
+			}
+			l.Info("http", attrs...)
 		})
 	}
+}
+
+// logIdent carries the caller's identity from inside the authed group back out
+// to the access log. It exists because `who made this request` was previously
+// unanswerable from arti's logs, and an email alone cannot answer it: an API
+// key authenticates as its owner, so a person and an agent holding that
+// person's key are the same line.
+type logIdent struct{ email, cred, ip string }
+
+type logIdentKey struct{}
+
+// captureLogIdent records the resolved identity for the access log. Register it
+// after the auth middleware; it is a no-op on routes the logger does not wrap.
+// Writes happen on the request's own goroutine and are read only after the
+// handler chain returns, so the holder needs no lock.
+func captureLogIdent(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h, ok := r.Context().Value(logIdentKey{}).(*logIdent); ok {
+			h.email = auth.EmailFromContext(r.Context())
+			h.cred = auth.CredentialFromContext(r.Context()).Ref()
+			h.ip = r.RemoteAddr
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // redactLogPath masks bearer credentials embedded in URL paths before logging,
@@ -744,4 +848,19 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "SAMEORIGIN")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// timeoutExcept is chi's Timeout for every route but one: the apps proxy sets
+// its own per-call deadline, which may exceed the blanket one.
+func timeoutExcept(d time.Duration, path string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		timed := chimid.Timeout(d)(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == path {
+				next.ServeHTTP(w, r)
+				return
+			}
+			timed.ServeHTTP(w, r)
+		})
+	}
 }

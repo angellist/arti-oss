@@ -1,4 +1,5 @@
 import CommentsLayer from "./CommentsLayer";
+import FullPageExit from "./FullPageExit";
 import FullPageHtmlFrame from "./FullPageHtmlFrame";
 import DiagramFigure from "./DiagramSvg";
 import { parseDiagram, type DiagramDoc } from "@/lib/diagram";
@@ -7,6 +8,7 @@ import { Frontmatter, renderMarkdown, PROSE_CLASSNAME } from "@/lib/markdown";
 import { fullPageKind, isJSONContentType, prettyPrintJSON } from "@/lib/viewer";
 import { encodeFilePath } from "@/lib/arti";
 import MermaidRenderer from "./MermaidRenderer";
+import ViewTracker from "./ViewTracker";
 
 // Standalone "no-chrome" view of an artifact body. Used when the URL
 // carries `?v=full` (or the legacy `?view=fullpage`).
@@ -68,6 +70,13 @@ export default function FullPageView({
   // text-select + pin), which the outer overlay can't do across the
   // sandbox boundary.
   const comments = artifactID && commentsEnabled ? <CommentsLayer artifactId={artifactID} me={me} contentType={contentType} fullPage /> : null;
+  const tracker = artifactID ? <ViewTracker artifactID={artifactID} /> : null;
+  // Every kind below renders it: the view has no other control, so a branch
+  // that forgets the bubble is a branch with no way back to the viewer. Keyed
+  // on the document like the Frontmatter disclosure below, so the theme it
+  // holds cannot outlive the page it was measured from.
+  const docKey = `${artifactID ?? ""}:${filePath ?? ""}`;
+  const exit = <FullPageExit key={docKey} />;
   const kind = fullPageKind(contentType);
   // Non-text kinds (image/pdf/binary) render from the raw same-origin bytes
   // URL — never by coercing `body` (which for these is raw bytes-as-string)
@@ -99,6 +108,7 @@ export default function FullPageView({
     const src = rawSrc ? `${rawSrc}?ctx=fullpage` : undefined;
     return (
       <>
+        {tracker}
         {/* The iframe lives in FullPageHtmlFrame (a client component) so it can
           listen for the injected page's file-nav reports and keep ?file= in
           sync. It sizes itself against a wrapper layer rather than the viewport
@@ -113,6 +123,7 @@ export default function FullPageView({
           zoom={textScale}
         />
         {comments}
+        {exit}
       </>
     );
   }
@@ -132,13 +143,15 @@ export default function FullPageView({
         className="arti-fullpage-layer overflow-y-auto overflow-x-hidden bg-white"
         style={{ "--arti-text-scale": textScale } as React.CSSProperties}
       >
+        {tracker}
         {comments}
+        {exit}
         <article data-arti-doc className={PROSE_CLASSNAME}>
           {/* Keyed on the document, like MarkdownBody's docKey: the disclosure's
               open/closed state lives in the DOM, so a client-side navigation to
               another full-page doc must not inherit the previous one's. */}
           {frontmatter !== null ? (
-            <Frontmatter key={`${artifactID ?? ""}:${filePath ?? ""}`} raw={frontmatter} />
+            <Frontmatter key={docKey} raw={frontmatter} />
           ) : null}
           <div dangerouslySetInnerHTML={{ __html: html }} />
         </article>
@@ -151,7 +164,9 @@ export default function FullPageView({
   if (kind === "diagram") {
     return (
       <div className="arti-fullpage-layer bg-white p-4">
+        {tracker}
         {comments}
+        {exit}
         <FullPageDiagram body={body} title={title} />
       </div>
     );
@@ -161,7 +176,9 @@ export default function FullPageView({
   if (kind === "image" && rawSrc) {
     return (
       <div className="arti-fullpage-layer flex items-center justify-center overflow-auto bg-white p-4">
+        {tracker}
         {comments}
+        {exit}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={rawSrc} alt={title} className="max-h-full max-w-full object-contain" />
       </div>
@@ -171,8 +188,10 @@ export default function FullPageView({
   if (kind === "pdf" && rawSrc) {
     return (
       <>
+        {tracker}
         <iframe src={rawSrc} title={title} className="arti-fullpage-layer block w-full border-0 bg-white" />
         {comments}
+        {exit}
       </>
     );
   }
@@ -181,7 +200,9 @@ export default function FullPageView({
   if (kind === "binary" && rawSrc) {
     return (
       <div className="arti-fullpage-layer flex items-center justify-center bg-white p-4">
+        {tracker}
         {comments}
+        {exit}
         <a
           href={`${rawSrc}?download=1`}
           download
@@ -199,10 +220,12 @@ export default function FullPageView({
   const displayBody = isJSONContentType(contentType) ? prettyPrintJSON(body) : body;
   return (
     <div
-      className="arti-fullpage-layer overflow-y-auto overflow-x-hidden bg-white p-4 sm:p-6"
+      className="arti-fullpage-layer overflow-y-auto overflow-x-hidden bg-white p-3 sm:p-5"
       style={{ "--arti-text-scale": textScale } as React.CSSProperties}
     >
+      {tracker}
       {comments}
+      {exit}
       <pre data-arti-doc className="whitespace-pre-wrap break-words font-mono text-sm">{displayBody}</pre>
     </div>
   );

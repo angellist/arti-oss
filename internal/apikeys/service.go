@@ -29,11 +29,22 @@ type serviceStore interface {
 	RevokeAPIKeyByID(ctx context.Context, id pgtype.UUID) (int64, error)
 }
 
+// Minted describes a key that has just been created, for notifying its owner.
+type Minted struct {
+	OwnerEmail string
+	Name       string
+	KeyPrefix  string
+	Scopes     []string
+	ExpiresAt  time.Time
+}
+
 // Service handles the mint/list/revoke HTTP layer for API keys.
 type Service struct {
 	store        serviceStore
 	maxTTL       time.Duration
 	canManageAll func(ctx context.Context, email string) (bool, error)
+	notifyMint   func(ctx context.Context, ev Minted)
+	usage        usageStore
 }
 
 // NewService returns a Service backed by store with the given TTL cap.
@@ -44,11 +55,22 @@ func NewService(store serviceStore, maxTTL time.Duration, canManageAll func(ctx 
 	return &Service{store: store, maxTTL: maxTTL, canManageAll: canManageAll}
 }
 
+// OnMint registers a notifier called after each successful mint, so the owner
+// of the identity a key was created under always hears about it. Called in a
+// goroutine; a nil notifier disables the notification.
+func (s *Service) OnMint(fn func(ctx context.Context, ev Minted)) { s.notifyMint = fn }
+
+// WithUsage attaches the credential-usage reader behind GET /api/keys/usage.
+// Without it that route answers an empty record rather than failing, so the
+// settings page works against a deployment that has no usage store wired.
+func (s *Service) WithUsage(u usageStore) *Service { s.usage = u; return s }
+
 // Mount registers the API key routes on r. mintLimiter is applied only to POST
 // (the mint path); list and revoke are authenticated but not separately rate-limited.
 func (s *Service) Mount(r chi.Router, mintLimiter func(http.Handler) http.Handler) {
 	r.With(mintLimiter).Post("/api/keys", s.httpCreate)
 	r.Get("/api/keys", s.httpList)
+	r.Get("/api/keys/usage", s.httpUsage)
 	r.Delete("/api/keys/{id}", s.httpRevoke)
 }
 
@@ -104,8 +126,23 @@ func toView(row sqlc.ApiKey) apiKeyView {
 
 func (s *Service) httpCreate(w http.ResponseWriter, r *http.Request) {
 	// Belt-and-suspenders: api keys can't mint keys.
-	if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims.Typ == "api-key" {
+	if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims.Typ == auth.TokenTypeAPIKey {
 		writeErr(w, http.StatusForbidden, "api keys cannot mint other keys")
+		return
+	}
+	// Creating a credential is a person's act, so it takes the credential only
+	// a person has: the browser session. A CLI or MCP bearer authenticates as
+	// the same user with the same claims, and an agent holding one was minting
+	// year-long keys under its owner's name that the owner never saw. Those
+	// callers keep every other route; they lose this one.
+	if cred := auth.CredentialFromContext(r.Context()); !cred.FromBrowser() {
+		if cred.PredatesSessionMarker() {
+			writeErr(w, http.StatusForbidden,
+				"this browser session predates key-minting checks; sign out and sign in again, then retry")
+			return
+		}
+		writeErr(w, http.StatusForbidden,
+			"API keys are minted in the web UI only (Settings → API Keys); a bearer token cannot mint a key")
 		return
 	}
 	email := auth.EmailFromContext(r.Context())
@@ -178,6 +215,21 @@ func (s *Service) httpCreate(w http.ResponseWriter, r *http.Request) {
 		"id", uuid.UUID(row.ID.Bytes).String(),
 		"scopes", body.Scopes,
 	)
+
+	if s.notifyMint != nil {
+		ev := Minted{
+			OwnerEmail: email,
+			Name:       row.Name,
+			KeyPrefix:  row.KeyPrefix,
+			Scopes:     row.Scopes,
+			ExpiresAt:  row.ExpiresAt.Time,
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			s.notifyMint(ctx, ev)
+		}()
+	}
 
 	writeJSON(w, http.StatusCreated, createdKeyView{
 		apiKeyView: toView(row),

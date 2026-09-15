@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { fileParamSearch, resolvePackageEntry } from "@/lib/viewer";
+import { useHtmlFitZoom } from "@/lib/useViewport";
 import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
 
 // The full-page HTML iframe, plus the listener that keeps the browser URL
@@ -44,6 +45,10 @@ export default function FullPageHtmlFrame({
   // no-op and chained navigations don't rewrite the URL redundantly.
   const currentFile = useRef<string | null>(initialFile ?? null);
   useExternalLinkMessage(iframeRef);
+
+  // Fit-to-width on a narrow viewport (see htmlFitZoom). 1 on the server, so
+  // the SSR markup is the desktop one and only the client ever scales down.
+  const fit = useHtmlFitZoom();
 
   useEffect(() => {
     // No sibling files (single HTML artifact / srcDoc fallback) ⇒ nothing to
@@ -97,7 +102,10 @@ export default function FullPageHtmlFrame({
         {...(src ? { src } : { srcDoc })}
         title={title}
         className="block h-full w-full border-0 bg-white"
-        style={zoom === 1 ? undefined : { zoom }}
+        // The reader's text scale and the fit-to-width factor are one zoom:
+        // both change how large the authored layout renders, and the frame has
+        // one such property.
+        style={zoom * fit === 1 ? undefined : { zoom: zoom * fit }}
       />
     </div>
   );

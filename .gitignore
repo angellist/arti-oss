@@ -105,3 +105,7 @@ samples/
 # Playwright MCP scratch artifacts (browser snapshots / consoles)
 .playwright-mcp/
 build*-snapshot.md
+
+# Agent worktrees created outside .claude/ (disposable checkouts, never
+# check them in).
+.wt/

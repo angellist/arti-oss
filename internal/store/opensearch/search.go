@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/angellist/arti-oss/internal/paging"
 )
 
 // SearchInput mirrors pgstore.ListInput for the subset of filters
@@ -53,9 +55,7 @@ func (c *Client) Search(ctx context.Context, in SearchInput) (SearchResult, erro
 	if c == nil {
 		return SearchResult{}, fmt.Errorf("opensearch: client not configured")
 	}
-	if in.Limit <= 0 || in.Limit > 500 {
-		in.Limit = 50
-	}
+	in.Limit = paging.ClampLimit(in.Limit)
 	if in.Offset < 0 {
 		in.Offset = 0
 	}

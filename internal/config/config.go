@@ -31,6 +31,7 @@ type Config struct {
 	Apps          Apps          `yaml:"apps"`
 	Embedding     Embedding     `yaml:"embedding"`
 	Share         Share         `yaml:"share"`
+	Comments      Comments      `yaml:"comments"`
 	Notifications Notifications `yaml:"notifications"`
 	LLM           LLM           `yaml:"llm"`
 }
@@ -156,6 +157,13 @@ type Share struct {
 	MintRPM int      `yaml:"mint_rpm"`
 }
 
+// Comments configures comment writes and notifications. RPM knobs are keyed by
+// principal, not client IP, so programmatic callers cannot share an ingress bucket.
+type Comments struct {
+	GlobalRPM   int `yaml:"global_rpm"`
+	ArtifactRPM int `yaml:"artifact_rpm"`
+}
+
 // OBO configures the on-behalf-of OAuth broker.
 type OBO struct {
 	CallbackBase string `yaml:"callback_base"` // empty → Server.BaseURL
@@ -184,6 +192,12 @@ type Apps struct {
 	// itself moves into configuration data.
 	MCPServersJSON string `yaml:"-"`
 	FrameAncestors string `yaml:"frame_ancestors"`
+	// CallTimeoutMax caps the per-call timeout_ms an app may request through
+	// the tool proxy. Keep it under the edge's read timeout.
+	CallTimeoutMax Duration `yaml:"call_timeout_max"`
+	// CallMaxInflight bounds concurrent upstream tool calls per process; 0
+	// removes the bound.
+	CallMaxInflight int `yaml:"call_max_inflight"`
 }
 
 // Embedding configures embed surfaces. The JSON carries per-surface shared

@@ -1,5 +1,5 @@
 # Public release: on a version tag, produce CLI + server archives with
-# checksums and a conventional-commits changelog via goreleaser.
+# checksums, and publish the tag's CHANGELOG.md section as the release body.
 name: release
 
 on:
@@ -22,10 +22,23 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Fails the release if the tag has no section, so a tag can never ship
+      # with an empty or someone else's notes.
+      - name: Extract release notes for this tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## " v " " { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md || { echo "no CHANGELOG.md section for $GITHUB_REF_NAME"; exit 1; }
+          cat release-notes.md
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes=release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

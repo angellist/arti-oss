@@ -225,10 +225,9 @@ exactly these operations:
 Everything else — `DELETE`, `PATCH`, `suggest-metadata`, MCP, admin, comments —
 is `403`. Two more guardrails apply on every upload-scoped request:
 
-- **Body cap.** Upload requests are limited to 25 MiB by default
-  (`ARTI_DEVICE_MAX_UPLOAD_BYTES`); overflow is `413`. This is tighter than the
-  200 MiB global create limit because upload tokens are meant for modest sandbox
-  output.
+- **Body cap.** Upload requests are limited to 200 MiB by default
+  (`ARTI_DEVICE_MAX_UPLOAD_BYTES`); overflow is `413`. That matches the global
+  create limit, so an upload credential is not the tighter path.
 - **Live revocation.** A long-lived token's family is re-checked on every call.
   Revoke it (or let it expire) and the token stops working immediately, before
   its 24h access JWT would otherwise lapse.

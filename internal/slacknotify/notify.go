@@ -80,7 +80,40 @@ type Notifier struct {
 	client slackClient
 	cache  *idCache
 	log    *slog.Logger
+	// allow decides, per recipient and per send, whether this message may go
+	// out. It takes the RECIPIENT because a notification is that person's to
+	// refuse, and it is consulted at send time rather than at startup so a
+	// change stops the next message without a deploy — the thing that was
+	// missing when the only way to stop one was to roll the service back. A nil
+	// allow means nothing is sent.
+	allow func(ctx context.Context, recipient, category string) bool
 }
+
+// SetGate installs the per-send permission check. Until it is called, the
+// notifier sends nothing: a deployment that has not decided is a quiet one.
+func (n *Notifier) SetGate(allow func(ctx context.Context, recipient, category string) bool) {
+	if n == nil {
+		return
+	}
+	n.allow = allow
+}
+
+// permits reports whether this category may be sent to this recipient now.
+func (n *Notifier) permits(ctx context.Context, recipient, category string) bool {
+	if n == nil || n.allow == nil {
+		return false
+	}
+	return n.allow(ctx, recipient, category)
+}
+
+// Category values, matching internal/notifysettings. They are strings here to
+// keep the notifier free of a dependency on the settings package.
+const (
+	CategoryComments            = "notifications.slack.comments"
+	CategoryCredentialMint      = "notifications.slack.credential_mint"
+	CategoryCredentialNewSource = "notifications.slack.credential_new_source"
+	CategoryOwnerTransfer       = "notifications.slack.owner_transfer"
+)
 
 // New builds a Notifier for the given bot user OAuth token. It returns nil
 // when the token is empty: callers treat a nil *Notifier as "notifications
@@ -114,6 +147,11 @@ func (n *Notifier) Notify(ctx context.Context, ev Event) {
 	}
 	owner := normEmail(ev.Owner)
 	for _, email := range recipients(ev) {
+		// Per recipient, not per event: one person muting comment mentions must
+		// not silence the thread's other participants.
+		if !n.permits(ctx, email, CategoryComments) {
+			continue
+		}
 		userID, ok := n.resolve(ctx, email)
 		if !ok {
 			continue
@@ -265,4 +303,40 @@ func slackEscape(s string) string {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	return s
+}
+
+// OwnerTransfer is a document changing hands: one recipient, one message.
+type OwnerTransfer struct {
+	Recipient     string
+	PreviousOwner string
+	ActorName     string // whoever performed it; an admin need not be the previous owner
+	Title         string
+	ArtifactURL   string
+}
+
+// NotifyOwnerTransfer DMs the new owner. Failures are logged and dropped — the
+// transfer has already committed.
+func (n *Notifier) NotifyOwnerTransfer(ctx context.Context, ev OwnerTransfer) {
+	if n == nil || ev.Recipient == "" {
+		return
+	}
+	if !n.permits(ctx, ev.Recipient, CategoryOwnerTransfer) {
+		return
+	}
+	userID, ok := n.resolve(ctx, ev.Recipient)
+	if !ok {
+		return
+	}
+	by := ev.ActorName
+	if by == "" {
+		by = ev.PreviousOwner
+	}
+	msg := by + " made you the owner of *" + slackEscape(ev.Title) + "*"
+	if ev.PreviousOwner != "" && !strings.EqualFold(ev.PreviousOwner, ev.ActorName) {
+		msg += " (previously " + ev.PreviousOwner + ")"
+	}
+	msg += "\nYou now control its access, comments and share links.\n" + ev.ArtifactURL
+	if err := n.client.PostDM(ctx, userID, msg); err != nil {
+		n.log.Warn("slacknotify: owner-transfer DM failed", "email", ev.Recipient, "err", err)
+	}
 }

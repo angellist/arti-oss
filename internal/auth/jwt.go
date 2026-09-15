@@ -80,6 +80,12 @@ const UploadScope = "upload"
 const (
 	TokenTypeCLI = "cli"
 	TokenTypeMCP = "mcp"
+	// TokenTypeSession marks the arti_session cookie minted by
+	// loginFinisher.finish. It exists because a CLI access token is otherwise
+	// claim-for-claim identical to a session, so a caller could present its own
+	// bearer in a Cookie header and be treated as a person at a browser. Only
+	// routes that must have a real browser consult it (see Credential).
+	TokenTypeSession = "session"
 	// TokenTypeAPIKey marks claims minted from an opaque arti_ API key
 	// (internal/apikeys) — a service credential, not a person at a browser.
 	TokenTypeAPIKey = "api-key"
@@ -103,7 +109,9 @@ func (c Claims) IsUploadScoped() bool { return containsString(c.Scopes, UploadSc
 // guard on the refresh path (family, upload), kept explicit so the
 // intent survives a change to what the positive clauses admit.
 func (c Claims) IsSessionCredential() bool {
-	return c.Typ == "" && c.Fam == "" &&
+	// Typ is "" on cookies minted before TokenTypeSession existed; they stay
+	// session credentials until they expire (7 days).
+	return (c.Typ == "" || c.Typ == TokenTypeSession) && c.Fam == "" &&
 		containsString(c.Scopes, "user") && !containsString(c.Scopes, "refresh") &&
 		!c.IsEmbedScoped() && !c.IsAppScoped() && !c.IsUploadScoped()
 }
@@ -134,6 +142,13 @@ type Claims struct {
 	Fam     string        `json:"fam,omitempty"` // device-token family id (upload tokens only)
 	Typ     string        `json:"typ,omitempty"` // refresh-token flow binding (H7): TokenTypeCLI / TokenTypeMCP
 	TTL     time.Duration `json:"-"`
+
+	// KeyID and KeyName identify the api_keys row an API-key bearer resolved
+	// to, for write attribution and usage records. `json:"-"` is load-bearing:
+	// these are filled in-process by the API-key rung and must never be signed
+	// into a JWT, where a caller could then supply them.
+	KeyID   string `json:"-"`
+	KeyName string `json:"-"`
 }
 
 type JWTSigner struct{ key []byte }

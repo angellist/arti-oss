@@ -241,6 +241,40 @@ func TestHandleDoc_SlugNotAllowed(t *testing.T) {
 	}
 }
 
+func TestHandleDoc_RefusalsStayFrameable(t *testing.T) {
+	// A refusal the embedder cannot render is a refusal nobody can diagnose: the
+	// browser reports "refused to connect" and the reason stays in a body no one
+	// sees. Each of these must drop X-Frame-Options and scope framing by CSP
+	// instead, so the surface's own origins get the message.
+	for _, c := range []struct {
+		name, target string
+		want         int
+	}{
+		{"bad secret", "/embed/front?slug=deployment-ctx-c&auth_secret=wrong", http.StatusForbidden},
+		{"missing slug", "/embed/all?auth_secret=S2", http.StatusBadRequest},
+		{"slug not allowed", "/embed/front?slug=evil-slug&auth_secret=S", http.StatusForbidden},
+	} {
+		rec := do(router(&fakeArt{serveOK: true}, fakeTok{}), c.target)
+		if rec.Code != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, rec.Code, c.want)
+		}
+		if got := rec.Header().Get("X-Frame-Options"); got != "" {
+			t.Errorf("%s: kept X-Frame-Options %q, so the embedder sees a connection error", c.name, got)
+		}
+		if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors") {
+			t.Errorf("%s: no frame-ancestors in CSP %q — framing would be unrestricted", c.name, csp)
+		}
+	}
+}
+
+func TestHandleDoc_SlugRefusalNamesTheSlug(t *testing.T) {
+	// The slug the caller asked for is the one fact that makes this actionable.
+	rec := do(router(&fakeArt{serveOK: true}, fakeTok{}), "/embed/front?slug=evil-slug&auth_secret=S")
+	if !strings.Contains(rec.Body.String(), "evil-slug") {
+		t.Errorf("refusal did not name the slug: %q", rec.Body.String())
+	}
+}
+
 func TestHandleDoc_ServesWithSurfaceContext(t *testing.T) {
 	art := &fakeArt{serveOK: true}
 	rec := do(router(art, fakeTok{}), "/embed/front?slug=deployment-ctx-cnv_1&version=3&auth_secret=S")

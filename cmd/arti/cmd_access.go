@@ -9,7 +9,7 @@ import (
 // AccessCmd shows or edits an artifact's access control without minting a new
 // version. Access is a property of the DOCUMENT (DD-0055): an edit made
 // through any version applies to every version of the slug, and only the
-// slug's owner (its earliest version's creator) or an admin may change it.
+// document's owner (see `arti owner`) or an admin may change it.
 //
 //	arti access my-doc                                   # show current access
 //	arti access my-doc --access '*@example.com'          # domain-readable
@@ -116,7 +116,7 @@ func printAccess(meta map[string]any) {
 func renderPatterns(v any) string {
 	raw, _ := v.([]any)
 	if len(raw) == 0 {
-		return "(creator-only)"
+		return "(owner-only)"
 	}
 	parts := make([]string, 0, len(raw))
 	for _, e := range raw {

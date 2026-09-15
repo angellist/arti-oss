@@ -95,7 +95,7 @@ Patterns match reader email or a group: `--access '*@example.com'`,
   and `access` alike. Absent = writers follow readers.
 - **Access is per-DOCUMENT, not per-version:** an access pair that differs from the
   slug's current one applies to every version (archived included), and only the slug's
-  owner (its earliest version's creator) or an admin may change it. Re-sending the
+  owner (its first version's creator, unless transferred) or an admin may change it. Re-sending the
   current pair is always a legal no-op.
 - **`arti access <slug>`** shows the current read/write lists; with flags it edits them
   in place — no new version. This is the way to fix visibility on something already

@@ -14,6 +14,8 @@ function info(over: Partial<ArtifactInfo> = {}): ArtifactInfo {
     size_bytes: 10,
     sha256: "abc",
     creator: "tian@example.com",
+    written_via: null,
+    written_via_name: null,
     scopes: ["a:reports"],
     labels: ["report", "arti"],
     allowed_access: ["*"],

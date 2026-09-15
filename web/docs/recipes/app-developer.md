@@ -147,8 +147,8 @@ re-assemble template + data into one artifact: ship new data (or change the
 param), and the app stays put.
 
 Allowlist arti's read tools and read another artifact **as the signed-in
-viewer**. These run in-process (same access as the viewer, **no consent
-popup**), so they work even in local dev where no OBO upstream is wired:
+viewer**. Every arti tool runs in-process (same access as the viewer, **no
+consent popup**), so they work in local dev where no OBO upstream is wired:
 
 ```json
 "tools": [
@@ -174,10 +174,9 @@ const { artifacts } = await window.arti.search({
 `order_by` is one of `created | title | type | slug | version | creator | scope`
 (default `created`) and `order_dir` is `asc | desc` (default `desc`) — so
 `order_by:"created"` gets the latest. These sugar helpers wrap
-`callTool("arti", …)`; only arti's **read** tools short-circuit in-process —
-writes and other servers still go through the OBO proxy. Access is the viewer's
-own: the app reads exactly what the viewer can already read in arti, nothing
-more.
+`callTool("arti", …)`, which runs in-process. Other servers still go through the
+OBO proxy. Access is the viewer's own: the app reads exactly what the viewer can
+already read in arti, nothing more.
 
 ### Calling the built-in LLM
 
@@ -225,7 +224,7 @@ Two servers are built into the `appServers` map
 |---|---|---|
 | `llm` | service | Built-in Claude completion (`complete`). |
 | `arti-self` | none | Local credential-free arti MCP; resolves only under `ARTI_AUTH_DISABLED` (local dev). |
-| `arti` | oauth | arti's own MCP — let an app persist its own state (e.g. `add_artifact`/`read_artifact` under a fixed slug). Operator-configured; reads run in-process as the viewer. |
+| `arti` | in-process | arti's own MCP — let an app persist its own state (e.g. `add_artifact`/`read_artifact` under a fixed slug). Reads and writes both run in-process as the viewer; needs no server entry. |
 | *your servers* | none / oauth | Whatever upstream MCP servers the deployment configures (Notion, Slack, Linear, an internal gateway, …). |
 
 `oauth` servers route through the OBO broker: the call runs as the viewer,
@@ -294,6 +293,12 @@ With the CLI, point it at the directory:
 ```sh
 arti add ./my-app --type app --slug standup-digest --title "Standup Digest" --label app
 ```
+
+Point it at a directory holding only the app — the entry HTML, `arti-app.json`,
+and the assets the page loads. A directory zips whole, so a `.git/`,
+`node_modules/`, or a stray `index.html.bak` is published with it and is readable
+by everyone who can open the app. See
+[the CLI guide](../guides/command-line.md#upload-a-directory-package).
 
 Or via the REST API, send the zip bytes with `"artifact_type": "APP"` (see
 [As an API consumer](api-consumer.md#package-app)). arti requires

@@ -12,19 +12,32 @@ import (
 // ArtifactInfo is the wire shape for a single artifact's metadata.
 // JSON keys are snake_case to match the design + CLI expectations.
 type ArtifactInfo struct {
-	ArtifactID    string   `json:"artifact_id"`
-	ArtifactType  string   `json:"artifact_type"`
-	NamedSlug     *string  `json:"named_slug"`
-	Version       *int32   `json:"version"`
-	Title         string   `json:"title"`
-	Description   *string  `json:"description"`
-	ContentType   string   `json:"content_type"`
-	SizeBytes     *int64   `json:"size_bytes"`
-	SHA256        *string  `json:"sha256"`
-	Creator       string   `json:"creator"`
-	Scopes        []string `json:"scopes"`
-	Labels        []string `json:"labels"`
-	AllowedAccess []string `json:"allowed_access"`
+	ArtifactID   string  `json:"artifact_id"`
+	ArtifactType string  `json:"artifact_type"`
+	NamedSlug    *string `json:"named_slug"`
+	Version      *int32  `json:"version"`
+	Title        string  `json:"title"`
+	Description  *string `json:"description"`
+	ContentType  string  `json:"content_type"`
+	SizeBytes    *int64  `json:"size_bytes"`
+	SHA256       *string `json:"sha256"`
+	Creator      string  `json:"creator"`
+	// Owner is who the DOCUMENT belongs to — the address every doc-level
+	// authority check resolves to, and the one the denial page tells a
+	// shut-out reader to ask. Distinct from Creator, which names whoever
+	// pushed THIS version. Pointer + omitempty: set only on the
+	// single-artifact caller-aware paths, nil where it isn't computed.
+	Owner *string `json:"owner,omitempty"`
+	// WrittenVia names the credential that made this write — an API key
+	// reference, a device-token family, or the credential kind. WrittenViaName
+	// is the owner's name for it where one exists. Both are nil on documents
+	// written before attribution shipped, so the viewer must render their
+	// absence as "unknown", never as "a person in a browser".
+	WrittenVia     *string  `json:"written_via"`
+	WrittenViaName *string  `json:"written_via_name"`
+	Scopes         []string `json:"scopes"`
+	Labels         []string `json:"labels"`
+	AllowedAccess  []string `json:"allowed_access"`
 	// AllowedWrite is the write-access list. nil → write follows read (the
 	// back-compat default, serialized as JSON null); non-nil (incl. empty) is
 	// authoritative, empty ([]) == creator-only. The nil-vs-empty distinction
@@ -48,11 +61,17 @@ type ArtifactInfo struct {
 	// checks and silently hide comments on every artifact.
 	CommentsEnabled bool `json:"comments_enabled"`
 	// CanManageComments reports whether the requesting caller may flip
-	// CommentsEnabled: the slug's OWNER (its earliest-version creator) or an
+	// CommentsEnabled: the document's OWNER (see migration 0029) or an
 	// admin — never a delegated writer, who could otherwise version the doc to
 	// become its creator and take over the switch. Pointer + omitempty: set
 	// only on the single-artifact viewer paths, nil where it isn't computed.
 	CanManageComments *bool `json:"can_manage_comments,omitempty"`
+	// CanEditMetadata reports whether the requesting caller may edit title,
+	// description, labels or scopes — the exact predicate UpdateMetadata
+	// enforces (admin, this version's creator, or the document's owner, minus
+	// the kind:skill write-guard). Pointer + omitempty like CanWrite: set only
+	// on the single-artifact viewer paths.
+	CanEditMetadata *bool `json:"can_edit_metadata,omitempty"`
 	// CanShare reports whether the requesting caller may mint an external
 	// share link: the same authority as CanManageComments (the slug's OWNER or
 	// an admin), computed server-side so the viewer never re-derives it. The
@@ -75,6 +94,8 @@ type ArtifactInfo struct {
 	// count nobody renders.
 	CommentCount    *int32 `json:"comment_count,omitempty"`
 	OpenThreadCount *int32 `json:"open_thread_count,omitempty"`
+	ViewCount       *int64 `json:"view_count,omitempty"`
+	ViewCount30d    *int64 `json:"view_count_30d,omitempty"`
 
 	// Score is the BM25 relevance score from OpenSearch. Zero when search
 	// is handled by Postgres or the result is from a non-search endpoint.
@@ -132,6 +153,8 @@ func ToInfo(row sqlc.Artifact, baseURL string) ArtifactInfo {
 		SizeBytes:       row.SizeBytes,
 		SHA256:          row.SHA256,
 		Creator:         row.Creator,
+		WrittenVia:      row.WrittenVia,
+		WrittenViaName:  row.WrittenViaName,
 		Scopes:          scopes,
 		Labels:          labels,
 		AllowedAccess:   access,

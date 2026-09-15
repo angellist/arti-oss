@@ -43,7 +43,7 @@ export function useViewerPrefs() {
 // 820 / 1110 to match a more book-like reading width on Narrow.
 export const WIDTH_CLASS: Record<Width, string> = {
   narrow: "max-w-[700px]",
-  medium: "max-w-[944px]",
+  medium: "max-w-[850px]",
   wide:   "max-w-[1400px]",
 };
 
@@ -160,6 +160,8 @@ export default function ViewerToolbar({
   setTextSize,
   visitHref,
   fullHref,
+  viewCount,
+  viewCount30d,
   showWidth = true,
 }: {
   width: Width;
@@ -168,6 +170,8 @@ export default function ViewerToolbar({
   setTextSize: (s: TextSize) => void;
   visitHref?: string;
   fullHref?: string;
+  viewCount?: number;
+  viewCount30d?: number;
   // Diagrams always render at full width, so the control would be inert —
   // hidden rather than shown doing nothing (same reasoning as hiding Raw while
   // the editor is open).
@@ -211,17 +215,28 @@ export default function ViewerToolbar({
 
   return (
     <>
-      {showWidth ? <WidthControl width={width} setWidth={setWidth} /> : null}
+      {/* Reading width is a desktop choice — a phone has one width — so the
+          control is hidden rather than shown setting a max-width no viewport
+          reaches. */}
+      {showWidth ? (
+        <span className="hidden sm:inline-flex">
+          <WidthControl width={width} setWidth={setWidth} />
+        </span>
+      ) : null}
 
-      <div
-        className="inline-flex overflow-hidden rounded-md border border-neutral-200"
-        role="group"
-        aria-label="text size"
-      >
-        {sizeBtn("sm", sizeGlyph(9, 1.5), "text size — small")}
-        {sizeBtn("md", sizeGlyph(12.5, 0.3), "text size — medium (default)")}
-        {sizeBtn("lg", sizeGlyph(17, 0), "text size — large")}
-      </div>
+      {/* Text size is a desktop control — a phone already has its own
+          system-level zoom/text-size, and the row has no space to spare. */}
+      <span className="hidden sm:inline-flex">
+        <div
+          className="inline-flex overflow-hidden rounded-md border border-neutral-200"
+          role="group"
+          aria-label="text size"
+        >
+          {sizeBtn("sm", sizeGlyph(9, 1.5), "text size — small")}
+          {sizeBtn("md", sizeGlyph(12.5, 0.3), "text size — medium (default)")}
+          {sizeBtn("lg", sizeGlyph(17, 0), "text size — large")}
+        </div>
+      </span>
 
       {fullHref ? (
         <a
@@ -261,6 +276,14 @@ export default function ViewerToolbar({
         >
           Visit app ↗
         </a>
+      ) : null}
+      {viewCount != null ? (
+        <span
+          className="whitespace-nowrap text-xs text-neutral-500"
+          title={`${viewCount} views · ${viewCount30d ?? 0} in the last 30 days`}
+        >
+          {viewCount} views
+        </span>
       ) : null}
     </>
   );

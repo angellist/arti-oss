@@ -25,12 +25,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/paging"
 	"github.com/angellist/arti-oss/internal/rbac"
 	"github.com/angellist/arti-oss/internal/store/blob"
 )
 
 // SortKeys lists the API-facing sort keys.
-var SortKeys = []string{"title", "type", "slug", "version", "creator", "scope", "created", "archived"}
+var SortKeys = []string{"title", "type", "slug", "version", "creator", "scope", "created", "archived", "views"}
 
 // IsSortKey reports whether `s` is one of the SortKeys.
 func IsSortKey(s string) bool {
@@ -135,17 +136,24 @@ func New(pool *pgxpool.Pool, b blob.Store, cfg Config) *Store {
 // When NamedSlug is set, Version is always MAX(existing)+1 — callers
 // cannot pin a version on upload.
 type PutInput struct {
-	ArtifactType  string // "TEXT" | "PACKAGE"
-	NamedSlug     *string
-	Title         string
-	Description   *string
-	ContentType   string // MIME
-	Content       []byte // TEXT: body. PACKAGE: zip bytes.
-	Creator       string
-	Scopes        []string
-	Labels        []string
-	Metadata      json.RawMessage // optional, schema-less
-	AllowedAccess []string        // glob-on-email patterns; nil → default '{*}'
+	ArtifactType string // "TEXT" | "PACKAGE"
+	NamedSlug    *string
+	Title        string
+	Description  *string
+	ContentType  string // MIME
+	Content      []byte // TEXT: body. PACKAGE: zip bytes.
+	Creator      string
+	// WrittenVia records WHICH credential made this write (auth.Credential.Ref);
+	// empty stores NULL. `Creator` alone cannot say, because an API key
+	// authenticates as its owner.
+	WrittenVia string
+	// WrittenViaName is that credential's human name at write time, for
+	// display; see the migration for why it is stored rather than joined.
+	WrittenViaName string
+	Scopes         []string
+	Labels         []string
+	Metadata       json.RawMessage // optional, schema-less
+	AllowedAccess  []string        // glob-on-email patterns; nil → default '{*}'
 	// AllowedWrite is the write list. nil → SQL NULL (write follows read —
 	// the back-compat default). Non-nil (incl. empty) is authoritative;
 	// empty == creator-only. Unioned into AllowedAccess on insert so it
@@ -309,6 +317,8 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 			AllowedAccess:   access,
 			AllowedWrite:    write,
 			CommentsEnabled: commentsEnabled,
+			WrittenVia:      strPtrOrNil(in.WrittenVia),
+			WrittenViaName:  strPtrOrNil(in.WrittenViaName),
 		}
 	}
 
@@ -340,6 +350,13 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 		return sqlc.Artifact{}, err
 	}
 	qtx := s.q.WithTx(tx)
+
+	// Claimed by the FIRST version and immovable thereafter, so this writes a
+	// row only for a slug that has none — a brand-new one, or one that
+	// predates migration 0029.
+	if _, err := claimSlugOwner(ctx, tx, *in.NamedSlug, in.Creator); err != nil {
+		return sqlc.Artifact{}, err
+	}
 
 	// One fresh read of the slug's current latest version, used for the
 	// caller's access hook, the doc-level comment switch, and the ACL
@@ -529,11 +546,13 @@ func (s *Store) UpdateAccessBySlug(ctx context.Context, slug string, access, wri
 // is the bytes to be appended (not the full body), and the metadata
 // fields are optional overrides for the new version.
 type AppendInput struct {
-	NamedSlug   string // required
-	Separator   []byte // inserted between existing body and new content; default "\n\n" if nil
-	Content     []byte // bytes to append
-	Creator     string
-	ContentType string // optional override; defaults to prior version's content_type
+	NamedSlug      string // required
+	Separator      []byte // inserted between existing body and new content; default "\n\n" if nil
+	Content        []byte // bytes to append
+	Creator        string
+	WrittenVia     string // see PutInput.WrittenVia
+	WrittenViaName string // see PutInput.WrittenViaName
+	ContentType    string // optional override; defaults to prior version's content_type
 
 	// These four override the prior version's metadata on the new
 	// version. Nil → inherit. Pass empty slice / empty string to clear.
@@ -596,19 +615,21 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 			}
 			slug := in.NamedSlug
 			row, err := s.Put(ctx, PutInput{
-				ArtifactType:  TypeText,
-				NamedSlug:     &slug,
-				Title:         *in.Title,
-				Description:   in.Description,
-				ContentType:   in.ContentType,
-				Content:       in.Content,
-				Creator:       in.Creator,
-				Scopes:        in.Scopes,
-				Labels:        in.Labels,
-				AllowedAccess: dereferenceSlice(in.AllowedAccess),
-				AllowedWrite:  dereferenceSlice(in.AllowedWrite),
-				InheritAccess: in.AllowedAccess == nil,
-				InheritWrite:  in.AllowedWrite == nil,
+				ArtifactType:   TypeText,
+				NamedSlug:      &slug,
+				Title:          *in.Title,
+				Description:    in.Description,
+				ContentType:    in.ContentType,
+				Content:        in.Content,
+				Creator:        in.Creator,
+				WrittenVia:     in.WrittenVia,
+				WrittenViaName: in.WrittenViaName,
+				Scopes:         in.Scopes,
+				Labels:         in.Labels,
+				AllowedAccess:  dereferenceSlice(in.AllowedAccess),
+				AllowedWrite:   dereferenceSlice(in.AllowedWrite),
+				InheritAccess:  in.AllowedAccess == nil,
+				InheritWrite:   in.AllowedWrite == nil,
 				// Thread the hook through so Put's in-transaction fresh read
 				// re-validates access/authority even if we lose the create
 				// race and a prior version appears (DD-0055 D8).
@@ -693,19 +714,21 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 
 		slug := in.NamedSlug
 		row, err := s.Put(ctx, PutInput{
-			ArtifactType:  prev.ArtifactType,
-			NamedSlug:     &slug,
-			Title:         title,
-			Description:   description,
-			ContentType:   contentType,
-			Content:       combined,
-			Creator:       in.Creator,
-			Scopes:        scopes,
-			Labels:        labels,
-			AllowedAccess: access,
-			AllowedWrite:  write,
-			InheritAccess: in.AllowedAccess == nil,
-			InheritWrite:  in.AllowedWrite == nil,
+			ArtifactType:   prev.ArtifactType,
+			NamedSlug:      &slug,
+			Title:          title,
+			Description:    description,
+			ContentType:    contentType,
+			Content:        combined,
+			Creator:        in.Creator,
+			WrittenVia:     in.WrittenVia,
+			WrittenViaName: in.WrittenViaName,
+			Scopes:         scopes,
+			Labels:         labels,
+			AllowedAccess:  access,
+			AllowedWrite:   write,
+			InheritAccess:  in.AllowedAccess == nil,
+			InheritWrite:   in.AllowedWrite == nil,
 			// Re-validated by Put against its in-transaction fresh read, so
 			// an ACL change landing between this loop's read and the insert
 			// can't be straddled (DD-0055 D8).
@@ -911,9 +934,13 @@ type ListInput struct {
 	ArtifactType *string
 	ContentType  *string // optional content-type filter; supports `text/markdown*` glob
 	Creator      *string
-	Scope        *string
-	Slug         *string
-	Labels       []string
+	// WrittenVia filters on the credential that made the write
+	// (artifacts.written_via). Glob-aware like the other scalar filters, so
+	// `apikey:*` narrows to every key-written document.
+	WrittenVia *string
+	Scope      *string
+	Slug       *string
+	Labels     []string
 	// Not* fields are exclusions parsed from `-field:value` tokens. Each
 	// value is an independent NOT condition (ANDed together), so
 	// `-label:a -label:b` excludes rows carrying either. Glob (`*`) is
@@ -978,6 +1005,12 @@ var sortableColumns = map[string]string{
 	// Archive time; NULL on live rows (NULLS LAST parks them at the end).
 	// The archived-only listing defaults to this, most recent first.
 	"archived": "deleted_at",
+	// Explicit order_by=views is handled by Postgres. The OpenSearch routing
+	// gate requires in.OrderBy == "", so the two backends cannot diverge.
+	"views": `(SELECT COUNT(*)
+ FROM artifact_views v
+ WHERE v.view_key =
+   COALESCE(NULLIF(artifacts.named_slug, ''), artifacts.artifact_id::text))`,
 }
 
 // List builds the rows + count queries dynamically so sort fields stay
@@ -985,9 +1018,7 @@ var sortableColumns = map[string]string{
 // Filters are joined with AND; an empty input returns every non-deleted
 // artifact ordered by created_at desc.
 func (s *Store) List(ctx context.Context, in ListInput) (ListResult, error) {
-	if in.Limit <= 0 || in.Limit > 500 {
-		in.Limit = 50
-	}
+	in.Limit = paging.ClampLimit(in.Limit)
 	if in.Offset < 0 {
 		in.Offset = 0
 	}
@@ -1117,6 +1148,9 @@ func buildWhere(in ListInput) (where []string, args []any) {
 	}
 	if in.ContentType != nil && *in.ContentType != "" {
 		addFilter("content_type", *in.ContentType)
+	}
+	if in.WrittenVia != nil && *in.WrittenVia != "" {
+		addFilter("written_via", *in.WrittenVia)
 	}
 	if in.Creator != nil && *in.Creator != "" {
 		addFilter("creator", *in.Creator)
@@ -1449,11 +1483,8 @@ func CanAccess(row sqlc.Artifact, caller string, callerGroups []string) bool {
 }
 
 // IsDocOwner reports whether `caller` holds DOCUMENT-level authority over
-// `row`: an admin (MANAGE_ARTIFACTS), or the slug's OWNER — the creator of its
-// EARLIEST version. It is deliberately NOT row.Creator: versioning reassigns
-// each version's creator to whoever pushed it, so a delegated writer could
-// publish a content-only version and inherit the owner's powers. Slugless
-// artifacts have no lineage, so their creator is the owner.
+// `row`: an admin (MANAGE_ARTIFACTS), or the document's OWNER as DocOwner
+// resolves it.
 //
 // This is the single definition of that rule. artifacts.Service.isDocOwner (the
 // comment switch, the share control, ACL changes) and the comment composer's
@@ -1470,18 +1501,11 @@ func (s *Store) IsDocOwner(ctx context.Context, row sqlc.Artifact, caller string
 	if admin {
 		return true, nil
 	}
-	if row.NamedSlug != nil && *row.NamedSlug != "" {
-		owner, oerr := s.SlugCreator(ctx, *row.NamedSlug)
-		if oerr != nil && !errors.Is(oerr, ErrNotFound) {
-			return false, oerr
-		}
-		if owner != "" {
-			// The slug's owner is authoritative: this version's own creator
-			// does not get a second chance below.
-			return strings.EqualFold(owner, caller), nil
-		}
+	owner, err := s.DocOwner(ctx, row)
+	if err != nil {
+		return false, err
 	}
-	return strings.EqualFold(row.Creator, caller), nil
+	return ownerMatches(owner, caller), nil
 }
 
 // matchPatterns reports whether caller (or one of callerGroups) is granted by
@@ -1519,16 +1543,21 @@ func matchPatterns(patterns []string, caller string, callerGroups []string) bool
 }
 
 // CanWrite reports whether caller may create a new version / append / edit the
-// content of row. The creator always may. When allowed_write is NULL (nil),
-// write access follows read access (same tokens as CanAccess). When non-nil
+// content of row. The document's owner always may — resolve it with
+// Store.DocOwner and pass it here. When allowed_write is NULL (nil), write
+// access follows read access (same tokens as CanAccess). When non-nil
 // (including the empty slice), allowed_write is the authoritative write list —
-// empty means creator-only. Because allowed_write is a subset of allowed_access
+// empty means owner-only. Because allowed_write is a subset of allowed_access
 // (enforced on save), a write grant always implies read.
-func CanWrite(row sqlc.Artifact, caller string, callerGroups []string) bool {
+//
+// The anchor is the owner, never row.Creator: versioning reassigns Creator to
+// whoever pushed the latest version, so anchoring here would let a delegated
+// writer keep writing after the owner removed them from allowed_write.
+func CanWrite(row sqlc.Artifact, caller string, callerGroups []string, owner string) bool {
 	if caller == "" {
 		return false
 	}
-	if strings.EqualFold(row.Creator, caller) {
+	if ownerMatches(owner, caller) {
 		return true
 	}
 	if row.AllowedWrite == nil {
@@ -1669,6 +1698,50 @@ func (s *Store) TouchAPIKey(ctx context.Context, id pgtype.UUID) error {
 	return s.q.TouchAPIKey(ctx, id)
 }
 
+func (s *Store) UpsertCredentialUsage(ctx context.Context, arg sqlc.UpsertCredentialUsageParams) error {
+	return s.q.UpsertCredentialUsage(ctx, arg)
+}
+
+func (s *Store) ListAppSettings(ctx context.Context) ([]sqlc.AppSetting, error) {
+	return s.q.ListAppSettings(ctx)
+}
+
+func (s *Store) UpsertAppSetting(ctx context.Context, arg sqlc.UpsertAppSettingParams) error {
+	return s.q.UpsertAppSetting(ctx, arg)
+}
+
+func (s *Store) ListUserNotificationSettings(ctx context.Context) ([]sqlc.ListUserNotificationSettingsRow, error) {
+	return s.q.ListUserNotificationSettings(ctx)
+}
+
+func (s *Store) UpsertUserNotificationSetting(ctx context.Context, arg sqlc.UpsertUserNotificationSettingParams) error {
+	return s.q.UpsertUserNotificationSetting(ctx, arg)
+}
+
+func (s *Store) ClaimCredentialAlert(ctx context.Context, arg sqlc.ClaimCredentialAlertParams) (pgtype.Timestamptz, error) {
+	return s.q.ClaimCredentialAlert(ctx, arg)
+}
+
+func (s *Store) DeleteCredentialUsageBefore(ctx context.Context, day pgtype.Date) (int64, error) {
+	return s.q.DeleteCredentialUsageBefore(ctx, day)
+}
+
+func (s *Store) ListCredentialSourcesByOwner(ctx context.Context, arg sqlc.ListCredentialSourcesByOwnerParams) ([]sqlc.ListCredentialSourcesByOwnerRow, error) {
+	return s.q.ListCredentialSourcesByOwner(ctx, arg)
+}
+
+func (s *Store) ListCredentialSources(ctx context.Context, day pgtype.Date) ([]sqlc.ListCredentialSourcesRow, error) {
+	return s.q.ListCredentialSources(ctx, day)
+}
+
+func (s *Store) CountArtifactsByCredential(ctx context.Context, creator string) ([]sqlc.CountArtifactsByCredentialRow, error) {
+	return s.q.CountArtifactsByCredential(ctx, creator)
+}
+
+func (s *Store) CountArtifactsByCredentialAll(ctx context.Context) ([]sqlc.CountArtifactsByCredentialAllRow, error) {
+	return s.q.CountArtifactsByCredentialAll(ctx)
+}
+
 // blobKey builds the S3 object key. Two-character shard prefix keeps
 // listing cheap.
 func (s *Store) blobKey(kind string, id uuid.UUID) string {
@@ -1693,26 +1766,6 @@ func (s *Store) blobKey(kind string, id uuid.UUID) string {
 //
 // Callers cannot pin a specific version on upload; uploads always
 // append the next monotonic number. Tombstoned versions don't count.
-// SlugCreator returns the creator of a slug's EARLIEST version — the immutable
-// owner of the slug. Unlike a per-version creator (which versioning reassigns
-// to whoever pushed that version), this is stable across the slug's life, so it
-// is the correct authority for who may change a slug's access. Ignores
-// deleted_at so archiving v1 doesn't transfer ownership. ErrNotFound if the
-// slug has no versions.
-func (s *Store) SlugCreator(ctx context.Context, slug string) (string, error) {
-	var creator string
-	err := s.pool.QueryRow(ctx,
-		`SELECT creator FROM artifacts WHERE named_slug = $1 ORDER BY version ASC LIMIT 1`,
-		slug).Scan(&creator)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrNotFound
-		}
-		return "", err
-	}
-	return creator, nil
-}
-
 func (s *Store) nextVersion(ctx context.Context, slug *string) (*int32, error) {
 	return nextVersionTx(ctx, s.q, slug)
 }
@@ -1735,6 +1788,15 @@ func nextVersionTx(ctx context.Context, q *sqlc.Queries, slug *string) (*int32, 
 	}
 	v := int32(n)
 	return &v, nil
+}
+
+// strPtrOrNil maps "" to a SQL NULL, so an unattributed write stores NULL
+// rather than an empty string that would sort and group as its own credential.
+func strPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // pgUUID wraps a google/uuid.UUID as pgtype.UUID for sqlc.
@@ -2022,9 +2084,7 @@ func (s *Store) BrowseAggregates(ctx context.Context, in BrowseAggregatesInput) 
 	if !ok {
 		return BrowseAggregatesResult{}, fmt.Errorf("pgstore: unknown browse facet %q", in.Facet)
 	}
-	if in.Limit <= 0 || in.Limit > 500 {
-		in.Limit = 50
-	}
+	in.Limit = paging.ClampLimit(in.Limit)
 	if in.Offset < 0 {
 		in.Offset = 0
 	}

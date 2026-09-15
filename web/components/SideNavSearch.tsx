@@ -7,8 +7,8 @@ import { getAggregates, getMe } from "@/lib/arti";
 import { SEARCH_OPEN_KEY } from "@/lib/catalog";
 import { useSetSearchBarOpen } from "@/lib/rail-context";
 import type { AggregatesResponse, Me } from "@/lib/types";
-import UploadButton from "./UploadButton";
 import NewMenu from "./NewMenu";
+import SideNavSettings from "./SideNavSettings";
 import { SearchIcon } from "./SearchIcon";
 
 const TOP_LABELS = 30;
@@ -53,9 +53,9 @@ const TYPES = [
   { value: "IMAGE", label: "image" },
 ] as const;
 
-// A listing glyph for the BROWSE ALL rail link — same stroke weight and size
-// as SearchIcon / UploadButton's arrow so the three rail links read as one set.
-function BrowseIcon({ className }: { className?: string }) {
+// A four-pane glyph for the APPS rail link — same stroke weight and size as
+// SearchIcon / UploadButton's arrow so the rail links read as one set.
+function AppsIcon({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -67,12 +67,10 @@ function BrowseIcon({ className }: { className?: string }) {
       aria-hidden="true"
       className={className}
     >
-      <line x1="8" y1="6" x2="21" y2="6" />
-      <line x1="8" y1="12" x2="21" y2="12" />
-      <line x1="8" y1="18" x2="21" y2="18" />
-      <line x1="3" y1="6" x2="3.01" y2="6" />
-      <line x1="3" y1="12" x2="3.01" y2="12" />
-      <line x1="3" y1="18" x2="3.01" y2="18" />
+      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+      <rect x="14" y="14" width="7" height="7" rx="1.5" />
     </svg>
   );
 }
@@ -359,9 +357,9 @@ export default function SideNavSearch() {
 
   return (
     <div className="space-y-5 text-sm">
-      {/* Search / Browse All / Upload / New diagram are one group of rail
-          links — same type scale, leading icon, and a row rhythm tighter than
-          the section gap but still breathing.
+      {/* Search / Apps / New / Settings are one group of rail links — same
+          type scale, leading icon, and a row rhythm tighter than the section
+          gap but still breathing.
           The pl-2 puts each row's 12px icon on the same vertical centerline as
           the 28px arti logo above it (rail padding 16 + 8 + 6 = 30 = 16 + 14),
           so the rail reads as one column of glyphs the way couch's does. */}
@@ -377,17 +375,24 @@ export default function SideNavSearch() {
           Search
         </button>
 
+        {/* Browse All used to sit here; it now rides in the catalog's search
+            bar (see CatalogTable), which frees this slot for the apps portal. */}
         <Link
-          href="/browse"
-          className="flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400 transition hover:text-neutral-600"
+          href="/apps"
+          className={
+            "flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest transition " +
+            (pathname === "/apps"
+              ? "text-neutral-900"
+              : "text-neutral-400 hover:text-neutral-600")
+          }
         >
-          <BrowseIcon className="h-3 w-3 shrink-0" />
-          Browse All
+          <AppsIcon className="h-3 w-3 shrink-0" />
+          Apps
         </Link>
 
-        <UploadButton />
-
         <NewMenu />
+
+        <SideNavSettings />
       </nav>
 
       <section>

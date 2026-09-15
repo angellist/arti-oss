@@ -54,6 +54,7 @@ any with `-` to exclude.
 | `creator:` | the uploader's email | `creator:alice@example.com` |
 | `type:` | artifact type | `type:TEXT` · `type:PACKAGE` · `type:APP` · `type:ATTACHMENT` |
 | `content_type:` | exact MIME content type | `content_type:text/markdown` |
+| `via:` | the credential that wrote it — globs allowed | `via:apikey:3f2a…` · `via:apikey:*` · `via:session` |
 | `-<filter>` | exclude (negate) — `label` / `scope` / `creator` / `type` | `-label:archived` |
 
 > Typing `slug:foo` is a **search** (it keeps the toggles and collapses to the

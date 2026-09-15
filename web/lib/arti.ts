@@ -1,4 +1,4 @@
-import { ArtifactInfo, ArtifactListResponse, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Group, IdpGroup, Me, Role, RoleAssignment, RosterResponse, RosterUser, UserAccess, ApiKey, CreatedApiKey, ShareLink, MintedShare, ShareOpen } from "./types";
+import { ArtifactInfo, ArtifactListResponse, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Group, IdpGroup, Me, Role, RoleAssignment, RosterResponse, RosterUser, UserAccess, ApiKey, CreatedApiKey, CredentialUsage, NotificationSettings, DeploymentNotificationSwitch, ShareLink, MintedShare, ShareOpen, DenialInfo } from "./types";
 
 // hasPerm reports whether `me` holds an RBAC permission key. Prefer this over
 // the bare is_admin flag for capability gating so a non-ADMIN role carrying a
@@ -130,8 +130,33 @@ export type SortField =
   | "creator"
   | "scope"
   | "created"
-  | "archived";
+  | "archived"
+  | "views";
 export type SortDir = "asc" | "desc";
+
+export interface ViewStats {
+  view_key: string;
+  total: number;
+  last_7d: number;
+  last_30d: number;
+  unique_viewers: number;
+  last_viewed_at: string | null;
+  can_see_viewers: boolean;
+  recent: Array<{
+    viewer: string;
+    surface: string;
+    version: number | null;
+    at: string;
+  }> | null;
+}
+
+export async function recordView(id: string): Promise<void> {
+  await http<void>(`/api/artifacts/${id}/views`, { method: "POST" });
+}
+
+export async function getViewStats(id: string): Promise<ViewStats> {
+  return http<ViewStats>(`/api/artifacts/${id}/views`);
+}
 
 export interface ListParams {
   type?: string;
@@ -192,6 +217,23 @@ export async function getBySlug(slug: string, version?: number, cookie?: string)
     undefined,
     cookie,
   );
+}
+
+// getDenial asks why a read failed. It resolves only when the artifact exists
+// and the caller is the one being refused; a missing, archived or readable
+// artifact answers 404 like everything else, so a rejection here means "render
+// the ordinary not-found page".
+export async function getDenialBySlug(slug: string, version?: number, cookie?: string) {
+  const qs = version ? `?version=${version}` : "";
+  return http<DenialInfo>(
+    `/api/artifacts/by-slug/${encodeURIComponent(slug)}/denial${qs}`,
+    undefined,
+    cookie,
+  );
+}
+
+export async function getDenialByID(id: string, cookie?: string) {
+  return http<DenialInfo>(`/api/artifacts/${id}/denial`, undefined, cookie);
 }
 
 export async function listVersions(slug: string, cookie?: string) {
@@ -463,16 +505,23 @@ export async function listComments(artifactId: string): Promise<{ threads: Threa
   return http<{ threads: ThreadDTO[] }>(`/api/artifacts/${artifactId}/comments`);
 }
 
+interface CommentWriteResponse {
+  thread: ThreadDTO;
+  mentions_sent?: string[];
+  mentions_unreachable?: string[];
+}
+
 export async function createThread(
   artifactId: string,
   anchor: ThreadDTO["anchor"],
   body: string,
 ): Promise<ThreadDTO> {
-  return http<ThreadDTO>(`/api/artifacts/${artifactId}/comments`, {
+  const out = await http<CommentWriteResponse>(`/api/artifacts/${artifactId}/comments`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ anchor, body }),
   });
+  return out.thread;
 }
 
 export async function replyComment(threadId: string, body: string): Promise<CommentDTO> {
@@ -589,9 +638,35 @@ export async function updateArtifactAccess(
   return resp.json();
 }
 
+// transferArtifactOwner hands the document to someone else. Per-DOCUMENT and
+// slug-scoped, like every other ownership operation: the server moves the
+// owner row and grants the recipient read on every version, so they are never
+// locked out of what they now own. Owner or admin only.
+//
+// keepAccess also grants the OUTGOING owner read and write. It defaults to true
+// because write answers to the owner with no creator fallback, so a hand-off
+// otherwise costs them edit on a document they may still be working in. It only
+// ever adds; unticking it withdraws nothing.
+export async function transferArtifactOwner(
+  slug: string,
+  owner: string,
+  keepAccess: boolean,
+): Promise<{ slug: string; owner: string; previous_owner: string }> {
+  const resp = await fetch(`/api/artifacts/by-slug/${encodeURIComponent(slug)}/owner`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner, keep_access: keepAccess }),
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+  return resp.json();
+}
+
 // updateArtifactCommentsEnabled PATCHes the per-doc comment switch. Unlike the
 // access editor this is per-DOCUMENT: the server writes every version of the
-// slug, and accepts it only from the artifact's owner (the earliest version's
+// slug, and accepts it only from the artifact's owner (its first version's
 // creator) or an admin — a delegated writer gets a 403.
 export async function updateArtifactCommentsEnabled(
   id: string,
@@ -837,8 +912,54 @@ export function listApiKeys(all = false, cookie?: string): Promise<ApiKey[]> {
   return http<ApiKey[]>(`/api/keys${all ? "?all=true" : ""}`, {}, cookie);
 }
 
+// getNotificationSettings reads the signed-in person's own choices. No
+// permission needed: they are settings about messages sent to that person.
+export function getNotificationSettings(cookie?: string): Promise<NotificationSettings> {
+  return http<NotificationSettings>("/api/notifications", {}, cookie);
+}
+
+// setNotificationSetting flips one of the caller's own switches and returns
+// their new state. The server takes the identity from the session, so this can
+// only ever change the caller's own settings.
+export function setNotificationSetting(
+  key: string,
+  enabled: boolean,
+): Promise<NotificationSettings> {
+  return http<NotificationSettings>("/api/notifications", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, enabled }),
+  });
+}
+
+// setDeploymentNotifications flips the master switch for everyone. Admin only.
+export function setDeploymentNotifications(
+  enabled: boolean,
+): Promise<DeploymentNotificationSwitch> {
+  return http<DeploymentNotificationSwitch>("/api/admin/notifications", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: "notifications.slack.enabled", enabled }),
+  });
+}
+
+// getCredentialUsage returns where the caller's credentials have been used and
+// how many documents each has written. all=true widens it to every owner for a
+// MANAGE_API_KEYS holder; the server narrows it back for anyone else.
+export function getCredentialUsage(
+  all = false,
+  cookie?: string,
+): Promise<CredentialUsage> {
+  return http<CredentialUsage>(
+    `/api/keys/usage${all ? "?all=true" : ""}`,
+    {},
+    cookie,
+  );
+}
+
 // createApiKey mints a new API key. The returned CreatedApiKey.key is the
-// plaintext token — it is shown once and never retrievable again.
+// plaintext token — it is shown once and never retrievable again. Minting
+// works only from the browser: the server refuses a bearer token here.
 export function createApiKey(
   name: string,
   scopes: string[],

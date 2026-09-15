@@ -11,6 +11,13 @@ export interface ArtifactInfo {
   size_bytes: number | null;
   sha256: string | null;
   creator: string;
+  // written_via / written_via_name: the credential that wrote this version,
+  // and the owner's name for it. `creator` cannot answer this — an API key
+  // authenticates as its owner, so an agent's write looks like a person's.
+  // null on documents written before attribution shipped, which means
+  // "unknown", not "a person in a browser".
+  written_via: string | null;
+  written_via_name: string | null;
   scopes: string[];
   labels: string[];
   allowed_access: string[];
@@ -31,9 +38,19 @@ export interface ArtifactInfo {
   // from a stale payload would silently lose its comments.
   comments_enabled?: boolean;
   // can_manage_comments: whether the requesting caller may flip
-  // comments_enabled — the slug's owner (earliest version's creator) or an
-  // admin. Present only on single-artifact viewer responses.
+  // comments_enabled — the document's owner (its first version's creator,
+  // unless transferred) or an admin. Present only on single-artifact viewer
+  // responses.
   can_manage_comments?: boolean;
+  // owner: who the DOCUMENT belongs to, and the address to ask for access.
+  // Distinct from `creator`, which names whoever pushed THIS version. Present
+  // only on single-artifact viewer responses.
+  owner?: string;
+  // can_edit_metadata: the server's own verdict on whether this caller may edit
+  // title/description/labels/scopes. Prefer it over re-deriving from `creator`,
+  // which names whoever pushed this version — on a transferred document the two
+  // answer for different people.
+  can_edit_metadata?: boolean;
   // Whether the caller may mint an external share link. Server-computed from
   // the slug's immutable owner; never re-derive it from `creator`, which
   // versioning reassigns to whoever pushed the latest version.
@@ -50,6 +67,10 @@ export interface ArtifactInfo {
   // renders as "—"; 0 means "no comments".
   comment_count?: number;
   open_thread_count?: number;
+  // View counts are slug-scoped: every version of a named slug contributes.
+  // undefined means the optional catalog count query was unavailable.
+  view_count?: number;
+  view_count_30d?: number;
   score?: number;
   highlights?: Record<string, string[]>;
 }
@@ -214,6 +235,58 @@ export interface ApiKey {
   revoked_at: string | null;
 }
 
+// NotificationCategory is one Slack message the signed-in person can choose to
+// receive or not. The choice is theirs alone and affects nobody else.
+export interface NotificationCategory {
+  key: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+}
+
+// NotificationSettings is the signed-in person's own choices, plus the two
+// facts that explain why a choice might do nothing: slack_configured is false
+// when the deployment has no bot token, and deployment_enabled is false when an
+// admin has stopped every notification for everyone.
+export interface NotificationSettings {
+  categories: NotificationCategory[];
+  slack_configured: boolean;
+  deployment_enabled: boolean;
+  can_manage_deployment: boolean;
+}
+
+// DeploymentNotificationSwitch is the admin-only master.
+export interface DeploymentNotificationSwitch {
+  key: string;
+  label: string;
+  enabled: boolean;
+  slack_configured: boolean;
+}
+
+// CredentialSource is one place a credential has been used from, aggregated
+// from the daily usage rows. `cred` is the credential reference stamped on the
+// documents it wrote (artifacts.written_via), which is how a source row and a
+// document line up. owner_email is present only on the admin view.
+export interface CredentialSource {
+  cred: string;
+  owner_email?: string;
+  ip: string;
+  user_agent: string;
+  reads: number;
+  writes: number;
+  first_seen: string | null;
+  last_seen: string | null;
+}
+
+// CredentialUsage answers "where has each credential been used, and what has
+// it written". docs maps a credential reference to how many live documents it
+// wrote — the count that makes a shared key visible.
+export interface CredentialUsage {
+  sources: CredentialSource[];
+  docs: Record<string, number>;
+  days: number;
+}
+
 // CreatedApiKey extends ApiKey with the one-time plaintext key (shown once,
 // treat like a password — arti does not store it).
 export interface CreatedApiKey extends ApiKey {
@@ -273,4 +346,20 @@ export interface RosterResponse {
   // The tables the roster read, so a missing principal class is diagnosable
   // from the response rather than from the source.
   sources: string[];
+}
+
+// DenialInfo is what the server will say about an artifact the caller cannot
+// read. Every ordinary read answers 404 whether the document is missing or
+// merely closed, so this is the only response that distinguishes the two —
+// and it carries just enough to end the reader's search: the document's name,
+// its slug, and the address that can grant access.
+//
+// `owner` is the slug's owner, which is the authority ACL changes answer to.
+// It is not `ArtifactInfo.creator`, which versioning reassigns to whoever
+// pushed the latest version.
+export interface DenialInfo {
+  named_slug: string | null;
+  version: number | null;
+  title: string;
+  owner: string;
 }

@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
+  exitFullPageSearch,
   fileParamSearch,
   fullPageKind,
+  htmlFitZoom,
+  isFullPageView,
+  isTopLevelWindow,
   isTextualContentType,
   isJSONContentType,
   prettyPrintJSON,
@@ -170,5 +174,78 @@ describe("textScaleFromParam", () => {
   });
   it("takes the first value of a repeated param", () => {
     expect(textScaleFromParam({ ts: ["sm", "lg"] })).toBe(0.85);
+  });
+});
+
+
+// Leaving ?v=full has to be exactly the inverse of entering it, including for
+// the legacy ?view=fullpage form — a URL that isFullPageView says is full-page
+// must not still say so after the exit control has done its work.
+describe("exitFullPageSearch", () => {
+  it("drops the full-page param and keeps everything else", () => {
+    expect(exitFullPageSearch("?v=full&file=docs%2Fa.html&ts=sm")).toBe(
+      "?file=docs%2Fa.html&ts=sm",
+    );
+  });
+  it("drops the legacy form too", () => {
+    expect(exitFullPageSearch("?view=fullpage&ts=lg")).toBe("?ts=lg");
+  });
+  it("returns an empty string, not a bare ?, when nothing is left", () => {
+    expect(exitFullPageSearch("?v=full")).toBe("");
+    expect(exitFullPageSearch("")).toBe("");
+  });
+  it("leaves a query that was never full-page alone", () => {
+    expect(exitFullPageSearch("?file=a.html")).toBe("?file=a.html");
+  });
+  it("produces a query isFullPageView no longer recognizes", () => {
+    for (const search of ["?v=full&file=a.html", "?view=fullpage", "?v=full&view=fullpage"]) {
+      const left = new URLSearchParams(exitFullPageSearch(search));
+      expect(isFullPageView(Object.fromEntries(left.entries()))).toBe(false);
+    }
+  });
+});
+
+// The full-page view is iframed by embedders (couch's side panel), where the
+// host owns the chrome. A cross-origin `top` access throws, which is itself
+// proof of being framed — so the throwing case must read as framed, not crash.
+describe("isTopLevelWindow", () => {
+  it("is true only when self is top", () => {
+    const w = {} as Window;
+    expect(isTopLevelWindow({ self: w, top: w } as unknown as Window)).toBe(true);
+    expect(isTopLevelWindow({ self: w, top: {} } as unknown as Window)).toBe(false);
+  });
+  it("treats a throwing cross-origin top as framed", () => {
+    const w = {
+      get self() {
+        return w;
+      },
+      get top(): Window {
+        throw new DOMException("cross-origin");
+      },
+    };
+    expect(isTopLevelWindow(w as unknown as Window)).toBe(false);
+  });
+});
+
+// An HTML artifact is authored against a desktop window; in a phone-width
+// frame it reads oversized. The zoom must be exactly 1 from FIT_WIDTH up, so
+// no desktop render changes.
+describe("htmlFitZoom", () => {
+  it("is 1 at and above the fit width", () => {
+    expect(htmlFitZoom(460)).toBe(1);
+    expect(htmlFitZoom(1440)).toBe(1);
+  });
+  it("scales a narrow viewport proportionally", () => {
+    expect(htmlFitZoom(390)).toBeCloseTo(390 / 460, 6);
+    expect(htmlFitZoom(430)).toBeCloseTo(430 / 460, 6);
+  });
+  it("floors the zoom so text never becomes unreadable", () => {
+    expect(htmlFitZoom(200)).toBe(0.72);
+  });
+  it("returns 1 for an unmeasured viewport rather than the floor", () => {
+    // SSR, jsdom, a display:none frame — all report 0.
+    expect(htmlFitZoom(0)).toBe(1);
+    expect(htmlFitZoom(-1)).toBe(1);
+    expect(htmlFitZoom(NaN)).toBe(1);
   });
 });

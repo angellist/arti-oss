@@ -198,7 +198,7 @@ Show or edit an artifact's access control **without creating a new version**.
 With no flags it prints the current read/write lists; with flags it PATCHes
 them. Access is a property of the document: the edit applies to **every
 version of the slug** (archived versions included), and changing it requires
-being the slug's owner (its earliest version's creator) or an admin.
+being the document's owner (`arti owner`) or an admin.
 
 | Positional | Meaning |
 |---|---|
@@ -220,6 +220,29 @@ arti access my-doc --access '*@example.com'         # domain-readable, all versi
 arti access my-doc --access alice@x --access group:eng
 arti access my-doc --private                        # creator-only
 arti access my-doc --write-access group:eng         # readers stay; group may write
+```
+
+### `arti owner`
+
+Show or transfer the document's owner. Ownership is claimed by the slug's first
+version and never moves on its own — not when someone else publishes a version,
+not when v1 is archived. It is what every document-level authority check
+resolves to: changing access, the comment switch, minting a share link.
+
+| Positional | Meaning |
+|---|---|
+| `slug` | slug |
+
+| Flag | Type | Meaning |
+|---|---|---|
+| `--to` | string | Transfer ownership to this email address. Omit to just print the current owner. |
+
+Transferring grants the new owner read access on every version, so they are
+never locked out of what they now own. Current owner or an admin only.
+
+```sh
+arti owner my-doc                        # who owns it
+arti owner my-doc --to alice@example.com # hand it over
 ```
 
 ### `arti get`

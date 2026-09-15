@@ -23,12 +23,25 @@ function loadMermaid(): Promise<typeof import("mermaid").default> {
           suppressErrorRendering: true,
           htmlLabels: false,
           theme: "base",
+          // A diagram draws on the page's own background, so the ink has to
+          // follow the theme or it renders unreadable on dark chrome.
+          // mermaid.initialize runs once per page, so a theme switch shows in
+          // diagrams on the next load.
           themeVariables: {
             fontFamily: "ui-sans-serif, system-ui, sans-serif",
-            primaryColor: "#f5f5f5",
-            primaryTextColor: "#171717",
-            primaryBorderColor: "#a3a3a3",
-            lineColor: "#737373",
+            ...(document.documentElement.dataset.theme === "dark"
+              ? {
+                  primaryColor: "#2b2b2b",
+                  primaryTextColor: "#ededed",
+                  primaryBorderColor: "#6e6e6e",
+                  lineColor: "#8f8f8f",
+                }
+              : {
+                  primaryColor: "#f5f5f5",
+                  primaryTextColor: "#171717",
+                  primaryBorderColor: "#a3a3a3",
+                  lineColor: "#737373",
+                }),
           },
         });
         return mermaid;

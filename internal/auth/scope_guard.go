@@ -52,8 +52,7 @@ func EnforceUploadScope(store DeviceStore, maxUploadBytes int64) func(http.Handl
 				forbidden(w, "upload-scoped token: only artifact create/append/read permitted")
 				return
 			}
-			// Tighter body cap than the global limit — upload tokens are minted for
-			// modest sandbox output (screenshots, reports, build artifacts). The
+			// Deployments can cap an upload token below the global limit; the
 			// create/append handler maps MaxBytesReader overflow to 413.
 			if r.Method == http.MethodPost && maxUploadBytes > 0 {
 				r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)

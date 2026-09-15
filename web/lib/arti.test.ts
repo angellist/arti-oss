@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { ArtiError, buildListQS, fetchContent, shouldGzipUpload, createArtifact } from "./arti";
+import { ArtiError, buildListQS, fetchContent, getDenialBySlug, shouldGzipUpload, createArtifact } from "./arti";
 
 describe("buildListQS all_versions", () => {
   it("sets all_versions=true when requested", () => {
@@ -209,5 +209,39 @@ describe("createArtifact gzips textual uploads", () => {
     const headers = init.headers as Record<string, string>;
     expect(headers["Content-Encoding"]).toBeUndefined();
     expect(typeof init.body).toBe("string");
+  });
+});
+
+// The denial route is the page's second question, asked only after a read
+// already failed. Its rejection is load-bearing: the slug page turns a
+// rejection into the ordinary 404, so a resolved-but-empty result would show
+// an access page for an artifact that does not exist.
+describe("getDenialBySlug", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("asks the denial route for the slug", async () => {
+    let asked = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: RequestInfo | URL) => {
+        asked = String(url);
+        return new Response(
+          JSON.stringify({ named_slug: "s", version: 1, title: "T", owner: "o@example.com" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+
+    const got = await getDenialBySlug("al service/graph");
+    expect(got.owner).toBe("o@example.com");
+    expect(asked).toContain("/api/artifacts/by-slug/al%20service%2Fgraph/denial");
+  });
+
+  it("rejects on 404 so the caller falls back to the not-found page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ detail: "not found", code: "not-found" }), { status: 404 })),
+    );
+    await expect(getDenialBySlug("whatever")).rejects.toBeInstanceOf(ArtiError);
   });
 });
