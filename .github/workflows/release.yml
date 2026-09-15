@@ -1,5 +1,8 @@
 # Public release: on a version tag, produce CLI + server archives with
 # checksums, and publish the tag's CHANGELOG.md section as the release body.
+#
+# The notes file is written to $RUNNER_TEMP, never the checkout: goreleaser
+# refuses to run on a dirty tree, and an untracked file counts as dirty.
 name: release
 
 on:
@@ -31,14 +34,14 @@ jobs:
             $0 ~ "^## " v " " { found = 1; next }
             found && /^## / { exit }
             found { print }
-          ' CHANGELOG.md > release-notes.md
-          test -s release-notes.md || { echo "no CHANGELOG.md section for $GITHUB_REF_NAME"; exit 1; }
-          cat release-notes.md
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md" || { echo "no CHANGELOG.md section for $GITHUB_REF_NAME"; exit 1; }
+          cat "$RUNNER_TEMP/release-notes.md"
 
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean --release-notes=release-notes.md
+          args: release --clean --release-notes=${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
