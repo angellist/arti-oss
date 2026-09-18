@@ -54,6 +54,12 @@ type Service struct {
 	// apps service; backs the public files-token route (MountFileToken). nil
 	// makes that route 404, and filesBaseFor falls back to the cookie path.
 	appTokenVerify func(tok string) (email, artifactID string, err error)
+	// appConsentSign / appConsentVerify back the per-viewer, per-version run
+	// consent an APP document load requires before the bridge is minted (see
+	// app_consent.go). Wired in cmd_serve next to appToken.
+	appConsentSign   func(email, artifactID string) (string, error)
+	appConsentVerify func(tok string) (email, artifactID string, err error)
+	appConsentSecure bool
 	// embedFilesToken, when set, mints the email-less files token user-mode
 	// embed surfaces use for sibling assets (there is no serve-time caller to
 	// mint appToken for). Wired in cmd_serve to the apps service; nil makes
@@ -84,7 +90,15 @@ type Service struct {
 	// notifier DMs a new owner when a document is handed to them. nil disables
 	// it; every send is a no-op on a nil *Notifier.
 	notifier *slacknotify.Notifier
+
+	// mapEnabled gates the MAP artifact type (DD-0079). Off by default, so a
+	// deploy carrying the code exposes nothing until the flag flips; turning
+	// it off is this feature's backout and leaves stored entries untouched.
+	mapEnabled bool
 }
+
+// SetMapEnabled turns the MAP artifact type on. Off by default.
+func (s *Service) SetMapEnabled(on bool) { s.mapEnabled = on }
 
 // SetNotifier wires the Slack notifier used to tell a new owner they have been
 // given a document. Optional: nil leaves transfers silent.
@@ -185,6 +199,15 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 	at := req.ArtifactType
 	if at == "" {
 		at = pgstore.TypeText
+	}
+
+	// A MAP is created by the map routes, which validate keys, enforce the
+	// Appendix A limits and require a slug. Reaching Put through the generic
+	// create path would mint a MAP version with a body and no head, and a
+	// slugless MAP nothing could ever address.
+	if at == pgstore.TypeMap {
+		return ArtifactInfo{}, errBadRequest(
+			"MAP artifacts are created through /api/artifacts/by-slug/{slug}/map, not this endpoint")
 	}
 
 	// TEXT artifacts must carry a textual content_type — otherwise the raw
@@ -364,6 +387,15 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 	// pair out to the siblings (DD-0055 D3) — so the sync below knows to
 	// refresh THEIR index docs too, not just the new row's.
 	var aclFanout bool
+	writeSlug := ""
+	if req.NamedSlug != nil {
+		writeSlug = *req.NamedSlug
+	}
+	writeAuth, err := s.resolveWriteAuthority(ctx, creator, writeSlug)
+	if err != nil {
+		return ArtifactInfo{}, err
+	}
+
 	row, err := s.store.Put(ctx, pgstore.PutInput{
 		ArtifactType: at,
 		NamedSlug:    req.NamedSlug,
@@ -393,7 +425,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 		// restricted artifact) before this call landed, Put re-checks
 		// access itself against a fresh read taken right before it writes.
 		CheckAccess: func(ctx context.Context, prev sqlc.Artifact) error {
-			if err := s.checkWriteAccess(ctx, prev, creator); err != nil {
+			if err := checkWriteAccessWith(prev, creator, writeAuth); err != nil {
 				return err
 			}
 			// Same fresh prev, so the base-version and type checks see what
@@ -418,7 +450,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 			aclFanout = aclChanged(prev, fa, fw)
 			// ACL-change authority against the FRESH prev (owner/admin only),
 			// validating the access/write about to be persisted — race-safe.
-			return s.requireAclChangeAuthority(ctx, creator, *req.NamedSlug, prev, fa, fw)
+			return requireAclChangeAuthorityWith(creator, *req.NamedSlug, prev, fa, fw, writeAuth)
 		},
 	})
 	if err != nil {
@@ -535,6 +567,10 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 	// Set inside the CheckAccess hook when this append carries an ACL that
 	// differs from the slug's fresh prior version (see Create).
 	var aclFanout bool
+	writeAuth, aerr := s.resolveWriteAuthority(ctx, creator, slug)
+	if aerr != nil {
+		return ArtifactInfo{}, false, aerr
+	}
 	row, perr := s.store.Append(ctx, pgstore.AppendInput{
 		NamedSlug:      slug,
 		Separator:      sep,
@@ -555,7 +591,7 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 		// inside Store.Append re-checks access itself the moment it
 		// discovers that row.
 		CheckAccess: func(ctx context.Context, prev sqlc.Artifact) error {
-			if err := s.checkWriteAccess(ctx, prev, creator); err != nil {
+			if err := checkWriteAccessWith(prev, creator, writeAuth); err != nil {
 				return err
 			}
 			fa := prev.AllowedAccess
@@ -570,7 +606,7 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 			// (DD-0055 D3) — remember it so the sync below refreshes their
 			// index docs too.
 			aclFanout = aclChanged(prev, fa, fw)
-			return s.requireAclChangeAuthority(ctx, creator, slug, prev, fa, fw)
+			return requireAclChangeAuthorityWith(creator, slug, prev, fa, fw, writeAuth)
 		},
 	})
 	if perr != nil {
@@ -736,21 +772,24 @@ func (s *Service) requireAclChangeAuthority(ctx context.Context, caller, slug st
 	if !aclChanged(prev, finalAccess, finalWrite) {
 		return nil
 	}
-	admin, err := s.canManageArtifacts(ctx, caller)
+	auth, err := s.resolveWriteAuthority(ctx, caller, slug)
 	if err != nil {
 		return err
 	}
-	if admin {
+	return requireAclChangeAuthorityWith(caller, slug, prev, finalAccess, finalWrite, auth)
+}
+
+// requireAclChangeAuthorityWith is the decision with no lookup left in it, so a
+// store transaction can re-run it without a second pool connection.
+func requireAclChangeAuthorityWith(caller, slug string, prev sqlc.Artifact, finalAccess, finalWrite []string, auth writeAuthority) error {
+	if !aclChanged(prev, finalAccess, finalWrite) {
 		return nil
 	}
-	if slug != "" {
-		owner, oerr := s.store.SlugOwner(ctx, slug)
-		if oerr != nil && !errors.Is(oerr, pgstore.ErrNoOwner) {
-			return oerr
-		}
-		if owner != "" && strings.EqualFold(owner, caller) {
-			return nil
-		}
+	if auth.admin {
+		return nil
+	}
+	if slug != "" && auth.owner != "" && strings.EqualFold(auth.owner, caller) {
+		return nil
 	}
 	return errForbidden("changing access requires being the artifact's owner or an admin; omit allowed_access/allowed_write to keep the current access, or ask the owner to change it")
 }
@@ -778,28 +817,80 @@ func sameTokenSet(a, b []string) bool {
 	return true
 }
 
+// writeAuthority is everything checkWriteAccess needs about the CALLER and the
+// document's owner, resolved once. A store write re-runs the check inside the
+// transaction that holds the slug advisory lock, and that transaction owns a
+// pool connection: a check that queried the pool there would need a second
+// connection while holding the first, so concurrent writers to one slug
+// deadlock the pool once there are as many of them as it has connections.
+// Resolving this before the transaction opens keeps the critical section down
+// to one connection.
+type writeAuthority struct {
+	admin  bool
+	groups []string
+	owner  string // "" → fall back to the row's creator
+}
+
+// resolveWriteAuthority runs the three lookups the write gate needs. Call it
+// OUTSIDE any transaction. slug may be empty for a slug-less artifact.
+func (s *Service) resolveWriteAuthority(ctx context.Context, caller, slug string) (writeAuthority, error) {
+	admin, err := s.canManageArtifacts(ctx, caller)
+	if err != nil {
+		return writeAuthority{}, err
+	}
+	if admin {
+		return writeAuthority{admin: true}, nil
+	}
+	groups, err := s.store.CallerGroups(ctx, caller)
+	if err != nil {
+		return writeAuthority{}, err
+	}
+	wa := writeAuthority{groups: groups}
+	if slug != "" {
+		owner, err := s.store.SlugOwner(ctx, slug)
+		switch {
+		case err == nil:
+			wa.owner = owner
+		case errors.Is(err, pgstore.ErrNoOwner):
+			// Unowned slug: the row's own creator owns it, which only the
+			// decision has in hand.
+		default:
+			return writeAuthority{}, err
+		}
+	}
+	return wa, nil
+}
+
 // checkWriteAccess gates content WRITES (new version / append / edit). Same
 // shape as checkAccess — admins pass, archived rows stay creator-only, a real
 // lookup error surfaces rather than silently 404ing — but it uses CanWrite:
 // when allowed_write is set it is authoritative, otherwise write follows read.
 func (s *Service) checkWriteAccess(ctx context.Context, row sqlc.Artifact, caller string) error {
-	if ok, err := s.canManageArtifacts(ctx, caller); err != nil {
+	slug := ""
+	if row.NamedSlug != nil {
+		slug = *row.NamedSlug
+	}
+	auth, err := s.resolveWriteAuthority(ctx, caller, slug)
+	if err != nil {
 		return err
-	} else if ok {
+	}
+	return checkWriteAccessWith(row, caller, auth)
+}
+
+// checkWriteAccessWith is the decision itself, with no lookup left in it, so it
+// is safe to call from inside a store transaction.
+func checkWriteAccessWith(row sqlc.Artifact, caller string, auth writeAuthority) error {
+	if auth.admin {
 		return nil
 	}
 	if row.DeletedAt.Valid && !strings.EqualFold(row.Creator, caller) {
 		return pgstore.ErrNotFound
 	}
-	groups, err := s.store.CallerGroups(ctx, caller)
-	if err != nil {
-		return err
+	owner := auth.owner
+	if owner == "" {
+		owner = row.Creator
 	}
-	owner, err := s.store.DocOwner(ctx, row)
-	if err != nil {
-		return err
-	}
-	if pgstore.CanWrite(row, caller, groups, owner) {
+	if pgstore.CanWrite(row, caller, auth.groups, owner) {
 		return nil
 	}
 	return pgstore.ErrNotFound
@@ -1525,6 +1616,16 @@ func Mount(r chi.Router, svc *Service) {
 	r.Get("/api/artifacts/by-slug/{slug}/denial", svc.httpDenialBySlug)
 	r.Post("/api/artifacts/by-slug/{slug}/owner", svc.httpTransferOwner)
 	r.Delete("/api/artifacts/by-slug/{slug}", svc.httpArchiveBySlug)
+	// MAP routes (DD-0079). Per-key routes sit under /map/keys/ so that no
+	// key can ever be shadowed by a sibling verb route — a key named
+	// "snapshot" is an ordinary key.
+	r.Get("/api/artifacts/by-slug/{slug}/map", svc.httpMapList)
+	r.Post("/api/artifacts/by-slug/{slug}/map", svc.httpMapPutBatch)
+	r.Get("/api/artifacts/by-slug/{slug}/map/browse", svc.httpMapBrowse)
+	r.Post("/api/artifacts/by-slug/{slug}/map/snapshot", svc.httpMapSnapshot)
+	r.Get("/api/artifacts/by-slug/{slug}/map/keys/{key}", svc.httpMapGet)
+	r.Put("/api/artifacts/by-slug/{slug}/map/keys/{key}", svc.httpMapPutKey)
+	r.Delete("/api/artifacts/by-slug/{slug}/map/keys/{key}", svc.httpMapDelete)
 	r.Get("/api/artifacts/by-slug/{slug}/files", svc.httpFilesBySlug)
 	r.Get("/api/artifacts/by-slug/{slug}/files/*", svc.httpFileBySlug)
 
@@ -1556,6 +1657,7 @@ func MountApp(r chi.Router, svc *Service) {
 	// FE rewrite in dev). The ergonomic "open this app" URL.
 	r.Get("/app/{ident}", svc.httpApp)
 	r.Get("/app/{ident}/{version}", svc.httpApp)
+	r.Post("/app/{ident}/consent", svc.httpAppConsent)
 }
 
 // ─── handlers ────────────────────────────────────────────────────────
@@ -1631,6 +1733,14 @@ func WriteStatus(err error) (status int, code, msg string) {
 		// (archived or access revoked). The caller should pick a fresh
 		// idempotency_key rather than retry with the same one.
 		return http.StatusGone, "idempotency-stale", stale.Error()
+	}
+	// ErrInvalidInput marks a caller mistake — a bad key, a value over a
+	// limit, a malformed batch. Its own definition says it exists "so the
+	// HTTP layer can return 400 instead of 500"; until now only the append
+	// path converted it, so every other caller surfaced a client mistake as
+	// an internal error and lost the message that names what to fix.
+	if errors.Is(err, pgstore.ErrInvalidInput) {
+		return http.StatusBadRequest, "bad-request", err.Error()
 	}
 	if errors.Is(err, pgstore.ErrConflict) {
 		return http.StatusConflict, "conflict",
@@ -2572,6 +2682,10 @@ func (s *Service) httpFileByID(w http.ResponseWriter, r *http.Request) {
 		writeBadOrInternal(w, err)
 		return
 	}
+	if row.ArtifactType == pgstore.TypeApp && isHTMLContentType(ct) && !s.appConsented(r, caller, row) {
+		s.writeAppConsentPage(w, r, row)
+		return
+	}
 	filesRoot := s.filesRootFor(caller, id.String())
 	body = s.injectFilesBaseToken(body, ct, filesRoot, caller, path)
 	if row.ArtifactType == pgstore.TypeApp {
@@ -2655,6 +2769,10 @@ func (s *Service) httpApp(w http.ResponseWriter, r *http.Request) {
 	var stale *staleNotice
 	if pinned {
 		stale = s.staleAppNotice(r.Context(), row, caller)
+	}
+	if !s.appConsented(r, caller, row) {
+		s.writeAppConsentPage(w, r, row)
+		return
 	}
 	tw := &writeErrTracker{ResponseWriter: w}
 	if err := s.serveAppRow(tw, r, row, caller, "", "", "", nil, stale); err != nil {
@@ -2760,20 +2878,14 @@ func (s *Service) serveAppRow(w http.ResponseWriter, r *http.Request, row sqlc.A
 	// Launch page precedence: arti-app.json `entry` is the source of truth for
 	// an APP (it's what the manifest documents), then the package entry_point,
 	// then index.html.
-	entry := ""
 	// params: the declared URL-param contract (arti-app.json `params`), resolved
 	// against this request's query and handed to the app as window.arti.params.
 	// nil when the manifest declares none.
+	man := s.readAppManifest(r.Context(), row)
+	entry := man.Entry
 	var params map[string]any
-	if mb, _, merr := s.ReadPackageFile(r.Context(), row, "arti-app.json"); merr == nil {
-		var man struct {
-			Entry  string         `json:"entry"`
-			Params []appParamSpec `json:"params"`
-		}
-		if json.Unmarshal(mb, &man) == nil {
-			entry = man.Entry
-			params = resolveAppParams(man.Params, r.URL.Query())
-		}
+	if man.Params != nil {
+		params = resolveAppParams(man.Params, r.URL.Query())
 	}
 	if entry == "" {
 		if m, e := s.ListPackageFiles(r.Context(), row); e == nil && m.EntryPoint != "" {
@@ -2826,6 +2938,10 @@ func (s *Service) httpFileBySlug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	aid := pgstore.UUIDFromPG(row.ArtifactID).String()
+	if row.ArtifactType == pgstore.TypeApp && isHTMLContentType(ct) && !s.appConsented(r, caller, row) {
+		s.writeAppConsentPage(w, r, row)
+		return
+	}
 	filesRoot := s.filesRootFor(caller, aid)
 	body = s.injectFilesBaseToken(body, ct, filesRoot, caller, path)
 	if row.ArtifactType == pgstore.TypeApp {
@@ -3934,7 +4050,11 @@ func isTextualContentType(ct string) bool {
 		return true
 	}
 	switch base {
-	case "application/json", "application/yaml", "application/javascript":
+	// x-ndjson is here to keep this predicate and web/lib/viewer.ts — which
+	// documents itself as mirroring this function — agreeing. A MAP snapshot
+	// is NDJSON, and the two sides classifying one body differently is how a
+	// viewer ends up fetching no text for something it then tries to render.
+	case "application/json", "application/yaml", "application/javascript", "application/x-ndjson":
 		return true
 	}
 	return false
@@ -4124,6 +4244,16 @@ func versionGuard(req CreateRequest, at string, prev sqlc.Artifact) error {
 		if actual != *req.ExpectedLatestVersion {
 			return staleBaseVersion{slug: slug, expected: *req.ExpectedLatestVersion, actual: actual, creator: prev.Creator}
 		}
+	}
+	// A MAP retype is refused in BOTH directions and allow_type_change does
+	// not override it: a MAP republished as TEXT leaves a head no route can
+	// reach, and a TEXT slug republished as MAP would need a map id that the
+	// generic publish path has no way to mint. Checked before the
+	// allow_type_change short-circuit for exactly that reason.
+	if at != prev.ArtifactType && (at == pgstore.TypeMap || prev.ArtifactType == pgstore.TypeMap) {
+		return errBadRequest(fmt.Sprintf(
+			"slug %q cannot change between %s and %s; a MAP's head is not part of its version body, so retyping would strand it",
+			slug, prev.ArtifactType, at))
 	}
 	if req.AllowTypeChange {
 		return nil

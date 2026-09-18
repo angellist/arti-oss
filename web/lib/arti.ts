@@ -1,4 +1,4 @@
-import { ArtifactInfo, ArtifactListResponse, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Group, IdpGroup, Me, Role, RoleAssignment, RosterResponse, RosterUser, UserAccess, ApiKey, CreatedApiKey, CredentialUsage, NotificationSettings, DeploymentNotificationSwitch, ShareLink, MintedShare, ShareOpen, DenialInfo } from "./types";
+import { ArtifactInfo, ArtifactListResponse, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Block, BlockedDoc, BlockedDocDetail, Group, IdpGroup, Me, Role, RoleAssignment, RosterResponse, RosterUser, UserAccess, ApiKey, CreatedApiKey, CredentialUsage, NotificationSettings, DeploymentNotificationSwitch, ShareLink, MintedShare, ShareOpen, DenialInfo } from "./types";
 
 // hasPerm reports whether `me` holds an RBAC permission key. Prefer this over
 // the bare is_admin flag for capability gating so a non-ADMIN role carrying a
@@ -684,6 +684,47 @@ export async function updateArtifactCommentsEnabled(
   return resp.json();
 }
 
+// listBlockMatches returns the documents one pattern currently hides. The
+// server refuses anything that is not blocked, so this cannot enumerate the
+// catalog; it answers "what is this entry costing me" before a lift.
+export async function listBlockMatches(pattern: string, cookie?: string): Promise<BlockedDoc[]> {
+  const { matches } = await http<{ matches: BlockedDoc[] }>(
+    `/api/admin/blocks/matches?pattern=${encodeURIComponent(pattern)}`,
+    undefined,
+    cookie,
+  );
+  return matches ?? [];
+}
+
+// getBlockedDoc loads one blocked document's metadata for the review page.
+// `ident` is a slug, or an artifact id for a document that has no slug. 404s
+// for a document that is not blocked, which is how the ordinary rules stay the
+// only way to read an ordinary document.
+export async function getBlockedDoc(ident: string, cookie?: string): Promise<BlockedDocDetail> {
+  return http<BlockedDocDetail>(`/api/admin/blocked/${encodeURIComponent(ident)}`, undefined, cookie);
+}
+
+// fetchBlockedBody returns a blocked document's bytes. The server sends them
+// as plain text whatever the document is, so the caller renders them as text
+// and never as markup.
+export async function fetchBlockedBody(
+  ident: string,
+  cookie?: string,
+): Promise<{ body: string; truncated: boolean }> {
+  const isServer = typeof window === "undefined";
+  const headers = new Headers({ Accept: "text/plain" });
+  if (cookie && isServer) headers.set("Cookie", cookie);
+  const resp = await fetch(baseFor(isServer) + `/api/admin/blocked/${encodeURIComponent(ident)}/raw`, {
+    headers,
+    cache: "no-store",
+    credentials: "include",
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+  return { body: await resp.text(), truncated: resp.headers.get("X-Arti-Blocked-Truncated") === "1" };
+}
+
 // ─── user groups ───────────────────────────────────────────────────────
 
 // listGroups returns all user groups. Readable by any authenticated caller —
@@ -869,6 +910,28 @@ export async function unassignRole(input: {
   return mutate(`/api/role-assignments?${qs}`, "DELETE");
 }
 
+// ─── block list (admin: MANAGE_ARTIFACTS) ───────────────────────────────
+
+// listBlocks returns the whole block list, newest first. The server answers
+// 404 to a caller without MANAGE_ARTIFACTS, so the surface is not
+// discoverable; the page treats that as an empty list behind its own gate.
+export async function listBlocks(cookie?: string): Promise<Block[]> {
+  const { blocks } = await http<{ blocks: Block[] }>("/api/admin/blocks", undefined, cookie);
+  return blocks ?? [];
+}
+
+// addBlock blocks every document matching `pattern`. Re-blocking an existing
+// pattern replaces its reason and attribution rather than adding a second row.
+export async function addBlock(pattern: string, reason: string): Promise<void> {
+  return mutate("/api/admin/blocks", "POST", { pattern, reason });
+}
+
+// removeBlock lifts one pattern. The pattern goes in the query string because
+// DELETE bodies are unreliable, matching unassignRole.
+export async function removeBlock(pattern: string): Promise<void> {
+  return mutate(`/api/admin/blocks?pattern=${encodeURIComponent(pattern)}`, "DELETE");
+}
+
 // ─── users roster (admin: MANAGE_ROLES) ─────────────────────────────────
 
 // listUsers returns every principal arti knows. MANAGE_ROLES only — the server
@@ -1025,4 +1088,76 @@ export async function listShareOpens(shareID: string): Promise<ShareOpen[]> {
   }
   const body = await resp.json();
   return body.opens ?? [];
+}
+
+// ─── MAP entries ─────────────────────────────────────────────────────
+
+export interface MapBrowseRow {
+  key: string;
+  value: string;
+  truncated: boolean;
+  size_bytes: number;
+  rev: number;
+  updated_at: string;
+  updated_by: string;
+}
+
+export interface MapBrowseResponse {
+  rows: MapBrowseRow[];
+  total: number;
+  limit: number;
+  offset: number;
+  sort: string;
+  dir: string;
+  q: string;
+  stats: { keys: number; bytes: number; max_keys: number; max_bytes: number };
+  preview_bytes: number;
+}
+
+export type MapSortKey = "key" | "rev" | "updated" | "size";
+
+// browseMap reads a page of a MAP's LIVE HEAD. It is not the artifact body:
+// /s/<slug> serves the latest frozen snapshot, and head is what a reader
+// means by "what is in this map".
+export async function browseMap(
+  slug: string,
+  opts: { q?: string; sort?: MapSortKey; dir?: "asc" | "desc"; limit?: number; offset?: number } = {},
+): Promise<MapBrowseResponse> {
+  const p = new URLSearchParams();
+  if (opts.q) p.set("q", opts.q);
+  if (opts.sort) p.set("sort", opts.sort);
+  if (opts.dir) p.set("dir", opts.dir);
+  if (opts.limit != null) p.set("limit", String(opts.limit));
+  if (opts.offset) p.set("offset", String(opts.offset));
+  const qs = p.toString();
+  const resp = await fetch(
+    `/api/artifacts/by-slug/${encodeURIComponent(slug)}/map/browse${qs ? `?${qs}` : ""}`,
+    { credentials: "include" },
+  );
+  if (!resp.ok) throw new ArtiError(resp.status, `browse map: ${resp.status}`);
+  return resp.json();
+}
+
+// getMapEntry reads one entry whole, for a value the table only previewed.
+export async function getMapEntry(slug: string, key: string): Promise<{ key: string; value: unknown; rev: number }> {
+  const resp = await fetch(
+    `/api/artifacts/by-slug/${encodeURIComponent(slug)}/map/keys/${encodeURIComponent(key)}`,
+    { credentials: "include" },
+  );
+  if (!resp.ok) throw new ArtiError(resp.status, `get map entry: ${resp.status}`);
+  return resp.json();
+}
+
+// snapshotMap freezes the map's live head as a new NDJSON version. Returns
+// unchanged when head already matches the latest version, in which case no
+// version is written.
+export async function snapshotMap(
+  slug: string,
+): Promise<{ unchanged: boolean; version: number | null; entries: number; size_bytes: number }> {
+  const resp = await fetch(`/api/artifacts/by-slug/${encodeURIComponent(slug)}/map/snapshot`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!resp.ok) throw await errorFrom(resp);
+  return resp.json();
 }

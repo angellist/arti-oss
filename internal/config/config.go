@@ -31,6 +31,7 @@ type Config struct {
 	Apps          Apps          `yaml:"apps"`
 	Embedding     Embedding     `yaml:"embedding"`
 	Share         Share         `yaml:"share"`
+	Maps          Maps          `yaml:"maps"`
 	Comments      Comments      `yaml:"comments"`
 	Notifications Notifications `yaml:"notifications"`
 	LLM           LLM           `yaml:"llm"`
@@ -155,6 +156,13 @@ type Share struct {
 	MaxTTL  Duration `yaml:"max_ttl"`
 	OpenRPM int      `yaml:"open_rpm"`
 	MintRPM int      `yaml:"mint_rpm"`
+}
+
+// Maps configures the MAP artifact type (DD-0079): a keyed key/value store
+// per slug. Disabled by default — the flag is the feature's backout, and
+// turning it off leaves stored entries untouched while the map routes 404.
+type Maps struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // Comments configures comment writes and notifications. RPM knobs are keyed by

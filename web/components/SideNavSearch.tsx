@@ -46,6 +46,7 @@ const TYPES = [
   { value: "PACKAGE", label: "PACKAGE" },
   { value: "APP", label: "APP" },
   { value: "ATTACHMENT", label: "ATTACHMENT" },
+  { value: "MAP", label: "MAP" },
   { value: "MARKDOWN", label: "markdown" },
   { value: "DIAGRAM", label: "diagram" },
   { value: "HTML", label: "html" },

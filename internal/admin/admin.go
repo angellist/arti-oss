@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,6 +30,86 @@ func NewService(pool *pgxpool.Pool, store *pgstore.Store) *Service {
 // middleware; each handler additionally enforces admin membership.
 func (s *Service) Mount(r chi.Router) {
 	r.Get("/api/admin/stats", s.stats)
+	r.Get("/api/admin/blocks", s.listBlocks)
+	r.Post("/api/admin/blocks", s.addBlock)
+	r.Delete("/api/admin/blocks", s.removeBlock)
+	s.mountBlocked(r)
+}
+
+// requireAdmin answers the handler's gate: true to carry on, false when it has
+// already written the response. 404 (not 403) so the endpoint isn't
+// discoverable, consistent with the rest of the API.
+func (s *Service) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	ok, err := s.store.HasPermission(r.Context(), auth.EmailFromContext(r.Context()), rbac.ManageArtifacts)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "not found")
+		return false
+	}
+	return true
+}
+
+// The block list: the stop-gap that takes a document away from everyone while
+// leaving its versions, owner and ACL alone. See pgstore/blocklist.go. These
+// handlers read and write the list itself, never a blocked document, so an
+// admin can always lift what an admin set.
+func (s *Service) listBlocks(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	blocks, err := s.store.ListBlocks(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"blocks": blocks})
+}
+
+func (s *Service) addBlock(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var req struct {
+		Pattern string `json:"pattern"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(req.Pattern) == "" {
+		writeErr(w, http.StatusBadRequest, "pattern is required")
+		return
+	}
+	if err := s.store.AddBlock(r.Context(), req.Pattern, req.Reason, auth.EmailFromContext(r.Context())); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pattern": strings.TrimSpace(req.Pattern), "blocked": true})
+}
+
+func (s *Service) removeBlock(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	pattern := r.URL.Query().Get("pattern")
+	if pattern == "" {
+		writeErr(w, http.StatusBadRequest, "pattern is required")
+		return
+	}
+	n, err := s.store.RemoveBlock(r.Context(), pattern)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n == 0 {
+		writeErr(w, http.StatusNotFound, "not blocked")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pattern": pattern, "blocked": false})
 }
 
 // Stats is a read-only operational snapshot.
@@ -52,15 +133,7 @@ type CommentStats struct {
 }
 
 func (s *Service) stats(w http.ResponseWriter, r *http.Request) {
-	ok, err := s.store.HasPermission(r.Context(), auth.EmailFromContext(r.Context()), rbac.ManageArtifacts)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if !ok {
-		// 404 (not 403) so the endpoint isn't discoverable, consistent with
-		// the rest of the API.
-		writeErr(w, http.StatusNotFound, "not found")
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	out, err := s.collect(r.Context())

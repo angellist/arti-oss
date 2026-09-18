@@ -40,6 +40,12 @@ Three facts shape everything you write:
 3. **Calls run as the viewer.** OAuth-backed servers use on-behalf-of (OBO): the
    first call pops a one-time consent popup, then the tool runs with the viewer's
    own upstream permissions and audit trail.
+4. **The viewer lets your app run, version by version.** Because the app acts as
+   them, arti shows a consent page naming you, your publishing credential and
+   every tool you declared, and serves the app only after they agree. Publishing
+   a new version asks again unless they chose to trust the slug and you ship the
+   same tool list. Keep `arti-app.json` to the tools you actually call: the list
+   is what they are asked to approve.
 
 ## Project layout
 
@@ -218,7 +224,8 @@ directly in new apps.
 
 Two servers are built into the `appServers` map
 (`cmd/arti-server/cmd_serve.go`); the deployment adds the rest via
-`ARTI_APP_MCP_SERVERS`:
+`ARTI_APP_MCP_SERVERS` — any MCP server the operator runs or subscribes to, wired
+as described in [Connect your own MCP servers](../guides/self-hosting.md#mcp-servers):
 
 | Server | Auth | What it is |
 |---|---|---|
@@ -339,6 +346,9 @@ APP's declared params as query string on the iframe `src`:
   `document.cookie` or arti's normal APIs.
 - **Handle the consent popup path.** First call to an `oauth` server pops a
   window; `callTool` handles the retry, but your UI should tolerate the delay.
+- **A new version needs consent again.** Adding a tool to `arti-app.json`, or
+  publishing under a different credential, re-prompts even viewers who chose to
+  trust the slug. Batch such changes rather than drip-feeding them.
 - **The injected token is per-viewer and short-lived (~12h).** It's not part of
   your uploaded bytes; reloading mints a fresh one. Never read, copy, or persist
   `window.__ARTI_APP__.token`.

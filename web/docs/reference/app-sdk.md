@@ -41,7 +41,7 @@ these fields are available directly.
 | Field | Type | Meaning |
 |---|---|---|
 | `appId` | string (UUID) | This artifact's id. Sent as `app_id` on every proxy call. |
-| `token` | string (JWT) | The injected, app-scoped Bearer. Authenticates proxy calls. Reloading mints a fresh one. |
+| `token` | string (JWT) | The injected, app-scoped Bearer. Authenticates proxy calls. Reloading mints a fresh one. Injected only after the viewer has consented to this version — see [run-as consent](../architecture/app-serving.md#run-as-consent). |
 | `endpoint` | string | The proxy path — always `/api/apps/mcp`. |
 | `params` | object | Declared URL params, coerced per the manifest (see [params](#url-params)). `{}` when none declared. Also exposed as `window.arti.params`. |
 
@@ -232,7 +232,9 @@ The named MCP servers an APP may reach. App authors reference a server **by name
 only**; its URL and auth policy live server-side (`appServers` map,
 `cmd/arti-server/cmd_serve.go`), so an author can neither point at an arbitrary
 endpoint nor embed a secret. Two servers are built in; operators add the rest
-with `ARTI_APP_MCP_SERVERS` (see [Configuration](configuration.md#apps-mcp)).
+with `ARTI_APP_MCP_SERVERS` (see [Configuration](configuration.md#apps-mcp), and
+[Connect your own MCP servers](../guides/self-hosting.md#mcp-servers) for what an
+upstream has to support).
 
 | Server name | Auth mode | Upstream | Notes |
 |---|---|---|---|

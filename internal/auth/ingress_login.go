@@ -2,8 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"log"
@@ -307,27 +305,11 @@ func verifyLoginConfirmIdentity(signer *JWTSigner, value string) (loginConfirmId
 }
 
 func signLoginBlob(signer *JWTSigner, domain string, payload any) string {
-	body, _ := json.Marshal(payload)
-	encoded := base64.RawURLEncoding.EncodeToString(body)
-	mac := hmac.New(sha256.New, signer.key)
-	mac.Write([]byte(domain + encoded))
-	return encoded + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return signer.SealBlob(domain, payload)
 }
 
 func verifyLoginBlob(signer *JWTSigner, domain, value string, payload any) bool {
-	dot := strings.LastIndexByte(value, '.')
-	if dot < 0 {
-		return false
-	}
-	encoded, signature := value[:dot], value[dot+1:]
-	mac := hmac.New(sha256.New, signer.key)
-	mac.Write([]byte(domain + encoded))
-	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(signature), []byte(want)) {
-		return false
-	}
-	body, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil || json.Unmarshal(body, payload) != nil {
+	if !signer.OpenBlob(domain, value, payload) {
 		return false
 	}
 	switch p := payload.(type) {

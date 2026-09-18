@@ -920,8 +920,10 @@ describe("comments overlay margin column", () => {
   // the constants would move with them and stop asserting the placement.
   const CAP = 422;
   const GAP = 20;
+  // RAIL_FOOTPRINT, likewise restated: all a bubble has to clear.
+  const RAIL = 42;
 
-  const mount = (opts: { viewportWidth: number; docRight: number; threads: ThreadDTO[] }) => {
+  const mount = (opts: { viewportWidth: number; docRight: number; threads: ThreadDTO[]; topbar?: boolean }) => {
     vi.stubGlobal("ResizeObserver", TestResizeObserver);
     vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
     HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -931,6 +933,13 @@ describe("comments overlay margin column", () => {
     doc.dataset.artiDoc = "";
     doc.innerHTML = "<p>Quoted text</p>";
     document.body.append(doc);
+    // Only the in-app viewer (which has a toolbar) moves its document at all.
+    if (opts.topbar) {
+      const tb = document.createElement("div");
+      tb.dataset.artiTopbar = "";
+      tb.innerHTML = "<div></div>";
+      document.body.append(tb);
+    }
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       if (this.matches("article")) return new DOMRect(100, 0, opts.docRight - 100, 1000);
       if (this.matches("mark")) return new DOMRect(100, 120, 200, 20);
@@ -975,6 +984,33 @@ describe("comments overlay margin column", () => {
     const card = document.querySelector<HTMLElement>("[data-tid='text-thread']")!;
     expect(card.style.left).toBe(`${900 - CAP}px`);
     dispose();
+  });
+
+  // The bug behind this: the bubble is a seventh of a card's width, and capping
+  // both at the card column parked it on the prose while the gutter beside it
+  // was still empty — the window in the report had ~180px of margin left.
+  it("leaves the bubble in a gutter the card no longer fits in", async () => {
+    const dispose = mount({ viewportWidth: 900, docRight: 880, threads: [textThread] });
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+    document.querySelector<HTMLElement>("[data-min='text-thread']")!.click();
+
+    const bubble = document.querySelector<HTMLElement>("[data-mintid='text-thread']")!;
+    expect(bubble.style.left).toBe(`${900 - RAIL}px`);
+    dispose();
+  });
+
+  // Nothing is left to slide into, so the doc gives up text width instead.
+  it("pads the text in when the window leaves no gutter at all", async () => {
+    const dispose = mount({ viewportWidth: 900, docRight: 880, threads: [textThread], topbar: true });
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+
+    const root = document.documentElement;
+    expect(root.classList.contains("ac-gutter")).toBe(true);
+    expect(Number.parseInt(root.style.getPropertyValue("--ac-gutter"), 10)).toBeGreaterThan(0);
+    dispose();
+    expect(root.classList.contains("ac-gutter")).toBe(false);
   });
 
   it("shows a bare bubble for a one-comment thread, and a count only past it", async () => {

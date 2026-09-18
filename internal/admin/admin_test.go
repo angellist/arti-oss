@@ -5,9 +5,12 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -128,5 +131,78 @@ func TestAdminStats(t *testing.T) {
 	}
 	if st.Comments.Live < 1 || st.Comments.Last7Days < 1 {
 		t.Fatalf("comment counts not reflected: %+v", st.Comments)
+	}
+}
+
+// The block list is the lever an admin reaches for in a hurry, so the gate on
+// it matters as much as what it does: nobody but an admin may see it, add to
+// it, or lift from it.
+func TestAdminBlocks(t *testing.T) {
+	pool := newPool(t)
+	store := pgstore.New(pool, blob.NewInMemory(), pgstore.Config{})
+	const admin = "block-admin@example.com"
+	ctx := context.Background()
+	if err := store.AssignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.UnassignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin) })
+	h := newRouter(NewService(pool, store))
+
+	pattern := "admin-block-test-" + uuid.NewString()
+	t.Cleanup(func() { _, _ = store.RemoveBlock(ctx, pattern) })
+
+	do := func(method, path, email string, body io.Reader) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, body)
+		if email != "" {
+			req.Header.Set("X-Test-Email", email)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/admin/blocks"},
+		{http.MethodPost, "/api/admin/blocks"},
+		{http.MethodDelete, "/api/admin/blocks?pattern=x"},
+	} {
+		if rec := do(c.method, c.path, "user@example.com", strings.NewReader(`{"pattern":"x"}`)); rec.Code != http.StatusNotFound {
+			t.Fatalf("non-admin %s %s: want 404, got %d", c.method, c.path, rec.Code)
+		}
+	}
+
+	if rec := do(http.MethodPost, "/api/admin/blocks", admin,
+		strings.NewReader(`{"pattern":"`+pattern+`","reason":"test"}`)); rec.Code != http.StatusOK {
+		t.Fatalf("add block: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	rec := do(http.MethodGet, "/api/admin/blocks", admin, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list blocks: want 200, got %d", rec.Code)
+	}
+	var listed struct {
+		Blocks []pgstore.Block `json:"blocks"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	var found *pgstore.Block
+	for i := range listed.Blocks {
+		if listed.Blocks[i].Pattern == pattern {
+			found = &listed.Blocks[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("added pattern missing from the list")
+	}
+	if found.Reason != "test" || found.CreatedBy != admin {
+		t.Errorf("block attribution = %q by %q, want %q by %q", found.Reason, found.CreatedBy, "test", admin)
+	}
+
+	if rec := do(http.MethodDelete, "/api/admin/blocks?pattern="+url.QueryEscape(pattern), admin, nil); rec.Code != http.StatusOK {
+		t.Fatalf("remove block: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := do(http.MethodDelete, "/api/admin/blocks?pattern="+url.QueryEscape(pattern), admin, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("remove of a lifted block: want 404, got %d", rec.Code)
 	}
 }

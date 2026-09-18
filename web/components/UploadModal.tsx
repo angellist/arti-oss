@@ -40,6 +40,10 @@ const TYPE_HINT: Record<ArtifactType, string> = {
   PACKAGE: "A zip of multiple files, browsable in the package viewer.",
   APP: "A zip containing arti-app.json — served as a live app.",
   ATTACHMENT: "A single binary file, served for download or preview.",
+  // Never offered here: a MAP is created by writing entries to it, not by
+  // uploading a body. It is in this map only because ArtifactType is a
+  // closed union and the record must be total.
+  MAP: "A keyed key/value store. Created by writing entries, not by upload.",
 };
 
 // The slug's latest version as read when the modal opened (or re-read after a

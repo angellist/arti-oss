@@ -42,9 +42,9 @@ An optional `~/.config/arti/config.json` supplies a default access list:
 
 ## Commands
 
-`arti login` · `logout` · `whoami` · `add` · `append` · `edit` · `access` · `get` ·
-`rm` · `ls` · `versions` · `url` · `search` · `version` · `update` (and the hidden
-`token`).
+`arti login` · `logout` · `whoami` · `add` · `append` · `edit` · `access` · `owner` ·
+`get` · `rm` · `ls` · `search` · `versions` · `url` · `version` · `update` · `map` ·
+`block` (and the hidden `token`).
 
 ### `arti login`
 
@@ -332,6 +332,51 @@ Update to the latest `main` build via `go install
 github.com/angellist/arti-oss/cmd/arti@latest` (fetched directly from the repo,
 skipping the Go proxy), then replaces the running binary if it differs.
 Requires the Go toolchain and repo access.
+
+### `arti map`
+
+Read and write a [MAP](../overview/concepts.md#artifact-types) artifact: a keyed
+key/value store held under one slug. Keys are flat strings, namespaced by `:`.
+
+```sh
+arti map put my-notes seen:cnv_123 '{"at":"2026-09-11"}'
+arti map put my-notes seen:cnv_123 - --if-absent   # claim the key, value from stdin
+arti map get my-notes seen:cnv_123 --raw
+arti map list my-notes --prefix seen: --keys
+arti map rm my-notes seen:cnv_123
+arti map snapshot my-notes
+```
+
+| Subcommand | Positionals | Notable flags |
+|---|---|---|
+| `get` | `slug key` | `--raw` prints the value without the entry envelope |
+| `list` | `slug` | `--prefix`, `--keys`, `--limit` (default 100, max 1000), `--cursor` |
+| `put` | `slug key [value]` | `--if-absent` (claim; a lost claim exits 1 and prints the incumbent), `--if-rev N` (compare-and-set), `--title` (required when the call creates the map), `--access`/`--private`/`--write-access`/`--write-private` (applied on create only) |
+| `rm` | `slug key` | |
+| `snapshot` | `slug` | Freezes the current entries as a new immutable NDJSON version |
+
+An omitted value, or `-`, reads the value from stdin. Entries are the map's live
+head, so a `put` does not make a new version; `snapshot` is what does.
+
+### `arti block`
+
+Admin stop-gap (`MANAGE_ARTIFACTS`). A block hides every version matching a pattern
+from every caller, admins included, and refuses writes to it. Nothing about the
+document changes, so `block rm` restores exactly what was there.
+
+```sh
+arti block ls
+arti block add leaked-doc --reason "shared externally"
+arti block add 'mem--couch--*'
+arti block rm leaked-doc
+```
+
+A pattern matches a slug, or the artifact id of a slug-less artifact. `*` matches any
+run of characters and `?` matches one; case is ignored, and patterns are stored
+lowercased. A blocked document answers `404` everywhere — web, REST, MCP, apps,
+embeds, share links and comments — because every surface uses its existing
+not-found path. The same list has a web page at **Settings → Blocked Documents**,
+which expands a pattern to the documents it hides and can open one for review.
 
 ### `arti token` (hidden)
 

@@ -115,3 +115,82 @@ independently — do them in order and run doctor between steps.
 Run one container: the compose stack's Dex service is a working example
 (static users, or federate GitHub/Google). Point `oidc` mode at it. That is
 the supported no-IdP path — arti deliberately has no local passwords.
+
+## Connect your own MCP servers {#mcp-servers}
+
+APP artifacts call tools through arti's governed proxy. Which servers an app may
+reach is deployment configuration, so a self-hosted arti talks to whatever MCP
+servers you run. Nothing in arti depends on a particular vendor or gateway.
+
+Three servers are built in and need no configuration:
+
+| Name | What it is |
+|---|---|
+| `arti` | arti's own tools, run in-process as the viewer. Reads and writes both. |
+| `arti-self` | arti's own `/mcp` over loopback, with no credential. For local verification. |
+| `llm` | The built-in Claude completion. Needs `ANTHROPIC_API_KEY`. |
+
+Add your own through `ARTI_APP_MCP_SERVERS`, a JSON map of `name →
+{ resource_url, auth, scope }`. The entries merge over the built-ins. A
+malformed value stops the server at startup.
+
+```json
+{
+  "internal-tools": { "resource_url": "https://mcp.example.internal/mcp", "auth": "none" },
+  "vendor":         { "resource_url": "https://mcp.vendor.example/mcp",   "auth": "oauth", "scope": "read write" }
+}
+```
+
+An app author then writes `callTool("internal-tools", "list_things", {…})` and
+never sees the URL. The address and the auth policy stay server-side, so an app
+can neither point at another endpoint nor carry a secret, and it reaches a server
+only when its own `arti-app.json` allowlist names that server and tool.
+
+**Use `auth: "none"`** when the upstream needs no per-user identity — a server on
+your own network, or one the edge authenticates for you. arti forwards the call
+with no credential. A 401 from such a server is a real rejection and reaches the
+app as `503 upstream_error`, with no consent loop.
+
+**Use `auth: "oauth"`** when each call must run as the person looking at the page.
+arti brokers a per-user token through its OBO broker, and the viewer's first call
+to that server opens a one-time consent popup.
+
+### What an `oauth` upstream must support {#oauth-upstream}
+
+The broker is standard OAuth 2.1 with no vendor-specific code. The MCP server, or
+the authorization server it names, must offer all of:
+
+1. **Protected-resource metadata** (RFC 9728) at the resource URL, naming its
+   authorization server.
+2. **Authorization-server metadata** (RFC 8414) at that issuer.
+3. **Dynamic client registration** (RFC 7591). arti registers itself once per
+   authorization server and shares that registration across its pods. An issuer
+   whose metadata has no `registration_endpoint` is refused: there is no way to
+   configure a pre-registered client.
+4. **Authorization code with PKCE**, plus refresh tokens if consent is to outlive
+   one access token.
+5. **Resource indicators** (RFC 8707). arti sends the configured `resource_url`.
+
+The redirect URI arti registers and sends is `<ARTI_BASE_URL>/oauth/obo/callback`.
+Set `ARTI_OBO_CALLBACK_BASE` when the browser reaches arti at some other address.
+Set `ARTI_OBO_ENC_KEY` in production: the broker encrypts stored tokens with it,
+and it otherwise derives from `JWT_SIGNING_KEY`.
+
+An MCP gateway that fronts several vendors is one entry like any other, and so is
+a single-purpose server of your own.
+
+### Verify
+
+1. Start the server. A malformed `ARTI_APP_MCP_SERVERS` stops it with the parse
+   error.
+2. Upload a small APP whose `arti-app.json` allowlists one tool on the new server,
+   open it, and call that tool.
+3. Read the structured failure code rather than the message: `unknown_server`
+   (400) means the name is not configured, `not_allowlisted` (403) means the
+   manifest does not name it, and `upstream_error` or `upstream_timeout` (503)
+   come from the server itself. For an `oauth` server the first call answers 401
+   with an `authorize_url`, and the injected bridge opens the consent popup.
+
+The app-side call and the full error table are in the
+[APP SDK](../reference/app-sdk.md#built-in-servers); the surrounding variables are
+in [Configuration](../reference/configuration.md#apps-mcp).

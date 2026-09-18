@@ -215,6 +215,34 @@ func (s *JWTSigner) Sign(c Claims) (string, error) {
 	return signing + "." + sig, nil
 }
 
+// SealBlob signs a purpose-bound payload under domain. The result never
+// parses as a JWT, and a blob sealed for one domain never opens under another,
+// so a cookie built this way cannot be replayed as a session or app token.
+func (s *JWTSigner) SealBlob(domain string, payload any) string {
+	body, _ := json.Marshal(payload)
+	encoded := base64.RawURLEncoding.EncodeToString(body)
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte(domain + encoded))
+	return encoded + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// OpenBlob verifies a SealBlob value for domain and decodes it into payload.
+func (s *JWTSigner) OpenBlob(domain, value string, payload any) bool {
+	dot := strings.LastIndexByte(value, '.')
+	if dot < 0 {
+		return false
+	}
+	encoded, signature := value[:dot], value[dot+1:]
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte(domain + encoded))
+	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(signature), []byte(want)) {
+		return false
+	}
+	body, err := base64.RawURLEncoding.DecodeString(encoded)
+	return err == nil && json.Unmarshal(body, payload) == nil
+}
+
 func (s *JWTSigner) Verify(tok string) (Claims, error) {
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 {

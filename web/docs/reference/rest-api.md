@@ -174,6 +174,27 @@ Body (`AppendRequest`, `internal/artifacts/dto.go:146`): `content` (required),
 appended HTML/JS so the WAF can't false-match its `<script>` rule (see the create
 endpoint above).
 
+### MAP routes, under `/api/artifacts/by-slug/{slug}/map`
+
+A MAP's keys are a live head rather than a body, so they have their own routes. Every
+one of them resolves the slug first and applies the document's read or write access,
+and all of them answer `400` while `ARTI_MAP_ARTIFACTS` is off.
+
+| Route | Does |
+|---|---|
+| `POST .../map` | write a batch of up to 100 entries; creates the MAP at v1 when the slug is new, which needs `title` and may carry `allowed_access` / `allowed_write` |
+| `PUT .../map/keys/{key}` | write one entry — the body IS the value, and the guards ride as `?if_absent=true` or `?if_rev=<n>` so a value is never wrapped |
+| `GET .../map/keys/{key}` | read one entry |
+| `GET .../map` | list a page — `?prefix=`, `?cursor=`, `?limit=` |
+| `GET .../map/browse` | the viewer's table: `?q=`, `?sort=`, `?dir=`, `?limit=`, `?offset=`, values truncated to a preview |
+| `DELETE .../map/keys/{key}` | delete one entry; deleting an absent key succeeds with `deleted: 0` |
+| `POST .../map/snapshot` | freeze the head as a new NDJSON version; a snapshot matching the latest version returns it with `unchanged: true` |
+
+A write returns `200` when every entry landed and `409` when any guard lost, with the
+incumbent entry alongside the one that lost. A value over 64 KiB is `413`; a bad key, a
+batch over 100, or a write that would cross the 10,000-key or 8 MiB ceiling is `400`
+with the limit named in the message.
+
 ### POST `/api/artifacts/suggest-metadata`
 
 Given `{ filename, content_type, artifact_type?, sample }`, returns
@@ -398,6 +419,26 @@ the `MANAGE_ROLES` permission.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/admin/stats` | Read-only operational snapshot (artifact counts by type; comment thread/activity counts) |
+| GET | `/api/admin/blocks` | The block list: `{ blocks: [{ pattern, reason, created_by, created_at }] }`, newest first |
+| POST | `/api/admin/blocks` | Block everything matching a pattern. Body `{ pattern, reason? }` |
+| DELETE | `/api/admin/blocks?pattern=<p>` | Lift a blocked pattern |
+| GET | `/api/admin/blocks/matches?pattern=<p>` | The documents a pattern currently hides |
+| GET | `/api/admin/blocked/{ident}` | Metadata for one blocked document, for review |
+| GET | `/api/admin/blocked/{ident}/raw` | Its body, as `text/plain` under `nosniff`, capped at 1 MiB |
+
+A block hides every version matching the pattern from **every** caller, admins
+included, and refuses writes to it; the versions, owner and ACL are untouched, so
+deleting the row restores the document. The pattern matches a slug, or the artifact
+id of a slug-less artifact, with `*` for any run of characters and `?` for one,
+case-insensitive. Blocked documents answer `404` on every surface, so the block
+needs no special handling in a client. The first three routes read and write the
+list itself, never a blocked document, so an admin can always lift what an admin
+set. The last three are the one exception to a block: they exist so an admin can
+see what a pattern hides and decide whether to lift it. Their store reads return
+a row only while it is blocked, a body is served as plain text under `nosniff`
+whatever the document's own type is, and a PACKAGE, APP or MAP is refused rather
+than unpacked. Non-admins get `404` on all of them, not `403`, so the endpoints
+are not discoverable.
 
 ## API keys (authed) {#api-keys}
 

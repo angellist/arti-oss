@@ -7,10 +7,12 @@
 import type { ArtifactInfo } from "./types";
 import { isTextualContentType } from "./viewer";
 
-// isComparableArtifact gates the ⋯-menu "Compare versions" item. Same
-// eligibility as Edit (TEXT + textual content_type + a slug + not archived):
-// comparison walks a slug's version history, so a slugless or non-text
-// artifact has nothing to compare. NOT version-count gated — the count isn't
+// isComparableArtifact gates the ⋯-menu "Compare versions" item. Eligibility
+// is a textual body + a slug + not archived: comparison walks a slug's version
+// history, so a slugless or non-text artifact has nothing to compare. TEXT and
+// MAP both qualify — a MAP's versions are NDJSON snapshots written in key
+// order with a fixed field order per line, which is what makes them diff
+// line-by-line at all. NOT version-count gated — the count isn't
 // known without a fetch, so ArtifactCompare reports "only one version" on open
 // rather than pre-checking (and disabling) the menu item.
 export function isComparableArtifact(
@@ -18,7 +20,7 @@ export function isComparableArtifact(
 ): boolean {
   return (
     !info.deleted_at &&
-    info.artifact_type === "TEXT" &&
+    (info.artifact_type === "TEXT" || info.artifact_type === "MAP") &&
     isTextualContentType(info.content_type) &&
     !!info.named_slug
   );

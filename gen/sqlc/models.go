@@ -55,6 +55,36 @@ type Artifact struct {
 	CommentsEnabled bool
 	WrittenVia      *string
 	WrittenViaName  *string
+	MapID           pgtype.UUID
+}
+
+type ArtifactMapEntry struct {
+	Key       string
+	Value     []byte
+	Rev       int64
+	SizeBytes int32
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
+	UpdatedBy string
+	MapID     pgtype.UUID
+}
+
+type ArtifactOwner struct {
+	NamedSlug  string
+	OwnerEmail string
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+	UpdatedBy  *string
+}
+
+type ArtifactView struct {
+	ID         pgtype.UUID
+	ArtifactID pgtype.UUID
+	ViewKey    string
+	Version    *int32
+	Viewer     string
+	Surface    string
+	At         pgtype.Timestamptz
 }
 
 type Comment struct {

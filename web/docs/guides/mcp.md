@@ -104,7 +104,7 @@ from arti's device-authorization flow (RFC 8628); see
 
 ## What the tools do
 
-arti's MCP server exposes 15 tools (`internal/mcp/server.go`). The exhaustive
+arti's MCP server exposes 19 tools (`internal/mcp/server.go`). The exhaustive
 schemas live in the [MCP tools reference](../reference/mcp-tools.md); the shape:
 
 | Tool | Purpose |

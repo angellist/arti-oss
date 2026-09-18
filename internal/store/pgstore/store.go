@@ -56,7 +56,16 @@ const (
 	// time so its JS can call MCP tools through arti's governed proxy.
 	// Stored exactly like a PACKAGE.
 	TypeApp = "APP"
+	// TypeMap is a keyed key/value store (DD-0079). Its mutable head is rows
+	// in artifact_map_entry, keyed by the map_id every version of the map
+	// carries. A MAP is always slugged, because the slug is how it is found.
+	// Versions are frozen NDJSON snapshots of that head, taken only by an
+	// explicit snapshot call, and are stored in S3 like any non-TEXT body.
+	TypeMap = "MAP"
 )
+
+// MapContentType is the content_type carried by every MAP version.
+const MapContentType = "application/x-ndjson"
 
 // IsPackageLike reports whether an artifact type is stored and served as a zip
 // package — PACKAGE or APP (an APP is a PACKAGE that also declares a tool
@@ -121,6 +130,11 @@ type Store struct {
 	// invalidation bus, reads fail closed to the database.
 	rbac rbacCache
 
+	// blocks caches the (usually empty) artifact_blocks table so the block
+	// check on every artifact read is a slice walk. Same cache discipline as
+	// groups and rbac; see blocklist.go.
+	blocks blockCache
+
 	busMu sync.RWMutex
 	bus   *invalidationBus
 
@@ -168,6 +182,13 @@ type PutInput struct {
 	// silently reverting the slug's ACL past the owner's newer write.
 	InheritAccess bool
 	InheritWrite  bool
+
+	// MapID is the identity of the MAP this version belongs to, and the key
+	// its entries hang off. Required for a MAP and refused for anything else.
+	// A live prior version of the same slug overrides it: the map a slug
+	// resolves to is decided by what is already published there, never by a
+	// value a caller read earlier.
+	MapID pgtype.UUID
 
 	// KeepAttachmentSlug exempts this write from the slugless/creator-only
 	// ATTACHMENT clamp below, for the one case that isn't a chat file: a
@@ -218,11 +239,37 @@ func applyAttachmentInvariants(in PutInput) PutInput {
 // Put creates a new artifact row. Returns the inserted row including the
 // server-assigned UUID and version.
 func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
-	if in.ArtifactType != TypeText && in.ArtifactType != TypePackage && in.ArtifactType != TypeAttachment && in.ArtifactType != TypeApp {
+	if in.ArtifactType != TypeText && in.ArtifactType != TypePackage && in.ArtifactType != TypeAttachment && in.ArtifactType != TypeApp && in.ArtifactType != TypeMap {
 		return sqlc.Artifact{}, fmt.Errorf("pgstore: unknown artifact_type %q", in.ArtifactType)
 	}
 	if in.Title == "" || in.ContentType == "" || in.Creator == "" {
 		return sqlc.Artifact{}, fmt.Errorf("pgstore: title, content_type, creator are required")
+	}
+	// Every map route reaches its head through the slug, so a slugless MAP
+	// would have a version nobody could ever write entries to.
+	if in.ArtifactType == TypeMap && (in.NamedSlug == nil || *in.NamedSlug == "") {
+		return sqlc.Artifact{}, fmt.Errorf("%w: MAP requires named_slug", ErrInvalidInput)
+	}
+	if in.ArtifactType == TypeMap && !in.MapID.Valid {
+		return sqlc.Artifact{}, fmt.Errorf("%w: MAP requires map_id", ErrInvalidInput)
+	}
+	if in.ArtifactType != TypeMap {
+		in.MapID = pgtype.UUID{}
+	}
+
+	// A blocked slug takes no writes. Without this, an append or a publish to
+	// a blocked slug would succeed against what looks like a free name, and
+	// lifting the block would hand back a document carrying whatever ACL that
+	// writer supplied. ErrNotFound because the slug is, to this caller, gone.
+	// Fast-fail only; the check that decides is inside the slug lock below.
+	if in.NamedSlug != nil {
+		blocked, err := s.BlockedSlug(ctx, *in.NamedSlug)
+		if err != nil {
+			return sqlc.Artifact{}, err
+		}
+		if blocked {
+			return sqlc.Artifact{}, ErrNotFound
+		}
 	}
 
 	// Fast-fail pre-check, OUTSIDE the slug critical section below: a caller
@@ -319,6 +366,7 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 			CommentsEnabled: commentsEnabled,
 			WrittenVia:      strPtrOrNil(in.WrittenVia),
 			WrittenViaName:  strPtrOrNil(in.WrittenViaName),
+			MapID:           in.MapID,
 		}
 	}
 
@@ -350,6 +398,19 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 		return sqlc.Artifact{}, err
 	}
 	qtx := s.q.WithTx(tx)
+
+	// The authoritative block check, inside the lock and read straight from
+	// the table. The pre-check above reads a snapshot that may be up to
+	// blockCacheTTL old, and a writer that was already queued for this lock
+	// when the block landed would otherwise leave a version behind under a
+	// blocked slug.
+	blocked, err := blockedSlugTx(ctx, tx, *in.NamedSlug)
+	if err != nil {
+		return sqlc.Artifact{}, err
+	}
+	if blocked {
+		return sqlc.Artifact{}, ErrNotFound
+	}
 
 	// Claimed by the FIRST version and immovable thereafter, so this writes a
 	// row only for a slug that has none — a brand-new one, or one that
@@ -408,6 +469,12 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 	// caller's earlier read may predate a concurrent ACL change, and
 	// persisting that stale pair would silently revert the slug's ACL.
 	if livePrev != nil {
+		// Not optional the way the ACL inherit is: a new version of a
+		// published map belongs to that map, whatever the caller thought it
+		// was writing to.
+		if livePrev.ArtifactType == TypeMap && in.ArtifactType == TypeMap {
+			in.MapID = livePrev.MapID
+		}
 		if in.InheritAccess {
 			in.AllowedAccess = livePrev.AllowedAccess
 		}
@@ -657,6 +724,9 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 		if IsPackageLike(prev.ArtifactType) {
 			return sqlc.Artifact{}, fmt.Errorf("%w: cannot append to %s artifact (slug %q); it is a zip and concat would corrupt the archive", ErrInvalidInput, prev.ArtifactType, in.NamedSlug)
 		}
+		if prev.ArtifactType == TypeMap {
+			return sqlc.Artifact{}, fmt.Errorf("%w: cannot append to MAP artifact (slug %q); its versions are snapshots of the keyed head, so write entries and snapshot instead", ErrInvalidInput, in.NamedSlug)
+		}
 
 		// Read existing body. For inline rows it's in memory; for blob
 		// rows we stream from S3. Either way we need the full byte slice
@@ -846,7 +916,24 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (sqlc.Artifact, error
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlc.Artifact{}, ErrNotFound
 	}
-	return row, err
+	if err != nil {
+		return sqlc.Artifact{}, err
+	}
+	return s.refuseBlocked(ctx, row)
+}
+
+// refuseBlocked turns a blocked row into ErrNotFound. Every single-row read
+// ends here, which is what makes a block indistinguishable from absence on
+// every surface without any of them knowing the block list exists.
+func (s *Store) refuseBlocked(ctx context.Context, row sqlc.Artifact) (sqlc.Artifact, error) {
+	blocked, err := s.Blocked(ctx, row)
+	if err != nil {
+		return sqlc.Artifact{}, err
+	}
+	if blocked {
+		return sqlc.Artifact{}, ErrNotFound
+	}
+	return row, nil
 }
 
 // GetLatestBySlugForCaller fetches the latest non-deleted version of a
@@ -873,7 +960,10 @@ func (s *Store) GetLatestBySlugForCaller(ctx context.Context, slug, caller strin
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlc.Artifact{}, ErrNotFound
 	}
-	return row, err
+	if err != nil {
+		return sqlc.Artifact{}, err
+	}
+	return s.refuseBlocked(ctx, row)
 }
 
 // GetBySlug fetches the latest non-deleted version (version==nil) or a
@@ -888,13 +978,19 @@ func (s *Store) GetBySlug(ctx context.Context, slug string, version *int32) (sql
 		if errors.Is(err, pgx.ErrNoRows) {
 			return sqlc.Artifact{}, ErrNotFound
 		}
-		return row, err
+		if err != nil {
+			return sqlc.Artifact{}, err
+		}
+		return s.refuseBlocked(ctx, row)
 	}
 	row, err := s.q.GetLatestArtifactBySlug(ctx, slugPtr)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlc.Artifact{}, ErrNotFound
 	}
-	return row, err
+	if err != nil {
+		return sqlc.Artifact{}, err
+	}
+	return s.refuseBlocked(ctx, row)
 }
 
 // SlugLiveVersionStats reports, across all NON-deleted versions of a slug, the
@@ -1024,6 +1120,14 @@ func (s *Store) List(ctx context.Context, in ListInput) (ListResult, error) {
 	}
 
 	where, args := buildWhere(in)
+	blockSQL, blockPats, err := s.blockFilterSQL(ctx, len(args)+1)
+	if err != nil {
+		return ListResult{}, err
+	}
+	if blockSQL != "" {
+		where = append(where, blockSQL)
+		args = append(args, blockPats)
+	}
 	orderCol := sortableColumns[in.OrderBy]
 	if orderCol == "" {
 		// Archived-only listings order by archive time — "what did I
@@ -1294,7 +1398,11 @@ func globToLike(s string) string {
 }
 
 func (s *Store) Versions(ctx context.Context, slug string) ([]sqlc.Artifact, error) {
-	return s.q.ListArtifactVersions(ctx, &slug)
+	rows, err := s.q.ListArtifactVersions(ctx, &slug)
+	if err != nil {
+		return nil, err
+	}
+	return s.dropBlocked(ctx, rows)
 }
 
 // GetByIDs fetches artifacts by a set of UUIDs. The result order is
@@ -1312,7 +1420,7 @@ func (s *Store) GetByIDs(ctx context.Context, ids []uuid.UUID) ([]sqlc.Artifact,
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: get by ids: %w", err)
 	}
-	return rows, nil
+	return s.dropBlocked(ctx, rows)
 }
 
 func (s *Store) ArchiveByID(ctx context.Context, id uuid.UUID) (int64, error) {
@@ -1755,6 +1863,8 @@ func (s *Store) blobKey(kind string, id uuid.UUID) string {
 		suffix = ".zip"
 	case TypeAttachment:
 		prefix = s.cfg.BucketPrefixAttachment
+	case TypeMap:
+		suffix = ".ndjson"
 	}
 	return fmt.Sprintf("%s/%s/%s%s", prefix, shard, id.String(), suffix)
 }
@@ -1901,6 +2011,17 @@ func (s *Store) Aggregates(ctx context.Context, in AggregatesInput) (AggregatesR
 		)`
 	}
 
+	// Blocked documents are absent from the facet counts too, so a count is
+	// not the one place a blocked document still shows through.
+	blockClause, blockPats, err := s.blockFilterSQL(ctx, len(args)+1)
+	if err != nil {
+		return AggregatesResult{}, err
+	}
+	if blockClause != "" {
+		blockClause = " AND " + blockClause
+		args = append(args, blockPats)
+	}
+
 	// Collapse each slug to its highest non-deleted version so a slug is
 	// counted once regardless of how many versions it has; slug-less rows
 	// stand alone. Mirrors buildWhere's LatestPerSlug clause. A slug whose
@@ -1919,7 +2040,7 @@ func (s *Store) Aggregates(ctx context.Context, in AggregatesInput) (AggregatesR
 		FROM (
 			SELECT unnest(scopes) AS s
 			FROM artifacts
-			WHERE deleted_at IS NULL` + accessClause + latestClause + `
+			WHERE deleted_at IS NULL` + accessClause + latestClause + blockClause + `
 		) t
 		WHERE s <> ''
 		GROUP BY scope_type
@@ -1931,7 +2052,7 @@ func (s *Store) Aggregates(ctx context.Context, in AggregatesInput) (AggregatesR
 		FROM (
 			SELECT unnest(scopes) AS s
 			FROM artifacts
-			WHERE deleted_at IS NULL` + accessClause + latestClause + `
+			WHERE deleted_at IS NULL` + accessClause + latestClause + blockClause + `
 		) t
 		WHERE s <> ''
 		GROUP BY s
@@ -1943,7 +2064,7 @@ func (s *Store) Aggregates(ctx context.Context, in AggregatesInput) (AggregatesR
 		FROM (
 			SELECT unnest(labels) AS label
 			FROM artifacts
-			WHERE deleted_at IS NULL` + accessClause + latestClause + `
+			WHERE deleted_at IS NULL` + accessClause + latestClause + blockClause + `
 		) t
 		GROUP BY label
 		ORDER BY n DESC, label ASC
@@ -1953,7 +2074,7 @@ func (s *Store) Aggregates(ctx context.Context, in AggregatesInput) (AggregatesR
 	contentTypeSQL := `
 		SELECT content_type, COUNT(*) AS n
 		FROM artifacts
-		WHERE deleted_at IS NULL` + accessClause + latestClause + `
+		WHERE deleted_at IS NULL` + accessClause + latestClause + blockClause + `
 		GROUP BY content_type
 		ORDER BY n DESC, content_type ASC
 		LIMIT $1
@@ -2110,6 +2231,15 @@ func (s *Store) BrowseAggregates(ctx context.Context, in BrowseAggregatesInput) 
 			)
 		)`
 	}
+	blockClause, blockPats, err := s.blockFilterSQL(ctx, len(args)+1)
+	if err != nil {
+		return BrowseAggregatesResult{}, err
+	}
+	if blockClause != "" {
+		blockClause = " AND " + blockClause
+		args = append(args, blockPats)
+	}
+
 	latestClause := `
 		AND (
 			named_slug IS NULL
@@ -2157,12 +2287,12 @@ func (s *Store) BrowseAggregates(ctx context.Context, in BrowseAggregatesInput) 
 			FROM (
 				SELECT %s AS value
 				FROM artifacts
-				WHERE deleted_at IS NULL%s%s
+				WHERE deleted_at IS NULL%s%s%s
 			) t
 			%s
 			GROUP BY value
 		) counted
-	`, col, accessClause, latestClause, emptyFilter)
+	`, col, accessClause, latestClause, blockClause, emptyFilter)
 
 	var total int64
 	if err := s.pool.QueryRow(ctx, totalSQL, args...).Scan(&total); err != nil {
@@ -2178,13 +2308,13 @@ func (s *Store) BrowseAggregates(ctx context.Context, in BrowseAggregatesInput) 
 		FROM (
 			SELECT %s AS value
 			FROM artifacts
-			WHERE deleted_at IS NULL%s%s
+			WHERE deleted_at IS NULL%s%s%s
 		) t
 		%s
 		GROUP BY value
 		ORDER BY %s
 		LIMIT $%d OFFSET $%d
-	`, col, accessClause, latestClause, emptyFilter, order, limitPos, offsetPos)
+	`, col, accessClause, latestClause, blockClause, emptyFilter, order, limitPos, offsetPos)
 
 	rs, err := s.pool.Query(ctx, pageSQL, pageArgs...)
 	if err != nil {

@@ -31,12 +31,31 @@ type Manifest struct {
 	EntryPoint string  `json:"entry_point,omitempty"`
 }
 
+// MaxUncompressedBytes caps what a package may expand to. Every entry is
+// inflated into memory on upload, so the declared sizes are checked before
+// the first read.
+const MaxUncompressedBytes = 512 << 20
+
+func checkUncompressed(r *zip.Reader) error {
+	var total uint64
+	for _, f := range r.File {
+		total += f.UncompressedSize64
+		if total > MaxUncompressedBytes {
+			return fmt.Errorf("pkgzip: package expands past %d bytes", MaxUncompressedBytes)
+		}
+	}
+	return nil
+}
+
 // BuildManifest reads the central directory of `zipBytes` and produces
 // a structural manifest (per-entry path/size/sha + a guessed entry_point).
 func BuildManifest(zipBytes []byte) (Manifest, error) {
 	r, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pkgzip: open: %w", err)
+	}
+	if err := checkUncompressed(r); err != nil {
+		return Manifest{}, err
 	}
 	out := Manifest{Format: "zip"}
 	for _, f := range r.File {
@@ -78,6 +97,9 @@ func FlattenSingleRoot(zipBytes []byte) ([]byte, error) {
 	r, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
 		return nil, fmt.Errorf("pkgzip: open: %w", err)
+	}
+	if err := checkUncompressed(r); err != nil {
+		return nil, err
 	}
 
 	// Real content files only — the wrapping-dir decision ignores directory

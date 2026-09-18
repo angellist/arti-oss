@@ -707,6 +707,13 @@ func (s *Service) validateQuote(ctx context.Context, row sqlc.Artifact, quote st
 	if pgstore.IsPackageLike(row.ArtifactType) {
 		return ErrQuoteUnsupported
 	}
+	// A MAP version is NDJSON run through the code renderer, so the page text
+	// and the stored bytes are not the same string and a quote match here
+	// would be luck. Say unsupported rather than "not found", which would
+	// send the commenter looking for a typo that isn't there.
+	if row.ArtifactType == pgstore.TypeMap {
+		return ErrQuoteUnsupported
+	}
 	rc, err := s.art.Content(ctx, row)
 	if err != nil {
 		return err

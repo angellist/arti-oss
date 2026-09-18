@@ -88,6 +88,21 @@ export function classifyTypeChange(
         note: "the zip has no arti-app.json at its root",
       };
     }
+    // A MAP cannot be retyped in either direction — the server refuses it
+    // even with allow_type_change, because a MAP's entries are keyed to the
+    // slug and republishing as anything else orphans them. The generic
+    // warning below offers an acknowledge-and-proceed the server will not
+    // honour, so say plainly that this one is refused.
+    if (target.artifactType === "MAP" || next.artifactType === "MAP") {
+      return {
+        severity: "hard",
+        kind: "artifact-type",
+        from: target.artifactType,
+        to: next.artifactType,
+        headline: "A MAP cannot change type",
+        note: "its entries are keyed to the slug; publish to a different slug instead",
+      };
+    }
     return {
       severity: "hard",
       kind: "artifact-type",

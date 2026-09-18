@@ -67,6 +67,7 @@ func newAppsStack(t *testing.T) (*pgstore.Store, *apps.Service, *recordingProvid
 	t.Helper()
 	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
 	svc := artifacts.NewService(st, "http://localhost", nil, nil)
+	svc.SetMapEnabled(true)
 	signer := auth.NewJWTSigner([]byte("test-signing-key-at-least-32-bytes!"))
 	prov := &recordingProvider{}
 	servers := map[string]apps.ServerConfig{
@@ -264,6 +265,41 @@ func TestProxyArtiWriteShortCircuits(t *testing.T) {
 	}
 	if row.WrittenViaName == nil || *row.WrittenViaName != "demo app" {
 		t.Errorf("written_via_name = %v, want the app's title", row.WrittenViaName)
+	}
+}
+
+// A MAP write short-circuits in-process like every other arti write. Routing it
+// out to OBO would make a sign-up click wait on an internet round trip, and the
+// gateway authorizes nothing MapPut does not check itself.
+func TestProxyArtiMapWriteShortCircuits(t *testing.T) {
+	st, appsSvc, prov := newAppsStack(t)
+	r := chi.NewRouter()
+	appsSvc.MountProxy(r)
+
+	appID := newAppArtifact(t, st, []map[string]string{
+		{"server": "arti", "tool": "map_put"},
+		{"server": "arti", "tool": "map_get"},
+	})
+	token := mustToken(t, appsSvc, "alice@example.com", appID)
+
+	slug := uniqueSlug("app-map")
+	rr := proxyPost(t, r, token, appID, "arti", "map_put", map[string]any{
+		"slug": slug, "title": "app map", "allowed_access": []string{"*"}, "allowed_write": []string{"*"},
+		"entries": []map[string]any{{"key": "member:1", "value": map[string]any{"name": "Alice"}}},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("map_put status = %d, want 200 (in-process); body = %s", rr.Code, rr.Body.String())
+	}
+	if prov.calls != 0 {
+		t.Fatalf("map_put reached the OBO provider %d time(s); it must never leave the cluster", prov.calls)
+	}
+
+	rr = proxyPost(t, r, token, appID, "arti", "map_get", map[string]any{"slug": slug, "key": "member:1"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("map_get status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "alice@example.com") {
+		t.Errorf("entry does not carry the viewer as updated_by: %s", rr.Body.String())
 	}
 }
 

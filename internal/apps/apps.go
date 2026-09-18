@@ -148,6 +148,10 @@ var artiInProcess = map[string]bool{
 	"append_artifact":        true,
 	"update_artifact":        true,
 	"archive_artifact":       true,
+	"map_get":                true,
+	"map_put":                true,
+	"map_delete":             true,
+	"map_snapshot":           true,
 }
 
 // isArtiSelf reports whether server names this arti instance. Both spellings
@@ -267,6 +271,38 @@ func appOf(c auth.Claims) string {
 		}
 	}
 	return ""
+}
+
+// appConsentDomain separates the consent record from every JWT the signer
+// mints: the value never parses as a token, so it cannot stand in for a
+// session or the bridge.
+const (
+	appConsentDomain = "arti-app-consent:"
+	appConsentTTL    = 30 * 24 * time.Hour
+)
+
+type appConsent struct {
+	Email string `json:"e"`
+	App   string `json:"a"`
+	Exp   int64  `json:"x"`
+}
+
+// SignAppConsent seals the record that email chose to run artifactID. Wired to
+// artifacts.Service.SetAppConsentFns.
+func (s *Service) SignAppConsent(email, artifactID string) (string, error) {
+	return s.signer.SealBlob(appConsentDomain, appConsent{Email: email, App: artifactID, Exp: time.Now().Add(appConsentTTL).Unix()}), nil
+}
+
+// VerifyAppConsent returns the (email, artifactID) a consent record binds.
+func (s *Service) VerifyAppConsent(value string) (email, artifactID string, err error) {
+	var c appConsent
+	if !s.signer.OpenBlob(appConsentDomain, value, &c) {
+		return "", "", errors.New("not an app consent record")
+	}
+	if c.Email == "" || c.App == "" || time.Now().Unix() > c.Exp {
+		return "", "", errors.New("app consent record expired or incomplete")
+	}
+	return c.Email, c.App, nil
 }
 
 // EmbedUserApp authorizes a user-mode embed mint request: it verifies email

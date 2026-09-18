@@ -271,6 +271,7 @@ func bindings(c *Config) []binding {
 		integer("ARTI_API_KEY_RPM", &c.Auth.APIKeys.MintRPM),
 		// Share links
 		boolean("ARTI_SHARE_ENABLED", &c.Share.Enabled),
+		boolean("ARTI_MAP_ARTIFACTS", &c.Maps.Enabled),
 		duration("ARTI_SHARE_MAX_TTL", &c.Share.MaxTTL),
 		integer("ARTI_SHARE_OPEN_RPM", &c.Share.OpenRPM),
 		integer("ARTI_SHARE_MINT_RPM", &c.Share.MintRPM),

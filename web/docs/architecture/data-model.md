@@ -117,6 +117,9 @@ Other domains have their own tables:
   with the artifact. See [Comments](comments.md).
 - **MCP-OAuth, OBO, and device-auth tables** — the auth flows. See
   [Authentication & access](auth.md).
+- **MAP entries** — one row per key of a MAP's live head, with its value, revision and
+  last writer. The artifact rows for that slug hold snapshots of this table, not the
+  keys themselves. See [Concepts](../overview/concepts.md#artifact-types).
 - **Idempotency keys** — dedup for write retries.
 - **User groups + RBAC roles and assignments** — access control.
 - **LLM usage** — the budget ledger for the built-in `llm.complete`.

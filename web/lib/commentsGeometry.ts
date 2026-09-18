@@ -33,6 +33,14 @@ export const RAIL_WIDTH = 26;
 export const RAIL_GAP = 8;
 export const RAIL_FOOTPRINT = RAIL_RIGHT + RAIL_WIDTH + RAIL_GAP;
 
+// A collapsed thread's bubble at its widest (icon + a two-digit count).
+export const BUBBLE_WIDTH = 48;
+// Space kept clear to the right of the doc's BOX so a collapsed bubble always
+// has a gutter to sit in: the hug gap, the bubble, and the rail's keep-out. A
+// window too narrow to leave this much beside the document pads its text in
+// instead of letting the bubble sit on top of it.
+export const MIN_GUTTER = SHIFT_GAP + BUBBLE_WIDTH + RAIL_FOOTPRINT;
+
 /**
  * Left edge (px) of the margin column — cards and collapsed-thread chips alike.
  *
@@ -42,13 +50,17 @@ export const RAIL_FOOTPRINT = RAIL_RIGHT + RAIL_WIDTH + RAIL_GAP;
  *
  * The column hugs the text: it parks SHIFT_GAP past the document's right edge,
  * so on a window wide enough for both it sits entirely in the gutter and covers
- * no prose. The cap is the card column's own left edge — past that a card would
- * run under the rail and off the viewport — so on a narrow window the column
- * stops there and overlaps the text by whatever computeShift could not clear.
- * Using SHIFT_GAP as the hug gap is what makes the two meet exactly: once the
- * doc has shifted as far as it needs to, `docRight + SHIFT_GAP` IS
+ * no prose. The cap is the item's own left edge at the right of the viewport —
+ * past that it would run under the rail and off screen — so on a narrow window
+ * the column stops there and overlaps the text by whatever computeShift could
+ * not clear. Using SHIFT_GAP as the hug gap is what makes the two meet exactly:
+ * once the doc has shifted as far as it needs to, `docRight + SHIFT_GAP` IS
  * `viewportWidth - CARD_FOOTPRINT`, so the column lands on the cap rather than
  * a few px short of it.
+ *
+ * `footprint` is per item, and a collapsed bubble is a seventh of a card wide:
+ * capping it at the card column's left edge parked it on the text while the
+ * gutter beside it was still empty. It only has to clear the rail.
  */
 export function columnLeft(m: {
   /** container.getBoundingClientRect().right, after the doc shift */
@@ -56,9 +68,11 @@ export function columnLeft(m: {
   viewportWidth: number;
   /** gap between the doc's right edge and the column */
   gap?: number;
+  /** width of the item plus the keep-out to its right; a card by default */
+  footprint?: number;
 }): number {
   const hug = m.containerRight + (m.gap ?? SHIFT_GAP);
-  const rightLimit = m.viewportWidth - CARD_FOOTPRINT;
+  const rightLimit = m.viewportWidth - (m.footprint ?? CARD_FOOTPRINT);
   return Math.round(Math.max(8, Math.min(hug, rightLimit)));
 }
 
@@ -105,6 +119,8 @@ export interface ShiftInput {
 export interface Shift {
   doc: number;
   tb: number;
+  /** px of padding the doc pulls its text in by, on top of its own */
+  pad: number;
 }
 
 /**
@@ -118,6 +134,12 @@ export interface Shift {
  * two are deliberately not one number: the toolbar is always full-width while
  * the doc narrows with the width control, so a shared cap let the toolbar's
  * smaller slack zero out the doc's shift on narrower windows.
+ *
+ * `pad` is what the sliding cannot buy: once the doc is as far left as its
+ * margin allows and MIN_GUTTER of the right one is still missing, the text pulls
+ * in by the difference. It is measured against the doc's BOX, which padding does
+ * not move, so it does not feed back into its own next measurement the way the
+ * shifts do.
  */
 export function computeShift(m: ShiftInput): Shift {
   // Undo the current translate → natural edges.
@@ -132,5 +154,6 @@ export function computeShift(m: ShiftInput): Shift {
   // Toolbar follows the doc, but never past its own left margin.
   const innerLeft = m.toolbarInnerLeft + m.tbShift;
   const tbSlack = Math.max(0, innerLeft - m.mainLeft - SHIFT_LMIN);
-  return { doc, tb: Math.min(doc, tbSlack) };
+  const pad = Math.max(0, MIN_GUTTER - (m.viewportWidth - (docRight - doc)));
+  return { doc, tb: Math.min(doc, tbSlack), pad };
 }

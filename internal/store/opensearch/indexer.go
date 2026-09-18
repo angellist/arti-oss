@@ -80,6 +80,13 @@ func (ix *Indexer) IndexVersion(ctx context.Context, row sqlc.Artifact, isLatest
 			}
 		case pgstore.TypePackage, pgstore.TypeApp:
 			doc.ContentText = extractPackageText(row)
+		case pgstore.TypeMap:
+			// A MAP snapshot is machine state — keys, revisions, timestamps,
+			// and whatever JSON a caller stored — so it stays findable by
+			// title, slug and labels while its body is withheld from
+			// content_text, for the same reason SkipFullText exists above.
+			// Decided rather than defaulted: MAP falls through this switch
+			// either way, and a later reader should see that it was a choice.
 		}
 	}
 

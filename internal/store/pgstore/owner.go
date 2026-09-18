@@ -283,3 +283,18 @@ func grantWriteBySlugTx(ctx context.Context, tx pgx.Tx, slug, token string) erro
 func ownerMatches(owner, caller string) bool {
 	return caller != "" && owner != "" && strings.EqualFold(owner, caller)
 }
+
+// SlugOwnerEmail returns the recorded owner of slug, or "" when none is
+// recorded. Unlike DocOwner it needs no artifact row, so it answers for a slug
+// whose versions are all archived — which is exactly when MAP creation has to
+// ask who a leftover head belonged to.
+func (s *Store) SlugOwnerEmail(ctx context.Context, slug string) (string, error) {
+	owner, err := slugOwner(ctx, s.pool, slug)
+	if errors.Is(err, ErrNoOwner) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return owner, nil
+}

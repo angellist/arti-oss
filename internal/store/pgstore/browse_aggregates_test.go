@@ -15,23 +15,15 @@ import (
 // top-N), paged and sorted — the Browse page needs to page through all
 // labels/content-types/scopes, unlike the sidebar's top-N Aggregates.
 //
-// "type" is a closed 4-value enum, so seeding one row of each guarantees a
+// "type" is a closed 5-value enum, so seeding one row of each guarantees a
 // deterministic universe regardless of what the shared test DB already
-// holds: Total must be exactly 4, and paging by name ASC at page_size=2
-// must split them alphabetically across two pages.
+// holds: Total must be exactly 5, and paging by name ASC at page_size=2
+// must split them alphabetically across three pages.
 func TestBrowseAggregates_Type_PaginatesByName(t *testing.T) {
 	ctx := context.Background()
 	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
 
-	for _, typ := range []string{pgstore.TypeText, pgstore.TypePackage, pgstore.TypeApp, pgstore.TypeAttachment} {
-		_, err := st.Put(ctx, pgstore.PutInput{
-			ArtifactType: typ, Title: unique("browsetype"), ContentType: "text/plain",
-			Content: []byte("x"), Creator: "alice@example.com",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedOneOfEachType(t, st, ctx, "browsetype")
 
 	page1, err := st.BrowseAggregates(ctx, pgstore.BrowseAggregatesInput{
 		Facet: "type", Sort: "name", Dir: "asc", Limit: 2, Offset: 0,
@@ -39,8 +31,8 @@ func TestBrowseAggregates_Type_PaginatesByName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page1.Total != 4 {
-		t.Fatalf("Total = %d, want 4", page1.Total)
+	if page1.Total != 5 {
+		t.Fatalf("Total = %d, want 5", page1.Total)
 	}
 	got1 := []string{page1.Values[0].Value, page1.Values[1].Value}
 	if !reflect.DeepEqual(got1, []string{"APP", "ATTACHMENT"}) {
@@ -53,12 +45,46 @@ func TestBrowseAggregates_Type_PaginatesByName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page2.Total != 4 {
-		t.Fatalf("page2 Total = %d, want 4", page2.Total)
+	if page2.Total != 5 {
+		t.Fatalf("page2 Total = %d, want 5", page2.Total)
 	}
 	got2 := []string{page2.Values[0].Value, page2.Values[1].Value}
-	if !reflect.DeepEqual(got2, []string{"PACKAGE", "TEXT"}) {
-		t.Fatalf("page2 = %v, want [PACKAGE TEXT]", got2)
+	if !reflect.DeepEqual(got2, []string{"MAP", "PACKAGE"}) {
+		t.Fatalf("page2 = %v, want [MAP PACKAGE]", got2)
+	}
+
+	page3, err := st.BrowseAggregates(ctx, pgstore.BrowseAggregatesInput{
+		Facet: "type", Sort: "name", Dir: "asc", Limit: 2, Offset: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page3.Values) != 1 || page3.Values[0].Value != "TEXT" {
+		t.Fatalf("page3 = %v, want [TEXT]", page3.Values)
+	}
+}
+
+// seedOneOfEachType writes one artifact of every artifact_type, so a test
+// that asserts on the closed `type` facet has a deterministic universe in the
+// shared test DB. MAP is the one type that needs a slug: its head is keyed by
+// slug, so Put refuses a slugless one.
+func seedOneOfEachType(t *testing.T, st *pgstore.Store, ctx context.Context, tag string) {
+	t.Helper()
+	for _, typ := range []string{pgstore.TypeText, pgstore.TypePackage, pgstore.TypeApp, pgstore.TypeAttachment} {
+		if _, err := st.Put(ctx, pgstore.PutInput{
+			ArtifactType: typ, Title: unique(tag), ContentType: "text/plain",
+			Content: []byte("x"), Creator: "alice@example.com",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	slug := unique(tag + "-map")
+	if _, err := st.Put(ctx, pgstore.PutInput{
+		ArtifactType: pgstore.TypeMap, NamedSlug: &slug, Title: unique(tag),
+		ContentType: pgstore.MapContentType, Content: []byte{}, Creator: "alice@example.com",
+		MapID: pgstore.NewMapID(),
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -140,17 +166,9 @@ func TestBrowseAggregates_TotalSurvivesPastLastPage(t *testing.T) {
 	ctx := context.Background()
 	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
 
-	for _, typ := range []string{pgstore.TypeText, pgstore.TypePackage, pgstore.TypeApp, pgstore.TypeAttachment} {
-		_, err := st.Put(ctx, pgstore.PutInput{
-			ArtifactType: typ, Title: unique("browsetypepastend"), ContentType: "text/plain",
-			Content: []byte("x"), Creator: "alice@example.com",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedOneOfEachType(t, st, ctx, "browsetypepastend")
 
-	// Total distinct `type` values is a closed set of (at most) 4, so an
+	// Total distinct `type` values is a closed set of (at most) 5, so an
 	// offset of 1000 is guaranteed past the last page.
 	res, err := st.BrowseAggregates(ctx, pgstore.BrowseAggregatesInput{
 		Facet: "type", Sort: "name", Dir: "asc", Limit: 2, Offset: 1000,
@@ -161,8 +179,8 @@ func TestBrowseAggregates_TotalSurvivesPastLastPage(t *testing.T) {
 	if len(res.Values) != 0 {
 		t.Fatalf("expected 0 values past the last page, got %v", res.Values)
 	}
-	if res.Total != 4 {
-		t.Fatalf("Total = %d, want 4 (must survive an empty page)", res.Total)
+	if res.Total != 5 {
+		t.Fatalf("Total = %d, want 5 (must survive an empty page)", res.Total)
 	}
 }
 

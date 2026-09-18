@@ -186,3 +186,40 @@ func QS(pairs ...any) string {
 }
 
 var errMissing = errors.New("missing identifier")
+
+// DoJSONAllowing is DoJSON except that the listed statuses are not errors:
+// the body is decoded and the status returned. The map put path needs it
+// because 409 carries the incumbent entry, which is the useful half of a
+// lost claim, and readError would throw that body away.
+func (c *Client) DoJSONAllowing(method, path string, body any, into any, allow ...int) (int, error) {
+	var rdr io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rdr = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, c.Base+path, rdr)
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	ok := resp.StatusCode < 400
+	for _, a := range allow {
+		if resp.StatusCode == a {
+			ok = true
+		}
+	}
+	if !ok {
+		return resp.StatusCode, readError(resp)
+	}
+	if into == nil {
+		return resp.StatusCode, nil
+	}
+	return resp.StatusCode, json.NewDecoder(resp.Body).Decode(into)
+}

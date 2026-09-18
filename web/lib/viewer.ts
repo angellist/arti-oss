@@ -67,6 +67,9 @@ export function isTextualContentType(ct: string): boolean {
     // (application/vnd.arti.diagram+json) be a TEXT artifact.
     base.endsWith("+json") ||
     base === "application/json" ||
+    // A MAP snapshot is NDJSON: one JSON object per line. Text, not a binary
+    // body — without this a MAP version renders as a download card.
+    base === "application/x-ndjson" ||
     base === "application/yaml" ||
     base === "application/javascript"
   );

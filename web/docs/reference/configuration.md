@@ -105,7 +105,9 @@ Real S3 in prod, MinIO in dev. An empty `S3_ENDPOINT` targets AWS.
 ## Apps & MCP
 
 The governed proxy for APP artifacts and the upstream MCP servers they may reach. See the
-[APP SDK](app-sdk.md#built-in-servers).
+[APP SDK](app-sdk.md#built-in-servers) for the app-side call, and
+[Connect your own MCP servers](../guides/self-hosting.md#mcp-servers) for wiring a server
+of your own.
 
 | Variable | Default | Meaning |
 |---|---|---|

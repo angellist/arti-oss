@@ -181,4 +181,20 @@ config) bypass the filter for management actions. Restricted artifacts return
 `404`, not `403`, so they can't be probed. See [Data model](data-model.md) for the
 column itself.
 
+One rule sits above all of that: the **block list**. An admin with
+`MANAGE_ARTIFACTS` can block a slug, a slug glob, or a slug-less artifact's id, and
+every version it matches then answers `404` to everyone, admins included, while
+writes to it are refused. It is enforced in the store rather than in any one
+surface, so web, REST, MCP, apps, embeds, share links and comments all go dark
+together. Nothing about the document changes, so lifting the block restores it
+exactly. See [`arti block`](../reference/cli.md#arti-block).
+
+One narrow exception exists so that an admin can decide whether to lift a block:
+the review routes under `/api/admin/blocked/`, reached from the **Blocked
+Documents** settings page. The store reads behind them return a row only while
+that row is blocked, so they cannot serve an ordinary document, and a body comes
+back as plain text under `nosniff` whatever the document is, so a blocked HTML
+page cannot run in the session of the admin reading it. Every ordinary surface
+stays closed.
+
 For where this lives in the code, see the [Codebase map](../development/codebase-map.md).

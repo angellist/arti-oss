@@ -27,6 +27,40 @@ injected into the page. This token authorizes **only** the apps proxy, **only**
 for its one app. The main auth middleware rejects an app-scoped token on every
 regular API/MCP route, so a leaked app token can't drive the rest of arti.
 
+## The viewer consents before the app runs {#run-as-consent}
+
+An APP runs as whoever opens it: its code drives arti's own tools as that viewer
+and every connector that viewer has consented to. It therefore does not run on
+open. Until the viewer has said yes to **this version**, `/app/{ident}` and the
+document routes that serve an APP's HTML answer with a consent page, and arti
+mints no bridge token at all.
+
+The consent page states who published the version and when, and names the
+credential it was written with. It flags a version published by a service
+credential, an API key or another app as automated, because that code reached
+arti without a person typing in it. It lists every `(server, tool)` pair the
+app's `arti-app.json` declares, grouped by server, and labels each one read,
+write or llm — arti's own tools from a fixed table, other servers by the verb in
+the tool name, with an unrecognized verb treated as a write.
+
+A yes is stored as a signed cookie for that (viewer, version) pair, sealed under
+its own HMAC domain so the record never parses as a session or bridge token. A
+new version is a new artifact id, so a republish asks again. The viewer may also
+tick **trust every version of this slug**, which stores a second record bound to
+the slug, the publisher and a digest of the declared tools: later versions run
+without asking while all three hold, and a version from a different publisher or
+with a different tool set asks again.
+
+Two paths need care. Inside the viewer's sandboxed preview frame the consent page
+cannot set a cookie for arti's origin, so it relays the click to the parent
+window, which grants only when the app id in the message matches the artifact
+UUID in the frame `src` it set itself. Once consent holds, a further grant
+through that relay returns early: the frame is running the app's own code by
+then, so it must not be able to widen itself to slug scope.
+
+The gate fails closed: an arti with a bridge-token minter but no consent verifier
+refuses every APP document load.
+
 ## Request flow
 
 arti injects the bridge server-side and serves the entry page full-screen at

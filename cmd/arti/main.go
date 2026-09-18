@@ -48,5 +48,7 @@ type CLI struct {
 	Search   SearchCmd   `cmd:"" help:"substring search"`
 	Version  VersionCmd  `cmd:"" help:"print version + check for a newer main build"`
 	Update   UpdateCmd   `cmd:"" help:"update arti to the latest main build (go install)"`
+	Map      MapCmd      `cmd:"" help:"read and write a MAP artifact (keyed key/value store under one slug)"`
+	Block    BlockCmd    `cmd:"" help:"admin: block/unblock documents by slug or pattern (hides them from everyone)"`
 	Token    TokenCmd    `cmd:"" hidden:"" help:"print bearer token (debug)"`
 }

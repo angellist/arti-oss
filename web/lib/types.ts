@@ -1,4 +1,4 @@
-export type ArtifactType = "TEXT" | "PACKAGE" | "ATTACHMENT" | "APP";
+export type ArtifactType = "TEXT" | "PACKAGE" | "ATTACHMENT" | "APP" | "MAP";
 
 export interface ArtifactInfo {
   artifact_id: string;
@@ -129,6 +129,41 @@ export interface BrowseAggregatesResponse {
 // Group is a named collection of member emails. Granting its `token`
 // (`group:<name>`) in an artifact's allowed_access lets the group's current
 // members read it. Served by GET /api/groups.
+// Block is one entry of the admin block list: a pattern that takes every
+// document it matches away from every reader, admins included. The document
+// itself is untouched, so removing the entry restores it.
+export interface Block {
+  pattern: string;
+  reason: string;
+  created_by: string;
+  created_at: string;
+}
+
+// BlockedDoc is what a block currently hides, as the admin review surface
+// sees it: identity and provenance, never content. Fetching a body is a
+// separate call, so nothing that renders a list can render a document.
+export interface BlockedDoc {
+  artifact_id: string;
+  named_slug: string | null;
+  version: number | null;
+  title: string;
+  creator: string;
+  artifact_type: string;
+  content_type: string;
+  size_bytes: number | null;
+  created_at: string;
+}
+
+// BlockedDocDetail adds the fields the single-document review page shows.
+export interface BlockedDocDetail extends BlockedDoc {
+  description: string | null;
+  labels: string[];
+  scopes: string[];
+  archived: boolean;
+  body_readable: boolean;
+  max_bytes: number;
+}
+
 export interface Group {
   name: string;
   display_name: string;

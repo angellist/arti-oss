@@ -308,3 +308,23 @@ func TestBuildManifest_ExtensionlessEntriesAreTyped(t *testing.T) {
 		t.Fatalf("ReadEntry ct=%q err=%v", ct, err)
 	}
 }
+
+// A zip whose central directory declares more than the cap must be refused
+// before any entry is inflated, whatever the compressed bytes actually hold.
+func TestBuildManifest_RefusesOversizedDeclaration(t *testing.T) {
+	zb := makeZip(t, map[string]string{"index.html": "<html></html>"})
+	// Central-directory file header: signature 0x02014b50, uncompressed size
+	// at byte offset 24. Declare 4 GiB - 2 (0xFFFFFFFF would mean "see zip64").
+	sig := []byte{0x50, 0x4b, 0x01, 0x02}
+	i := bytes.LastIndex(zb, sig)
+	if i < 0 {
+		t.Fatal("no central directory header")
+	}
+	copy(zb[i+24:], []byte{0xfe, 0xff, 0xff, 0xff})
+	if _, err := pkgzip.BuildManifest(zb); err == nil {
+		t.Fatal("BuildManifest accepted a package declaring 4 GiB uncompressed")
+	}
+	if _, err := pkgzip.FlattenSingleRoot(zb); err == nil {
+		t.Fatal("FlattenSingleRoot accepted a package declaring 4 GiB uncompressed")
+	}
+}

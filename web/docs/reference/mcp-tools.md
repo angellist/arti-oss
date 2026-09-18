@@ -1,7 +1,7 @@
 ---
 title: MCP tools
 order: 2
-summary: arti's own MCP server — the 15 tools it exposes at /mcp, their input schemas and results, and the OAuth flow MCP clients use to connect.
+summary: arti's own MCP server — the 19 tools it exposes at /mcp, their input schemas and results, and the OAuth flow MCP clients use to connect.
 ---
 
 # MCP tools
@@ -46,7 +46,7 @@ what the caller can read (their email + group memberships); admins with
 
 ## Tools
 
-15 tools (`internal/mcp/server.go:120`). `ident` accepts a UUID **or** a named slug.
+19 tools (`internal/mcp/server.go:118`). `ident` accepts a UUID **or** a named slug.
 `version` is optional — for a slug it defaults to the latest version the caller can read.
 
 ### `add_artifact`
@@ -325,6 +325,69 @@ Mark a thread resolved, or reopen it. Resolving the same state twice is a no-op.
 | `reopen` | boolean | no | `true` reopens instead of resolving |
 
 **Returns:** the updated `Thread`.
+
+### `map_get`
+
+Read from a MAP. Pass `key` for one entry, or `prefix` to list a page of entries whose
+keys start with it; omit both to list from the beginning. A list page returns a
+`cursor` — pass it back to continue. Also returns the map's key and byte counts against
+their limits.
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `slug` | string | yes | |
+| `key` | string | no | one entry; mutually exclusive with `prefix` |
+| `prefix` | string | no | list entries under this key prefix |
+| `cursor` | string | no | continue a previous page |
+| `limit` | int | no | page size, default 100, max 1000 |
+
+**Returns:** one `entry`, or `{ "entries": [...], "cursor": string, "stats": {...} }`.
+
+### `map_put`
+
+Write entries to a MAP — one call covers a single write and a batch of up to 100.
+Creates the MAP at v1 when the slug does not exist, in which case `title` is required.
+At most one guard per entry: `if_absent` writes only when the key is free, and
+`if_rev` writes only when the entry is still at that revision. Without a guard the
+write is last-wins. The call returns 409 when any entry's guard lost, and the losing
+entry comes back with the incumbent that won.
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `slug` | string | yes | |
+| `entries` | object[] | yes | `{key, value, if_absent?, if_rev?}`; ≤ 100 |
+| `title` | string | no | required when this call creates the map |
+| `description` / `labels` / `scopes` | | no | read only on the creating call |
+| `allowed_access` / `allowed_write` | string[] | no | read only on the creating call; refused otherwise |
+
+**Returns:** `{ "results": [...], "stats": {...}, "conflict": boolean }`.
+
+### `map_delete`
+
+Delete keys from a MAP, up to 100 per call. Deleting a key that is not there succeeds
+with a count of zero.
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `slug` | string | yes | |
+| `keys` | string[] | yes | ≤ 100 |
+
+**Returns:** `{ "deleted": int }`.
+
+### `map_snapshot`
+
+Freeze a MAP's current keys as a new immutable version, stored as NDJSON — one
+`{key, value, rev, updated_at, updated_by}` object per line, in key order. This is what
+makes a map citable, since `/s/<slug>` resolves to the latest snapshot rather than to
+the live head. A snapshot matching the latest version is a no-op and returns it with
+`unchanged: true`, so snapshotting an idle map on a schedule does not grow its version
+chain.
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `slug` | string | yes | |
+
+**Returns:** `{ "unchanged": boolean, "version": int, "entries": int, "artifact_id": string, "size_bytes": int }`.
 
 ## See also
 

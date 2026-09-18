@@ -175,6 +175,74 @@ func toolSpecs() []toolSpec {
 			},
 		},
 		{
+			Name:        "map_get",
+			Description: "Read from a MAP artifact (a keyed key/value store held under one slug). Pass key for a single entry, or prefix to list a page of entries whose keys start with it (omit both to list from the beginning). Keys are flat strings namespaced by a ':' separator — e.g. 'seen:cnv_123', 'cfg:last_run' — there are no tables and no joins. A list page returns a cursor; pass it back as cursor for the next page. Also returns the map's current key and byte counts against their limits.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"slug"},
+				"properties": map[string]any{
+					"slug":   str(),
+					"key":    str(),
+					"prefix": str(),
+					"cursor": str(),
+					"limit":  map[string]any{"type": "integer"},
+				},
+			},
+		},
+		{
+			Name:        "map_put",
+			Description: "Write entries to a MAP artifact. Pass entries as an array of {key, value} — value is any JSON. One call covers a single write and a batch (up to 100 entries). Creates the MAP at v1 when the slug does not exist yet, in which case title is required. GUARDS, at most one per entry: if_absent=true writes only when the key is free, and is how you claim a lease or dedupe a trigger — a lost claim comes back with conflict=true and the incumbent entry, so you learn who holds it without a second call. if_rev=<n> writes only when the entry is still at revision n, which is compare-and-set for a read-modify-write. Without a guard the write is last-wins. The whole call returns 409 if any entry's guard lost. On the call that CREATES the map you may also pass allowed_access / allowed_write to gate who can read and write it — same meaning as on add_artifact, and worth setting there rather than afterwards, because entries written before you restrict it are readable by everyone in between. Limits: 64 KiB per value, 10000 keys and 8 MiB per map; a write that would cross one is refused and the error names the limit.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"slug", "entries"},
+				"properties": map[string]any{
+					"slug":  str(),
+					"title": str(),
+					"entries": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type":     "object",
+							"required": []string{"key", "value"},
+							"properties": map[string]any{
+								"key":       str(),
+								"value":     map[string]any{},
+								"if_absent": map[string]any{"type": "boolean"},
+								"if_rev":    map[string]any{"type": "integer"},
+							},
+						},
+					},
+					"description":    str(),
+					"labels":         strArr(),
+					"scopes":         strArr(),
+					"allowed_access": strArr(),
+					"allowed_write":  strArr(),
+				},
+			},
+		},
+		{
+			Name:        "map_delete",
+			Description: "Delete keys from a MAP artifact. Deleting a key that is not there succeeds with a count of zero. Up to 100 keys per call.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"slug", "keys"},
+				"properties": map[string]any{
+					"slug": str(),
+					"keys": strArr(),
+				},
+			},
+		},
+		{
+			Name:        "map_snapshot",
+			Description: "Freeze a MAP's current contents as a new immutable version, stored as NDJSON (one {key,value,rev,updated_at,updated_by} object per line, in key order). This is what makes a map citable: /s/<slug> resolves to the latest SNAPSHOT, not to the live head. A snapshot whose contents match the latest version is a no-op and returns that version with unchanged=true, so snapshotting an idle map on a schedule does not grow its version chain.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"slug"},
+				"properties": map[string]any{
+					"slug": str(),
+				},
+			},
+		},
+		{
 			Name:        "update_artifact",
 			Description: "Update an existing artifact's METADATA in place — title, description, scopes, labels, and/or allowed_access — WITHOUT creating a new version. Use this to LABEL or re-describe a doc that was published bare: labels and description are the two fields browse/search surface, so fixing them is how you make an existing artifact findable. Content and artifact_type are immutable: to change the body, call add_artifact with the same named_slug to publish a new version. `ident` is a UUID (edits that exact version) or a slug (edits the latest version you can read). Title/description/labels/scopes are per-version: sibling versions keep theirs, so edit them individually if needed. allowed_access/allowed_write are per-DOCUMENT: an owner/admin edit applies to EVERY version of the slug (archived included), and even re-sending the current values re-converges any drifted versions — so avoid re-sending ACL fields on every routine metadata touch. Only fields you pass are changed; omit a field to leave it untouched, or pass an empty value to clear it (e.g. allowed_access:[] = creator-only, description:\"\" = no description). allowed_write is the subset of readers who may write (omit = writers follow readers; [] = creator-only writes); it is unioned into allowed_access. Creator-or-MANAGE_ARTIFACTS only; editing a kind:skill artifact also requires MANAGE_SKILLS. comments_enabled is the per-DOCUMENT comment switch (false turns commenting off for every version of the slug, hiding all comment controls and refusing new comments); unlike the other fields it is settable only by the artifact's OWNER (its first version's creator, unless ownership was transferred) or an admin.",
 			InputSchema: map[string]any{
@@ -373,6 +441,14 @@ func (s *Server) dispatch(ctx context.Context, name string, args json.RawMessage
 		return s.toolAdd(ctx, args)
 	case "append_artifact":
 		return s.toolAppend(ctx, args)
+	case "map_get":
+		return s.toolMapGet(ctx, args)
+	case "map_put":
+		return s.toolMapPut(ctx, args)
+	case "map_delete":
+		return s.toolMapDelete(ctx, args)
+	case "map_snapshot":
+		return s.toolMapSnapshot(ctx, args)
 	case "update_artifact":
 		return s.toolUpdate(ctx, args)
 	case "get_artifact":

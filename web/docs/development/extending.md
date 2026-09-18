@@ -61,8 +61,7 @@ equivalent REST handler does. See the [MCP tools reference](../reference/mcp-too
 APP artifacts call MCP tools through the governed apps proxy
 (`internal/apps/`, see [App serving](../architecture/app-serving.md)). The set of
 upstream servers an app may reach is the `appServers` map built in
-`cmd/arti-server/cmd_serve.go:307` and passed to `apps.New(...)`
-(`cmd_serve.go:469`).
+`cmd/arti-server/cmd_serve.go` and passed to `apps.New(...)`.
 
 To add one, add an entry to that map keyed by the name apps will reference in
 their `arti-app.json`:
@@ -85,8 +84,10 @@ their `arti-app.json`:
 - `Auth: "service"` is the built-in `llm` server (`internal/llm/`), wired
   separately.
 
-The map is overridable at runtime via the `ARTI_APP_MCP_SERVERS` env var
-(merged over the defaults at `cmd_serve.go:396`) — see the
+The map is overridable at runtime via the `ARTI_APP_MCP_SERVERS` env var, which
+is how a deployment adds a server without a code change — see
+[Connect your own MCP servers](../guides/self-hosting.md#mcp-servers) for the JSON
+shape and what an `oauth` upstream must support, and the
 [Configuration reference](../reference/configuration.md). An app still only
 reaches a server if its `arti-app.json` allowlist names it; the proxy re-checks
 that allowlist on every tool call.

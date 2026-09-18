@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { appHref } from "@/lib/hrefs";
+import MapTable from "./MapTable";
 import type { ArtifactInfo, Me, PackageManifest } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
 import { relativeTime } from "@/lib/time";
@@ -12,7 +13,7 @@ import { isEditableArtifact } from "@/lib/edit";
 import { isComparableArtifact } from "@/lib/diff";
 import MarkdownBody from "./MarkdownBody";
 import { LabelEditor, ScopeEditor } from "./ChipEditors";
-import { archiveArtifact, encodeFilePath, fetchPackageFile, hasPerm, latestVersionForSlug, listShares, sameEmail, unarchiveArtifact, updateArtifactCommentsEnabled, updateArtifactTitle } from "@/lib/arti";
+import { archiveArtifact, encodeFilePath, fetchPackageFile, hasPerm, latestVersionForSlug, listShares, sameEmail, snapshotMap, unarchiveArtifact, updateArtifactCommentsEnabled, updateArtifactTitle } from "@/lib/arti";
 import ViewerToolbar, { RawToggle, TEXT_SCALE, WIDTH_CLASS, useViewerPrefs, type Width } from "./ViewerToolbar";
 import AccessModal from "./AccessModal";
 import CommentsLayer from "./CommentsLayer";
@@ -27,6 +28,7 @@ import DiagramView from "./DiagramView";
 import DiagramArtifactEditor from "./DiagramArtifactEditor";
 import { isDiagramContentType } from "@/lib/diagram";
 import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
+import { useAppConsentMessage } from "@/lib/useAppConsentMessage";
 import ViewTracker from "./ViewTracker";
 import { useUpload } from "@/lib/upload-context";
 import { targetFromInfo } from "@/lib/upload-target";
@@ -96,7 +98,10 @@ function isPlainCode(ct: string) {
   // Strip params (e.g. "; charset=utf-8") so a JSON/YAML content_type with a
   // charset still matches — mirrors isPDF's normalization in this file.
   const base = ct.split(";")[0].trim().toLowerCase();
-  return base === "application/json" || base === "application/yaml";
+  // A MAP snapshot is NDJSON — one JSON object per line — so it reads as
+  // code, not as a document. Without this it falls through to the binary
+  // branch and downloads instead of rendering.
+  return base === "application/json" || base === "application/yaml" || base === "application/x-ndjson";
 }
 function isImage(ct: string) {
   return ct.startsWith("image/");
@@ -524,6 +529,8 @@ function ThreeDotsMenu({
   editTitle,
   onUploadVersion,
   onCompare,
+  onSnapshot,
+  snapshotting,
   commentsOn,
   canManageComments,
   commentsBusy,
@@ -553,6 +560,10 @@ function ThreeDotsMenu({
   // menu is the only way in.
   onUploadVersion?: () => void;
   onCompare?: () => void;
+  // Freeze a MAP's live head as a new version. Only offered on a writable MAP;
+  // every other type versions itself on write.
+  onSnapshot?: () => void;
+  snapshotting?: boolean;
   // Comments row: shown to everyone who can see the menu (the dot is the
   // answer to "why is there nowhere to comment?"), but only the owner —
   // canManageComments, the server's own verdict — can click it. Omitted
@@ -671,6 +682,24 @@ function ThreeDotsMenu({
               Compare versions
             </button>
           ) : null}
+          {onSnapshot ? (
+            <button
+              type="button"
+              onClick={() => { onSnapshot(); setOpen(false); }}
+              disabled={snapshotting}
+              className={`${MENU_ROW} hover:bg-neutral-50 disabled:opacity-50`}
+              title="freeze the live head as a new, permanent version"
+            >
+              <MenuIcon>
+                <svg {...MENU_SVG}>
+                  <rect x="3" y="6" width="18" height="14" rx="2" />
+                  <circle cx="12" cy="13" r="3.5" />
+                  <path d="M8 6 9.5 3h5L16 6" />
+                </svg>
+              </MenuIcon>
+              {snapshotting ? "snapshotting\u2026" : "Snapshot head"}
+            </button>
+          ) : null}
           {downloadHref ? (
             <a
               href={downloadHref + (downloadHref.includes("?") ? "&" : "?") + "download=1"}
@@ -779,6 +808,7 @@ export function CollapseToggle({
 function RenderedBody({ body, ct, src, allowPopups, docKey }: { body: string; ct: string; src?: string; allowPopups?: boolean; docKey?: string }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   useExternalLinkMessage(iframeRef);
+  useAppConsentMessage(iframeRef);
   if (isMarkdown(ct)) return <MarkdownBody body={body} docKey={docKey} />;
   if (isHTML(ct)) {
     // When `src` is provided (a single HTML file inside a PACKAGE, or a
@@ -956,6 +986,13 @@ export default function ArtifactViewer({
     setViewCount(total);
     setViewCount30d(last30d);
   }, []);
+  // The action strip under the header (archive/snapshot outcome, and whether
+  // either is in flight) reports on ONE document, so it is declared here, above
+  // the identity reset that has to clear it.
+  const [archiving, setArchiving] = useState(false);
+  const [snapshotting, setSnapshotting] = useState(false);
+  const [actionErr, setActionErr] = useState<string>("");
+  const [actionNote, setActionNote] = useState("");
   const [renderedArtifactId, setRenderedArtifactId] = useState(info.artifact_id);
   if (info.artifact_id !== renderedArtifactId) {
     setRenderedArtifactId(info.artifact_id);
@@ -969,6 +1006,13 @@ export default function ArtifactViewer({
     setSharing(false);
     setViewCount(undefined);
     setViewCount30d(undefined);
+    // The action strip reports on the document that produced it: a snapshot
+    // note or an archive error carried across a switch reads as this
+    // document's, and a busy flag left set disables its controls.
+    setArchiving(false);
+    setSnapshotting(false);
+    setActionErr("");
+    setActionNote("");
   }
   const mode = useRailMode();
   const router = useRouter();
@@ -1018,9 +1062,8 @@ export default function ArtifactViewer({
   // heuristic only if it's absent (non-viewer contexts): mirror mode
   // (allowed_write == null) keeps the old read==write behavior; a set
   // allowed_write restricts to creators/admins.
-  const editable =
-    isEditableArtifact(info) &&
-    (info.can_write ?? (canEdit || info.allowed_write == null));
+  const canWrite = info.can_write ?? (canEdit || info.allowed_write == null);
+  const editable = isEditableArtifact(info) && canWrite;
   // Compare — same eligibility as Edit; the compare view fetches the version
   // list itself and reports "only one version" on open (no pre-check here).
   const comparable = isComparableArtifact(info);
@@ -1053,8 +1096,6 @@ export default function ArtifactViewer({
     setMobileDefaultApplied(false);
     setMetaOpen(false);
   }
-  const [archiving, setArchiving] = useState(false);
-  const [actionErr, setActionErr] = useState<string>("");
   const [commentsBusy, setCommentsBusy] = useState(false);
   // Flip the per-doc comment switch. router.refresh() re-fetches the server
   // payload, which is what actually mounts/unmounts the overlay — we don't
@@ -1071,6 +1112,29 @@ export default function ArtifactViewer({
       setActionErr(e instanceof Error ? e.message : String(e));
     } finally {
       setCommentsBusy(false);
+    }
+  };
+  // A MAP's versions only exist because someone froze head. Every other type
+  // gets a version per write, so this control has no counterpart elsewhere.
+  const doSnapshot = async () => {
+    if (!info.named_slug) return;
+    setSnapshotting(true);
+    setActionErr("");
+    setActionNote("");
+    try {
+      const r = await snapshotMap(info.named_slug);
+      // A no-op snapshot writes no version, so the page looks unchanged. Say
+      // so, or the reader clicks again expecting something to happen.
+      setActionNote(
+        r.unchanged
+          ? `head already matches v${r.version ?? "?"} — no new version`
+          : `snapshotted ${r.entries.toLocaleString()} entries as v${r.version ?? "?"}`,
+      );
+      router.refresh();
+    } catch (e) {
+      setActionErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSnapshotting(false);
     }
   };
   const doArchive = async () => {
@@ -1106,13 +1170,14 @@ export default function ArtifactViewer({
   // Diagrams are TEXT artifacts whose body happens to be a canvas document:
   // same versioning/edit/compare plumbing, different renderer.
   const isDiagram = info.artifact_type === "TEXT" && isDiagramContentType(info.content_type);
+  const isMap = info.artifact_type === "MAP";
   // A diagram renders at full width wherever it appears — reading it in a narrow
-  // column just scales the picture down. The markdown editor's Split layout wants
-  // the same thing, for the same reason: two panes in a reading column are two
-  // cramped panes. Both are forced transiently, the way compare mode does it, so
+  // column just scales the picture down. A MAP's table and the markdown editor's
+  // Split layout want the same thing, for the same reason: five columns, or two
+  // panes, squeezed into a reading column are unreadable. Both are forced transiently, the way compare mode does it, so
   // neither writes to the persisted per-doc width — a reader who prefers Narrow
   // prose still gets Narrow prose on the next markdown doc.
-  const forcedWide = isDiagram || (editing && editorSplit);
+  const forcedWide = isDiagram || isMap || (editing && editorSplit);
   const effectiveWidth: Width = forcedWide ? "wide" : comparing ? compareWidth : width;
   const selectedInPkg = mode.kind === "package" ? mode.selected : null;
 
@@ -1381,6 +1446,8 @@ export default function ArtifactViewer({
                       : undefined
                   }
                   onCompare={comparable ? () => { setEditing(false); setCompareWidth("wide"); setComparing(true); } : undefined}
+                  onSnapshot={isMap && !isArchived && info.named_slug && canWrite ? doSnapshot : undefined}
+                  snapshotting={snapshotting}
                   // Only offered where comments are possible at all — an
                   // attachment or a binary has nothing to anchor a comment to,
                   // so a switch there would promise something that can't happen.
@@ -1411,6 +1478,7 @@ export default function ArtifactViewer({
           {actionErr ? (
             <div className="mt-1 text-[11px] text-rose-600">error: {actionErr}</div>
           ) : null}
+          {actionNote ? <div className="mt-1 text-[11px] text-neutral-500">{actionNote}</div> : null}
         </div>
       </div>
 
@@ -1480,6 +1548,11 @@ export default function ArtifactViewer({
                 onSplitChange={setEditorSplit}
               />
             )
+          ) : isMap && !original && info.named_slug ? (
+            // A MAP's body is the latest frozen NDJSON snapshot, which reads
+            // as a wall of JSON. The table shows live head instead; "Raw
+            // Source" still shows the snapshot, same as any other type.
+            <MapTable slug={info.named_slug} snapshotBytes={info.size_bytes} />
           ) : isDiagram && !original ? (
             // A diagram's stored body is JSON, but its rendered form is the
             // picture. "Raw Source" still shows the JSON, same as any other
@@ -1489,6 +1562,13 @@ export default function ArtifactViewer({
               title={info.title}
               fileName={info.named_slug || info.title || "diagram"}
             />
+          ) : isMap && original && !info.size_bytes ? (
+            // Raw Source is the frozen snapshot, and an unsnapshotted map has
+            // none. An empty box reads as data loss, so say which it is.
+            <div className="px-6 py-12 text-center text-[12px] text-neutral-500">
+              This map has never been snapshotted, so there is no frozen source to show. Turn Raw off
+              to read the live head.
+            </div>
           ) : original ? (
             <RawBody body={body ?? ""} />
           ) : (

@@ -10,6 +10,8 @@ import { usePathname } from "next/navigation";
 // canManageRoles) — a roster of every colleague's email and role is admin
 // information.
 //
+// Blocked Documents shows only to MANAGE_ARTIFACTS, on the same terms.
+//
 // Hiding the entry is the whole of the UI gating: both pages still RENDER for a
 // caller without the permission, showing a "you need MANAGE_ROLES" notice rather
 // than a 404. What is withheld is the data — the server 404s /api/users, and the
@@ -18,7 +20,15 @@ import { usePathname } from "next/navigation";
 //
 // Help & Docs is the one entry that leaves this layout: the docs site has its
 // own rail, so it opens full-screen rather than inside the settings frame.
-export default function SettingsNav({ canManageRoles, showApiKeys }: { canManageRoles: boolean; showApiKeys?: boolean }) {
+export default function SettingsNav({
+  canManageRoles,
+  canManageArtifacts,
+  showApiKeys,
+}: {
+  canManageRoles: boolean;
+  canManageArtifacts?: boolean;
+  showApiKeys?: boolean;
+}) {
   const pathname = usePathname();
   const item = (href: string, label: string) => {
     const active = pathname === href || pathname.startsWith(href + "/");
@@ -40,6 +50,7 @@ export default function SettingsNav({ canManageRoles, showApiKeys }: { canManage
       {canManageRoles ? item("/settings/users", "Users") : null}
       {item("/settings/groups", "User Groups")}
       {canManageRoles ? item("/settings/roles", "Roles and Permissions") : null}
+      {canManageArtifacts ? item("/settings/blocks", "Blocked Documents") : null}
       {item("/settings/notifications", "Notifications")}
       {item("/settings/appearance", "Appearance")}
       {item("/settings/archived", "Archived")}

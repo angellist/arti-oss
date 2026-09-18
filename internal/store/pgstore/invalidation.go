@@ -13,6 +13,7 @@ const (
 	authzInvalidationChannel = "arti_authz_invalidate"
 	rbacInvalidationKind     = "rbac"
 	groupsInvalidationKind   = "groups"
+	blocksInvalidationKind   = "blocks"
 )
 
 // invalidationBus keeps the small authorization snapshots coherent across
@@ -134,11 +135,14 @@ func (b *invalidationBus) run() {
 				b.store.rbac.invalidate()
 			case groupsInvalidationKind:
 				b.store.groups.invalidate()
+			case blocksInvalidationKind:
+				b.store.blocks.invalidate()
 			default:
-				// Unknown payloads invalidate both caches so a future producer
+				// Unknown payloads invalidate every cache so a future producer
 				// cannot accidentally leave one authorization snapshot stale.
 				b.store.rbac.invalidate()
 				b.store.groups.invalidate()
+				b.store.blocks.invalidate()
 			}
 		}
 	}
@@ -167,6 +171,11 @@ func (s *Store) invalidateRBAC(ctx context.Context) {
 func (s *Store) invalidateGroups(ctx context.Context) {
 	s.groups.invalidate()
 	s.publishInvalidation(ctx, groupsInvalidationKind)
+}
+
+func (s *Store) invalidateBlocks(ctx context.Context) {
+	s.blocks.invalidate()
+	s.publishInvalidation(ctx, blocksInvalidationKind)
 }
 
 func (s *Store) publishInvalidation(ctx context.Context, kind string) {
@@ -198,4 +207,5 @@ func (b *invalidationBus) markUnhealthy() {
 	// cache, but a DB change can still race with one of those reads.
 	b.store.rbac.invalidate()
 	b.store.groups.invalidate()
+	b.store.blocks.invalidate()
 }

@@ -18,10 +18,20 @@ describe("isComparableArtifact", () => {
     expect(isComparableArtifact({ ...base, named_slug: "" })).toBe(false);
   });
 
-  it("rejects non-TEXT artifacts", () => {
+  it("rejects artifact types with no comparable body", () => {
     expect(isComparableArtifact({ ...base, artifact_type: "PACKAGE" })).toBe(false);
     expect(isComparableArtifact({ ...base, artifact_type: "APP" })).toBe(false);
     expect(isComparableArtifact({ ...base, artifact_type: "ATTACHMENT" })).toBe(false);
+  });
+
+  it("allows MAP — its versions are NDJSON snapshots that diff line by line", () => {
+    expect(
+      isComparableArtifact({
+        ...base,
+        artifact_type: "MAP",
+        content_type: "application/x-ndjson",
+      }),
+    ).toBe(true);
   });
 
   it("rejects a non-textual content_type (pdf/image/binary)", () => {

@@ -2,21 +2,17 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 
-import { RAIL_RIGHT, RAIL_WIDTH } from "@/lib/commentsGeometry";
 import { hardNavigate } from "@/lib/navigate";
 import { exitFullPageSearch } from "@/lib/viewer";
 import { useTopLevelWindow } from "@/lib/useViewport";
 
-// The scrollbar this bubble has to clear belongs to the content IFRAME below
-// it, not to this document — so the rail's own 8px inset, which in a scrolling
-// document sits inboard of the scrollbar, puts the bubble straight on top of a
-// classic (non-overlay) one. Widen the inset past a classic scrollbar's width.
-const SCROLLBAR_GUTTER = 16;
+const EXIT_SIZE = 18;
 
-// The way out of the chrome-less ?v=full view: a ✕ bubble in the top-right
-// corner, wearing the comments rail capsule's geometry and surface (.ac-fabs
-// in lib/commentsOverlay) so the two floating controls read as one family. Its
-// top offset clears --arti-top-strip, which a stale-version banner occupies.
+// The way out of the chrome-less ?v=full view: a small square ✕ wedged into
+// the top-right corner with no inset, so it takes as little of the content as
+// a control can. Its top offset clears --arti-top-strip, which a stale-version
+// banner occupies. Flush right means it overlaps the top of a classic
+// (non-overlay) scrollbar on the content frame below.
 export default function FullPageExit() {
   // Not rendered inside an embed: couch's side panel iframes this view, owns
   // its own chrome, and has no normal view to return to.
@@ -34,23 +30,22 @@ export default function FullPageExit() {
       title="back to normal view"
       aria-label="back to normal view"
       style={{
-        top: `calc(var(--arti-top-strip, 0px) + ${RAIL_RIGHT}px)`,
-        right: RAIL_RIGHT + SCROLLBAR_GUTTER,
-        width: RAIL_WIDTH,
-        height: RAIL_WIDTH,
-        borderRadius: RAIL_WIDTH / 2,
+        top: "var(--arti-top-strip, 0px)",
+        right: 0,
+        width: EXIT_SIZE,
+        height: EXIT_SIZE,
       }}
       className={
-        "fixed z-[60] grid place-items-center border text-[#9b9b95] opacity-70 " +
-        "shadow-[0_2px_10px_-6px_rgba(40,40,30,.4)] backdrop-blur-[12px] transition hover:opacity-100 " +
+        "fixed z-[60] grid place-items-center border-b border-l text-[#9b9b95] opacity-70 " +
+        "backdrop-blur-[12px] transition hover:opacity-100 " +
         (dark
           ? "border-[rgba(255,255,255,.14)] bg-[rgba(32,32,30,.78)] hover:bg-[rgba(255,255,255,.08)] hover:text-[#f2f1ee]"
           : "border-[rgba(230,229,225,.9)] bg-white/[.72] hover:bg-[#f6f5f2] hover:text-[#33332e]")
       }
     >
       <svg
-        width="15"
-        height="15"
+        width="11"
+        height="11"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"

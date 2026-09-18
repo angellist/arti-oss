@@ -34,9 +34,11 @@ afterEach(() => {
   container.remove();
 });
 
-const render = (canManageRoles: boolean) =>
+const render = (canManageRoles: boolean, canManageArtifacts = false) =>
   act(() => {
-    root.render(<SettingsNav canManageRoles={canManageRoles} showApiKeys />);
+    root.render(
+      <SettingsNav canManageRoles={canManageRoles} canManageArtifacts={canManageArtifacts} showApiKeys />,
+    );
   });
 
 const hrefs = () =>
@@ -63,6 +65,17 @@ describe("SettingsNav", () => {
     expect(hrefs()).not.toContain("/settings/roles");
     render(true);
     expect(hrefs()).toContain("/settings/roles");
+  });
+
+  // Blocked Documents is gated on MANAGE_ARTIFACTS, which is a different
+  // permission from the one that reveals Users and Roles — a role holding only
+  // MANAGE_ROLES must not reach it, and one holding only MANAGE_ARTIFACTS must.
+  it("gates Blocked Documents on MANAGE_ARTIFACTS, not on MANAGE_ROLES", () => {
+    render(true, false);
+    expect(hrefs()).not.toContain("/settings/blocks");
+    render(false, true);
+    expect(hrefs()).toContain("/settings/blocks");
+    expect(hrefs()).not.toContain("/settings/roles");
   });
 
   it("marks the active entry when the roster page is open", () => {

@@ -178,5 +178,10 @@ func (s *Store) GetLatestBySlugAnyState(ctx context.Context, slug *string) (sqlc
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlc.Artifact{}, ErrNotFound
 	}
-	return row, err
+	if err != nil {
+		return sqlc.Artifact{}, err
+	}
+	// A share link is the one credential that outlives the catalog, so it is
+	// the reason a document gets blocked at all. See blocklist.go.
+	return s.refuseBlocked(ctx, row)
 }

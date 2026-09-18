@@ -498,6 +498,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	appsSvc.SetArtiTools(mcpSrv)
 	svc.SetAppTokenFn(appsSvc.SignAppToken)
 	svc.SetAppTokenVerifyFn(appsSvc.VerifyEmbedToken)
+	svc.SetAppConsentFns(appsSvc.SignAppConsent, appsSvc.VerifyAppConsent, cfg.Server.CookieSecure)
 	svc.SetEmbedFilesTokenFn(appsSvc.SignEmbedFilesToken)
 	svc.SetAppFrameAncestors(cfg.Apps.FrameAncestors)
 	appsSvc.MountProxy(root)
@@ -548,6 +549,14 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	// UNCONDITIONAL, because the ingress prefix survives a flag flip: with the
 	// feature off a /share request must 404 here rather than fall through to
 	// the FE reverse proxy and collect an SSO redirect.
+	// MAP artifact type. Unlike share links there is no separate mount: the
+	// routes are always registered and the flag makes the handlers refuse, so
+	// a flag flip needs no restart-ordering care.
+	if cfg.Maps.Enabled {
+		svc.SetMapEnabled(true)
+		logger.Info("MAP artifact type enabled")
+	}
+
 	if cfg.Share.Enabled {
 		svc.SetShareConfig(artifacts.ShareConfig{
 			Enabled: true,

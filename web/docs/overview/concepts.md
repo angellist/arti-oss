@@ -1,7 +1,7 @@
 ---
 title: Concepts
 order: 2
-summary: The handful of ideas the rest of the docs build on — artifacts, slugs, versions, the four types, scope, labels, access, and arti's URL forms.
+summary: The handful of ideas the rest of the docs build on — artifacts, slugs, versions, the five types, scope, labels, access, and arti's URL forms.
 ---
 
 # Concepts
@@ -45,7 +45,7 @@ Files inside a PACKAGE or APP are addressable on their own, too — fetch a sing
 
 ## Artifact types {#artifact-types}
 
-Every artifact is one of four types, and the type decides how arti stores and serves it:
+Every artifact is one of five types, and the type decides how arti stores and serves it:
 
 | Type | Stored as | Slug / versioned | In the catalog | What it is |
 |---|---|---|---|---|
@@ -53,8 +53,20 @@ Every artifact is one of four types, and the type decides how arti stores and se
 | **PACKAGE** | zip + file manifest | yes | yes | a multi-file bundle; entries are fetchable one at a time. |
 | **APP** | zip (same as PACKAGE) | yes | yes | a PACKAGE that also ships an `arti-app.json` manifest and gets an app bridge at serve time. |
 | **ATTACHMENT** | blob only | no (slugless, single-version) | hidden for non-admins | a user-uploaded file; visible only to its creator by default. |
+| **MAP** | rows in a keyed head, plus NDJSON snapshots | yes (slug required) | yes | a key/value store rather than a document; see below. |
 
 PACKAGE and APP are stored and served the same way — an APP is just a PACKAGE that additionally declares a tool allowlist and gets the bridge injected, letting its JavaScript call MCP tools and an LLM through arti's governed proxy with no backend of its own. See [App serving](../architecture/app-serving.md) for how that works and [Attachments](../architecture/attachments.md) for the creator-only rules.
+
+A **MAP** is the one type whose content is not a body. Its keys live in a table as a
+live head that every write changes in place, and a version is minted only when someone
+calls snapshot, which freezes the whole head as NDJSON in key order. So `/s/<slug>`
+shows the latest snapshot rather than the current keys, and a map nobody has
+snapshotted reads as empty in the viewer. The keys belong to the map, not to the name
+it is published under: archiving hides them and publishing a new map at a freed slug
+starts empty. Keys are flat strings namespaced by a `:` convention, values are JSON up
+to 64 KiB, and a map holds at most 10,000 keys and 8 MiB. Reach a MAP through
+`arti map`, the four `map_*` MCP tools, or the `/map` REST routes. MAP is behind
+`ARTI_MAP_ARTIFACTS`, which is on in staging and production.
 
 ## Scope {#scope}
 

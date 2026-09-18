@@ -4,7 +4,6 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { RAIL_RIGHT, RAIL_WIDTH } from "@/lib/commentsGeometry";
 import FullPageExit from "./FullPageExit";
 
 // The one call the component makes to leave the SPA. Mocked rather than spied
@@ -47,15 +46,14 @@ describe("FullPageExit", () => {
     expect(btn!.getAttribute("style")).toContain("--arti-top-strip");
   });
 
-  it("sizes and insets the bubble from the comments rail's constants", () => {
+  it("sits flush in the corner as a small square", () => {
     const btn = render()!;
-    expect(btn.style.width).toBe(`${RAIL_WIDTH}px`);
-    expect(btn.style.height).toBe(`${RAIL_WIDTH}px`);
-    // Inset past the rail's own, so the bubble cannot land on the content
-    // frame's scrollbar: 15px is the widest classic scrollbar we see.
-    expect(Number.parseInt(btn.style.right, 10)).toBeGreaterThan(RAIL_RIGHT + 15);
-    expect(btn.style.borderRadius, "a full cap, like the rail's").toBe(`${RAIL_WIDTH / 2}px`);
-    expect(btn.style.top).toBe(`calc(var(--arti-top-strip, 0px) + ${RAIL_RIGHT}px)`);
+    const size = Number.parseInt(btn.style.width, 10);
+    expect(size).toBeLessThanOrEqual(20);
+    expect(btn.style.height).toBe(btn.style.width);
+    expect(btn.style.right, "no inset from the viewport edge").toBe("0px");
+    expect(btn.style.borderRadius, "square, not a bubble").toBe("");
+    expect(btn.style.top).toBe("var(--arti-top-strip, 0px)");
   });
 
   it("asks the frames it embeds for the page theme on mount", () => {

@@ -10,12 +10,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/angellist/arti-oss/internal/artifacts"
 	"github.com/angellist/arti-oss/internal/auth"
@@ -578,3 +581,72 @@ type raceErr struct {
 func (r *raceErr) Error() string { return "status=" + http.StatusText(r.status) + " body=" + r.body }
 
 func strPtr(s string) *string { return &s }
+
+func TestConcurrentWritesDoNotExhaustThePool(t *testing.T) {
+	// A write re-runs its access check inside the transaction that holds the
+	// slug advisory lock, and that transaction owns a pool connection. If the
+	// check queries the pool, every writer needs a second connection while
+	// holding its first, so writers to one slug deadlock as soon as there are
+	// as many of them as the pool has connections. Pin a small pool and send
+	// more writers than it has connections: this hangs until the timeout on a
+	// check that is not lookup-free.
+	url := os.Getenv("ARTI_TEST_DATABASE_URL")
+	if url == "" {
+		url = "postgres://postgres:postgres@localhost:5436/arti_test?sslmode=disable"
+	}
+	const maxConns = 2
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = maxConns
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	st := pgstore.New(pool, blob.NewInMemory(), pgstore.Config{})
+	svc := artifacts.NewService(st, "http://localhost", nil, nil)
+	r := chi.NewRouter()
+	artifacts.Mount(r, svc)
+
+	slug := uniqueSlug("pool-starve")
+	if _, err := st.Put(context.Background(), pgstore.PutInput{
+		ArtifactType: pgstore.TypeText,
+		NamedSlug:    &slug,
+		Title:        "pool-starve-seed",
+		ContentType:  "text/plain",
+		Content:      []byte("S"),
+		Creator:      "alice@example.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = maxConns * 2
+	done := make(chan int, writers)
+	for i := 0; i < writers; i++ {
+		go func() {
+			raw, _ := json.Marshal(artifacts.AppendRequest{Content: "x"})
+			req := withAuth(
+				httptest.NewRequest(http.MethodPost, "/api/artifacts/by-slug/"+slug+"/append", bytes.NewReader(raw)),
+				"alice@example.com",
+			)
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+			done <- rr.Code
+		}()
+	}
+	deadline := time.After(30 * time.Second)
+	for i := 0; i < writers; i++ {
+		select {
+		case code := <-done:
+			if code != http.StatusOK {
+				t.Errorf("append %d: got %d", i, code)
+			}
+		case <-deadline:
+			t.Fatalf("only %d of %d writers finished within 30s with a %d-connection pool: "+
+				"the write path holds a pool connection while its access check asks for another", i, writers, maxConns)
+		}
+	}
+}

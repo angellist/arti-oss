@@ -8,6 +8,28 @@ and PATCH otherwise.
 Sections are generated from the commit subjects of the changes in each snapshot;
 entries describe only what ships in this repository.
 
+## 0.1.4 — 2026-09-18
+
+### Features
+
+- apps: ask the viewer before an APP version runs as them
+- apps: serve the map tools in-process and turn MAP on in production
+- arti: add an admin block list that takes a document away from everyone (DB migrate 0034)
+- web: add the Blocked Documents settings page and an admin review route
+- web: widen the MAP table, clamp values to three lines, and add a snapshot control
+
+### Fixes
+
+- arti: keep the write access check out of the connection pool
+- web: keep a collapsed comment bubble out of the text
+- web: shrink the full-page exit to a corner square
+
+### Documentation and performance
+
+- describe the MAP artifact type
+- document the run-as consent gate, the block list, and connecting your own MCP servers
+- record the blocked-document review surface
+
 ## 0.1.3 — 2026-09-15
 
 ### Features

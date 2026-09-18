@@ -26,6 +26,7 @@ import {
   railTop,
   CARD_RIGHT,
   CARD_WIDTH,
+  RAIL_FOOTPRINT,
   RAIL_RIGHT,
   RAIL_WIDTH,
   type Shift,
@@ -306,6 +307,11 @@ const CSS = `
    content shifts. --ac-shift is computed per doc/viewport. */
 html.ac-doc-shift [data-arti-doc]{transform:translateX(calc(-1 * var(--ac-shift,0px)))}
 html.ac-doc-shift [data-arti-topbar]>*:first-child{transform:translateX(calc(-1 * var(--ac-shift-tb,0px)))}
+/* Last resort when sliding runs out of left margin: pull the text in from the
+   doc's right edge so a collapsed bubble still has a gutter to sit in. A
+   transparent border, not padding, because it ADDS to whatever padding the doc
+   carries instead of restating a responsive Tailwind class here. */
+html.ac-gutter [data-arti-doc]{border-right:var(--ac-gutter,0px) solid transparent}
 /* ── Dark host pages ────────────────────────────────────────────────────
    Everything above is drawn for a light page: translucent WHITE surfaces
    (.6 alpha over a backdrop blur) carrying near-black text. Injected into a
@@ -1219,6 +1225,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   // left untouched; the doc retreats from them.
   let docShift = 0;                // px the doc body is currently translated left by
   let tbShift = 0;                 // px the toolbar content is translated left by (≤ docShift; capped by the toolbar's own margin)
+  let gutterPad = 0;               // px the doc's text is pulled in from its right edge (the box does not move)
   let pendingTextCommit = false;   // a text comment is mid-create (draft cleared, thread not yet in `threads`) — keep the shift so it doesn't drop and snap back
 
   // How far the doc — and, separately, the toolbar content — should slide left.
@@ -1233,7 +1240,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   // it is reachable from a test. This wrapper only decides WHETHER to shift and
   // reads the rects to feed it.
   function computeShift(): Shift {
-    const none = { doc: 0, tb: 0 };
+    const none = { doc: 0, tb: 0, pad: 0 };
     if (!container) return none;
     const topbar = document.querySelector<HTMLElement>("[data-arti-topbar]");
     if (!topbar) return none; // in-app viewer only (the full-page view has no toolbar)
@@ -1264,14 +1271,17 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // dispose() already cleared the shift, which would re-leak the class/var
     // onto the page (and any overlay that replaced this one).
     if (dead) return;
-    const { doc, tb } = computeShift();
-    if (doc === docShift && tb === tbShift) return;
+    const { doc, tb, pad } = computeShift();
+    if (doc === docShift && tb === tbShift && pad === gutterPad) return;
     docShift = doc;
     tbShift = tb;
+    gutterPad = pad;
     const root = document.documentElement;
     root.style.setProperty("--ac-shift", doc + "px");
     root.style.setProperty("--ac-shift-tb", tb + "px");
+    root.style.setProperty("--ac-gutter", pad + "px");
     root.classList.toggle("ac-doc-shift", doc > 0);
+    root.classList.toggle("ac-gutter", pad > 0);
   }
 
   // ── scroll-area padding ─────────────────────────────────────────────
@@ -1396,8 +1406,16 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     let prevDocBottom = -Infinity;
     let maxColBottom = -Infinity; // lowest card/bubble bottom (viewport px) → drives scroll padding
     const containerRight = container ? container.getBoundingClientRect().right : vw - right;
-    // One left edge for the whole column — cards and collapsed bubbles alike.
-    const colX = columnLeft({ containerRight, viewportWidth: vw });
+    // The column hugs the TEXT, so it hugs inside whatever gutter padding
+    // applyDocShift added (the box itself does not move for it).
+    const textRight = containerRight - gutterPad;
+    // Cards and collapsed bubbles share this left edge wherever there is room
+    // for both; only a gutter too narrow for a card separates them.
+    const colX = columnLeft({ containerRight: textRight, viewportWidth: vw });
+    const colXFor = (c: HTMLElement) =>
+      c.classList.contains("ac-min")
+        ? columnLeft({ containerRight: textRight, viewportWidth: vw, footprint: RAIL_FOOTPRINT + c.offsetWidth })
+        : colX;
     const colEls = [
       ...cards.filter((c) => !isPinCard(c)),
       ...Array.from(layer.querySelectorAll<HTMLElement>(".ac-min")),
@@ -1415,7 +1433,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
           // (or marker) just hides; it's still reachable from the panel.
           const parked = c.dataset.draft || c.dataset.tid === active;
           if (!parked) { c.style.display = "none"; return; }
-          c.style.display = ""; c.style.left = colX + "px"; c.style.right = "auto"; c.style.top = top0 + "px"; c.style.clipPath = "none";
+          c.style.display = ""; c.style.left = colXFor(c) + "px"; c.style.right = "auto"; c.style.top = top0 + "px"; c.style.clipPath = "none";
           return;
         }
         c.style.display = "";
@@ -1432,7 +1450,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
         // The column hugs the text rather than the viewport's right edge, so a
         // card opens beside the paragraph it annotates and a bubble collapses
         // into the same left edge it expanded from. See columnLeft.
-        c.style.left = colX + "px";
+        c.style.left = colXFor(c) + "px";
         c.style.right = "auto";
         c.style.top = vTop + "px";
         maxColBottom = Math.max(maxColBottom, vTop + h);
@@ -2295,8 +2313,10 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     window.removeEventListener("message", onThemeQuery);
     document.documentElement.classList.remove("ac-dark"); // undo the theme flag
     document.documentElement.classList.remove("ac-doc-shift"); // undo the left-bias
+    document.documentElement.classList.remove("ac-gutter");
     document.documentElement.style.removeProperty("--ac-shift");
     document.documentElement.style.removeProperty("--ac-shift-tb");
+    document.documentElement.style.removeProperty("--ac-gutter");
     clearMarks(true); // restore original DOM, including any in-progress draft highlight
     layer.remove();
     fabs.remove();

@@ -3,9 +3,11 @@ import {
   computeShift,
   columnLeft,
   railTop,
+  BUBBLE_WIDTH,
   CARD_FOOTPRINT,
   CARD_RIGHT,
   CARD_WIDTH,
+  MIN_GUTTER,
   RAIL_FOOTPRINT,
   SHIFT_GAP,
   SHIFT_LMIN,
@@ -143,6 +145,55 @@ describe("columnLeft", () => {
     expect(columnLeft({ viewportWidth: m.viewportWidth, containerRight: m.docRight - doc })).toBe(
       m.viewportWidth - CARD_FOOTPRINT,
     );
+  });
+});
+
+describe("gutter padding", () => {
+  // The bug: a collapsed bubble is a fraction of a card's width, so a gutter
+  // that cannot hold a card can still hold the bubble. Capping both at the card
+  // column parked the bubble on the prose while the margin beside it was empty.
+  it("leaves a bubble in the gutter where a card no longer fits", () => {
+    const m = base({ docLeft: 300, docRight: 1180 }); // 260px right of the doc: no card, plenty of bubble
+    const { doc, pad } = computeShift(m);
+    expect(pad).toBe(0);
+    const containerRight = m.docRight - doc;
+    const card = columnLeft({ viewportWidth: m.viewportWidth, containerRight });
+    const bubble = columnLeft({
+      viewportWidth: m.viewportWidth,
+      containerRight,
+      footprint: RAIL_FOOTPRINT + 26,
+    });
+    expect(card).toBeLessThan(containerRight); // the card has to overlap
+    expect(bubble).toBeGreaterThanOrEqual(containerRight); // the bubble does not
+  });
+
+  it("pads the text in when the window leaves no gutter at all", () => {
+    const m = base({ mainLeft: 0, docLeft: 0, toolbarInnerLeft: 0, docRight: 1440 });
+    const { doc, pad } = computeShift(m);
+    expect(doc).toBe(0); // nothing left to slide into
+    expect(pad).toBe(MIN_GUTTER);
+    // A widest-case bubble now clears both the text and the rail.
+    const left = columnLeft({
+      viewportWidth: m.viewportWidth,
+      containerRight: m.docRight - pad,
+      footprint: RAIL_FOOTPRINT + BUBBLE_WIDTH,
+    });
+    expect(left).toBe(m.docRight - pad + SHIFT_GAP);
+    expect(left + BUBBLE_WIDTH).toBeLessThanOrEqual(m.viewportWidth - RAIL_FOOTPRINT);
+  });
+
+  it("spends the left margin before narrowing the text", () => {
+    // 200px of left margin, 60px of right: sliding buys the whole gutter.
+    const m = base({ mainLeft: 0, docLeft: 200, toolbarInnerLeft: 200, docRight: 1380 });
+    const { doc, pad } = computeShift(m);
+    expect(doc).toBe(176);
+    expect(pad).toBe(0);
+  });
+
+  it("does not feed back on itself: padding leaves the box where it was", () => {
+    const m = base({ mainLeft: 0, docLeft: 0, toolbarInnerLeft: 0, docRight: 1440 });
+    const first = computeShift(m);
+    expect(computeShift({ ...m, docShift: first.doc, tbShift: first.tb })).toEqual(first);
   });
 });
 
