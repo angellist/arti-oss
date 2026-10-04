@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Me } from "@/lib/types";
+import { RailTip, railTileClass } from "./RailTile";
 
 // The rail foot: who you are signed in as, and the one action that belongs to
 // that identity. Everything else that used to hang off this menu is a tab under
@@ -17,7 +18,8 @@ function initials(email: string): string {
     .slice(0, 2);
 }
 
-export default function SideNavAccount({ me }: { me: Me | null }) {
+// `compact` shows only the avatar, for the collapsed rail; the menu opens to its right.
+export default function SideNavAccount({ me, compact = false }: { me: Me | null; compact?: boolean }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -41,6 +43,14 @@ export default function SideNavAccount({ me }: { me: Me | null }) {
   // No identity yet (initial load) or /api/me failed: there is no email to sit
   // behind a menu, so the action stands on its own.
   if (!me?.email) {
+    if (compact) {
+      return (
+        <a href="/auth/logout" aria-label="Log Out" className={railTileClass()}>
+          <SignOutIcon />
+          <RailTip>Log Out</RailTip>
+        </a>
+      );
+    }
     return (
       <a href="/auth/logout" className="block text-[11px] text-neutral-600 hover:underline">
         Log Out
@@ -63,21 +73,36 @@ export default function SideNavAccount({ me }: { me: Me | null }) {
         aria-haspopup="menu"
         aria-expanded={open}
         title={me.email}
-        className="flex w-full items-center justify-between gap-1 rounded px-1 py-1 text-left text-[11px] text-neutral-600 hover:bg-neutral-100"
+        aria-label={compact ? `Account: ${me.email}` : undefined}
+        className={
+          compact
+            ? "grid h-8 w-8 place-items-center rounded-full hover:bg-neutral-100 focus-visible:bg-neutral-100 focus-visible:outline-none"
+            : "flex w-full items-center justify-between gap-1 rounded px-1 py-1 text-left text-[11px] text-neutral-600 hover:bg-neutral-100"
+        }
       >
+        {compact ? (
+          <span className="grid h-6 w-6 place-items-center rounded-full bg-emerald-600 text-[10px] font-semibold text-white">
+            {initials(me.email)}
+          </span>
+        ) : (
         <span className="flex min-w-0 items-center gap-1.5">
           <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-emerald-600 text-[10px] font-semibold text-white">
             {initials(me.email)}
           </span>
           <span className="truncate">{me.email}</span>
         </span>
-        <KebabIcon />
+        )}
+        {!compact && <KebabIcon />}
       </button>
       {open ? (
         <div
           role="menu"
-          className="absolute bottom-full left-0 z-30 mb-1 w-full min-w-[160px] overflow-hidden rounded-md border border-neutral-200 bg-white py-1 shadow-lg"
+          className={
+            (compact ? "absolute bottom-0 left-full z-30 ml-2 " : "absolute bottom-full left-0 z-30 mb-1 w-full ") +
+            "min-w-[160px] overflow-hidden rounded-md border border-neutral-200 bg-white py-1 shadow-lg"
+          }
         >
+          {compact && <div className="truncate px-3 py-1.5 text-[11px] text-neutral-500">{me.email}</div>}
           <a
             role="menuitem"
             href="/auth/logout"

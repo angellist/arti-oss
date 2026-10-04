@@ -1,6 +1,6 @@
 # local development environment fixture credentials
 .*\.env\.example$
-# local PostgreSQL and MinIO compose fixture credentials
+# local PostgreSQL and RustFS compose fixture credentials
 .*deployments/docker-compose/docker-compose\.app\.yml$
 .*deployments/docker-compose/docker-compose\.yml$
 # local Dex client and password fixture

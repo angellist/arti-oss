@@ -202,7 +202,7 @@ func checkStorage(ctx context.Context, cfg *config.Config) (string, bool, error)
 		if cfg.Storage.Endpoint == "" {
 			hint = " (endpoint empty = real AWS S3; is the bucket created and the credential chain valid?)"
 		} else {
-			hint = fmt.Sprintf(" (endpoint %s, use_ssl=%v — create the bucket, e.g. `mc mb local/%s` on MinIO)", cfg.Storage.Endpoint, cfg.Storage.UseSSL, cfg.Storage.Bucket)
+			hint = fmt.Sprintf(" (endpoint %s, use_ssl=%v — create the bucket, e.g. `aws s3 mb s3://%s` on RustFS)", cfg.Storage.Endpoint, cfg.Storage.UseSSL, cfg.Storage.Bucket)
 		}
 		return "", false, fmt.Errorf("S3_BUCKET %q: write failed: %w%s", cfg.Storage.Bucket, err, hint)
 	}

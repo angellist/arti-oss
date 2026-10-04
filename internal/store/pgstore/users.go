@@ -38,6 +38,13 @@ const (
 	UserKindService = "service"
 )
 
+// Values of users.source (migration 0039).
+const (
+	UserSourceAdmin    = "admin"
+	UserSourceLogin    = "login"
+	UserSourceBackfill = "backfill"
+)
+
 // RosterUser is one principal on the Users page.
 type RosterUser struct {
 	Email string
@@ -61,11 +68,18 @@ type RosterUser struct {
 	// migration 0020 (2026-07-27), so an older login left no row.
 	LastSeenAt *time.Time
 
-	// Registered reports whether a `users` row exists, i.e. somebody recorded
-	// this principal deliberately rather than it being derived from activity.
+	// Source is how the users row arrived: "admin", "login" or "backfill";
+	// empty when there is no row.
+	Source string
+	// Registered reports that an admin recorded this principal (Source "admin").
 	Registered bool
 	AddedBy    string
 	AddedAt    *time.Time
+
+	// DeactivatedAt is non-nil while the principal is deactivated: every
+	// credential it holds is refused (see deactivations.go).
+	DeactivatedAt *time.Time
+	DeactivatedBy string
 }
 
 // composeHeldRoles is the single definition of "which roles does this principal
@@ -262,12 +276,15 @@ func (s *Store) ListUsers(ctx context.Context) ([]RosterUser, error) {
 			sort.Strings(u.IdPGroups)
 		}
 		if reg, ok := registered[email]; ok {
-			u.Registered = true
+			u.Source = reg.Source
+			u.Registered = reg.Source == UserSourceAdmin
 			u.Kind = reg.Kind
 			u.Note = reg.Note
 			u.AddedBy = reg.AddedBy
 			at := reg.AddedAt
 			u.AddedAt = &at
+			u.DeactivatedAt = reg.DeactivatedAt
+			u.DeactivatedBy = reg.DeactivatedBy
 		}
 		out = append(out, u)
 	}
@@ -275,15 +292,18 @@ func (s *Store) ListUsers(ctx context.Context) ([]RosterUser, error) {
 }
 
 type registeredUser struct {
-	Kind    string
-	Note    string
-	AddedBy string
-	AddedAt time.Time
+	Kind          string
+	Note          string
+	Source        string
+	AddedBy       string
+	AddedAt       time.Time
+	DeactivatedAt *time.Time
+	DeactivatedBy string
 }
 
 func (s *Store) listRegistered(ctx context.Context) (map[string]registeredUser, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT lower(email), kind, note, added_by, added_at FROM users`)
+		`SELECT lower(email), kind, note, source, added_by, added_at, deactivated_at, deactivated_by FROM users`)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +312,7 @@ func (s *Store) listRegistered(ctx context.Context) (map[string]registeredUser, 
 	for rows.Next() {
 		var email string
 		var r registeredUser
-		if err := rows.Scan(&email, &r.Kind, &r.Note, &r.AddedBy, &r.AddedAt); err != nil {
+		if err := rows.Scan(&email, &r.Kind, &r.Note, &r.Source, &r.AddedBy, &r.AddedAt, &r.DeactivatedAt, &r.DeactivatedBy); err != nil {
 			return nil, err
 		}
 		out[email] = r
@@ -334,7 +354,8 @@ func (s *Store) AddUser(ctx context.Context, email, kind, note, addedBy string) 
 		INSERT INTO users (email, kind, note, added_by)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (email) DO UPDATE
-		   SET kind = EXCLUDED.kind, note = EXCLUDED.note, added_by = EXCLUDED.added_by`,
+		   SET kind = EXCLUDED.kind, note = EXCLUDED.note, added_by = EXCLUDED.added_by,
+		       source = 'admin'`,
 		email, kind, strings.TrimSpace(note), strings.ToLower(strings.TrimSpace(addedBy))); err != nil {
 		return RosterUser{}, err
 	}

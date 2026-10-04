@@ -1,5 +1,5 @@
 import { headers } from "next/headers";
-import { getMe, listUsers } from "@/lib/arti";
+import { getMe, listGroups, listUsers } from "@/lib/arti";
 import UsersManager from "@/components/UsersManager";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +15,8 @@ export default async function SettingsUsersPage() {
   const roster = canManage
     ? await listUsers(cookie).catch(() => ({ users: [], sources: [] }))
     : { users: [], sources: [] };
+  // /api/groups returns only the groups this caller may manage.
+  const groups = canManage ? await listGroups(cookie).catch(() => []) : [];
 
   return (
     <div>
@@ -28,7 +30,12 @@ export default async function SettingsUsersPage() {
         </p>
       </div>
       {canManage ? (
-        <UsersManager initialUsers={roster.users} sources={roster.sources} />
+        <UsersManager
+          initialUsers={roster.users}
+          sources={roster.sources}
+          currentEmail={me.email}
+          manageableGroups={groups.map((g) => ({ name: g.name, members: g.members }))}
+        />
       ) : (
         <div className="px-6 py-10 text-sm text-neutral-500">
           You need the MANAGE_ROLES permission to view users. Ask an admin for access.

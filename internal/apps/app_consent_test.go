@@ -3,6 +3,7 @@
 package apps_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -123,5 +124,36 @@ func TestAppRunConsentFlow(t *testing.T) {
 	}
 	if _, _, err := appsSvc.VerifyEmbedToken(cookies[0].Value); err == nil {
 		t.Fatal("a consent record must not verify as a files token")
+	}
+}
+
+// A declared tool this arti would refuse is shown as unavailable, never as a
+// write the viewer is granting.
+func TestAppConsentMarksUnavailableTools(t *testing.T) {
+	r, st, appsSvc := newAppRouter(t, "alice@example.com")
+	appsSvc.SetServerResolver(func(_ context.Context, name string) (apps.ServerConfig, bool, error) {
+		return apps.ServerConfig{Auth: "none", Disabled: name == "off"}, name == "on" || name == "off", nil
+	})
+	svc := artifacts.NewService(st, "http://localhost", nil, nil)
+	svc.SetAppTokenFn(appsSvc.SignAppToken)
+	svc.SetAppTokenVerifyFn(appsSvc.VerifyEmbedToken)
+	svc.SetAppConsentFns(appsSvc.SignAppConsent, appsSvc.VerifyAppConsent, false)
+	svc.SetAppCallableFn(appsSvc.Callable)
+	r = chi.NewRouter()
+	r.Group(func(r chi.Router) {
+		r.Use(auth.Disabled("alice@example.com"))
+		artifacts.MountApp(r, svc)
+	})
+	appID := newAppArtifact(t, st, []map[string]string{
+		{"server": "on", "tool": "send_mail"}, {"server": "off", "tool": "delete_all"},
+	})
+	b := getWithCookies(r, "/app/"+appID, nil).Body.String()
+	// Servers render sorted, so "off" comes before "on".
+	off, on, found := strings.Cut(b, ">on<")
+	if !found || !strings.Contains(on, "chip-write") || strings.Contains(on, "unavailable") {
+		t.Fatalf("enabled connector should list its write tool as write:\n%s", b)
+	}
+	if !strings.Contains(off, "unavailable on this arti") {
+		t.Fatalf("disabled connector's tool should be marked unavailable:\n%s", b)
 	}
 }

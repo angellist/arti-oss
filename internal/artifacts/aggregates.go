@@ -2,6 +2,7 @@ package artifacts
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
@@ -42,35 +43,87 @@ type AggregatesResponse struct {
 	ContentTypes []ContentTypeCount `json:"content_types"`
 }
 
-// aggregatesCacheTTL bounds how stale the cached aggregates may be.
-// 60s is well under any UX-noticeable window for these counts.
+// aggregatesCacheTTL is how old an entry may get before a request kicks off
+// a background refresh. Expired entries are still served while it runs.
 const aggregatesCacheTTL = 60 * time.Second
 
-// per-caller cache: aggregates depend on which artifacts the caller
-// can read, so a global single-slot cache would leak labels/scopes
-// across users. Empty-key entries serve the admin path. Cache is
-// bounded only by the active-caller set (small in practice).
+// aggregatesRefreshTimeout bounds a background refresh, which has no request
+// deadline of its own.
+const aggregatesRefreshTimeout = 30 * time.Second
+
 type aggregatesEntry struct {
-	at     time.Time
-	cached AggregatesResponse
+	at         time.Time
+	cached     AggregatesResponse
+	refreshing bool
 }
 
-var (
-	aggCacheMu sync.Mutex
-	aggCache   = map[string]aggregatesEntry{}
-)
+// aggregatesCache is keyed per caller because aggregates depend on what the
+// caller can read; a single shared slot would leak labels across users.
+// Process-local, so each pod keeps its own copy.
+type aggregatesCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	entries map[string]*aggregatesEntry
+}
+
+var aggCache = &aggregatesCache{ttl: aggregatesCacheTTL, entries: map[string]*aggregatesEntry{}}
+
+// get returns the cached value for caller whenever one exists, however old.
+// A stale entry triggers one background reload; only a caller with no entry
+// at all waits on load.
+func (c *aggregatesCache) get(ctx context.Context, caller string, load func(context.Context) (AggregatesResponse, error)) (AggregatesResponse, error) {
+	c.mu.Lock()
+	if e, ok := c.entries[caller]; ok {
+		if !e.refreshing && time.Since(e.at) >= c.ttl {
+			e.refreshing = true
+			go c.refresh(context.WithoutCancel(ctx), caller, load)
+		}
+		out := e.cached
+		c.mu.Unlock()
+		return out, nil
+	}
+	c.mu.Unlock()
+
+	out, err := load(ctx)
+	if err != nil {
+		return AggregatesResponse{}, err
+	}
+	c.store(caller, out)
+	return out, nil
+}
+
+func (c *aggregatesCache) refresh(ctx context.Context, caller string, load func(context.Context) (AggregatesResponse, error)) {
+	ctx, cancel := context.WithTimeout(ctx, aggregatesRefreshTimeout)
+	defer cancel()
+	out, err := load(ctx)
+	if err != nil {
+		slog.Warn("aggregates background refresh failed", "err", err)
+		c.mu.Lock()
+		if e, ok := c.entries[caller]; ok {
+			e.refreshing = false
+		}
+		c.mu.Unlock()
+		return
+	}
+	c.store(caller, out)
+}
+
+func (c *aggregatesCache) store(caller string, out AggregatesResponse) {
+	c.mu.Lock()
+	c.entries[caller] = &aggregatesEntry{at: time.Now(), cached: out}
+	c.mu.Unlock()
+}
 
 // Aggregates returns label/scope histograms restricted to artifacts
 // `caller` can read. Admins should pass "" so the filter is bypassed
 // and the global histogram is returned.
 func (s *Service) Aggregates(ctx context.Context, caller string) (AggregatesResponse, error) {
-	aggCacheMu.Lock()
-	if entry, ok := aggCache[caller]; ok && time.Since(entry.at) < aggregatesCacheTTL {
-		aggCacheMu.Unlock()
-		return entry.cached, nil
-	}
-	aggCacheMu.Unlock()
+	return aggCache.get(ctx, caller, func(ctx context.Context) (AggregatesResponse, error) {
+		return s.loadAggregates(ctx, caller)
+	})
+}
 
+func (s *Service) loadAggregates(ctx context.Context, caller string) (AggregatesResponse, error) {
 	res, err := s.store.Aggregates(ctx, pgstore.AggregatesInput{
 		// 30 to feed the sidebar's top-30 labels list; scopes are sliced
 		// to a handful in the UI, so the extra rows are harmless.
@@ -99,9 +152,6 @@ func (s *Service) Aggregates(ctx context.Context, caller string) (AggregatesResp
 		out.ContentTypes = append(out.ContentTypes, ContentTypeCount{ContentType: r.ContentType, Count: r.Count})
 	}
 
-	aggCacheMu.Lock()
-	aggCache[caller] = aggregatesEntry{at: time.Now(), cached: out}
-	aggCacheMu.Unlock()
 	return out, nil
 }
 

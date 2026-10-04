@@ -60,7 +60,7 @@ window.arti.callTool(server: string, tool: string, args?: object, opts?: { timeo
 ```
 
 - `server` — a built-in server name (see [Built-in servers](#built-in-servers)) or one
-  added via `ARTI_APP_MCP_SERVERS`.
+  an admin added at Settings → App Connectors.
 - `tool` — the upstream tool name.
 - `args` — the tool's arguments object (defaults to `{}`).
 - `opts.timeout_ms` — how long the proxy waits on the upstream for this call.
@@ -86,10 +86,11 @@ The error also carries the proxy's structured fields: `err.code`, `err.status`,
 | `upstream_response_too_large` | 503 | One response exceeded the 16 MiB read cap. Ask the tool for smaller pages. |
 | `tool_error` | 503 | The server answered with a JSON-RPC error object (protocol-level: unknown method, malformed request). Retrying cannot help; `detail` carries the upstream code and message. Note that most MCP servers, Runlayer included, report a failed tool *execution* (unknown tool, bad arguments, SQL error) as a normal result with `isError: true`; that resolves, so check `result.isError` on success. |
 | `upstream_error` | 503 | Any other upstream failure (HTTP 5xx, malformed body, connection error). |
+| `server_lookup_failed` | 503 | arti could not read its connector list. Retry. |
 | `proxy_busy` | 503 | This arti pod is already relaying its maximum number of upstream calls. Retry after `err.retryAfter` seconds. |
 | `network_error` | 0 | Set client-side when `fetch` itself rejected: no response reached the page. From the sandboxed page this is what an edge error page without CORS headers looks like, as well as a real network failure. |
-| `not_allowlisted` | 403 | `server/tool` is missing from `arti-app.json`. |
-| `unknown_server` | 400 | The server is not configured on this arti. |
+| `not_allowlisted` | 403 | `server/tool` is missing from `arti-app.json`, or from the connector's tool allowlist on this arti. |
+| `unknown_server` | 400 | The server is not configured on this arti, or an admin disabled it. |
 | `edge_timeout` | 502/504/524 | Set client-side when nginx or Cloudflare answered with a non-JSON error page in arti's place. Treat like `upstream_timeout`. |
 | `bad-request`, `forbidden`, `slug-exists`, … | as REST | In-process `arti/*` tools answer with the same codes as `POST /api/artifacts`. |
 | `budget_exceeded`, `rate_limited`, … | see below | `llm/complete` has its own codes; see [Errors](#errors) under `llm.complete`. |
@@ -231,8 +232,8 @@ Source: `internal/artifacts/appparams.go:14`.
 The named MCP servers an APP may reach. App authors reference a server **by name
 only**; its URL and auth policy live server-side (`appServers` map,
 `cmd/arti-server/cmd_serve.go`), so an author can neither point at an arbitrary
-endpoint nor embed a secret. Two servers are built in; operators add the rest
-with `ARTI_APP_MCP_SERVERS` (see [Configuration](configuration.md#apps-mcp), and
+endpoint nor embed a secret. Two servers are built in; admins add the rest at
+Settings → App Connectors (see [Configuration](configuration.md#apps-mcp), and
 [Connect your own MCP servers](../guides/self-hosting.md#mcp-servers) for what an
 upstream has to support).
 
@@ -243,7 +244,7 @@ upstream has to support).
 | `arti` | in-process\* | arti's own MCP | The name is special: every arti tool, read and write, runs in-process as the viewer (no consent popup, works in local dev, needs no server entry). A write is stamped `written_via: app:<uuid>` with the viewer as `creator`. See [Reading other artifacts](#reading-artifacts). |
 | anything else | `none` / `oauth` | operator's choice | Deployment configuration — e.g. entries for Notion, Slack, Linear, or an MCP gateway the organization runs. |
 
-\* A deployment may still list `arti` in `ARTI_APP_MCP_SERVERS`, but the entry is unused:
+\* A deployment may still list an `arti` connector, but the entry is unused:
 the in-process branch sits ahead of the server lookup, so arti access does not depend on
 it. See [Reading other artifacts](#reading-artifacts).
 

@@ -10,13 +10,14 @@ export const metadata: Metadata = { title: "settings" };
 
 // Settings groups the admin/account surfaces under one area with its own left
 // sub-nav (User Groups for everyone; Roles and Permissions for MANAGE_ROLES;
-// Blocked Documents for MANAGE_ARTIFACTS).
+// Blocked Documents for MANAGE_ARTIFACTS; App Connectors for MANAGE_CONNECTORS).
 export default async function SettingsLayout({ children }: { children: React.ReactNode }) {
   const h = await headers();
   const cookie = h.get("cookie") ?? undefined;
   const me = await getMe(cookie).catch(() => ({ email: "", name: "", is_admin: false, permissions: [] as string[] }));
   const canManageRoles = me.permissions?.includes("MANAGE_ROLES") ?? false;
   const canManageArtifacts = me.permissions?.includes("MANAGE_ARTIFACTS") ?? false;
+  const canManageConnectors = me.permissions?.includes("MANAGE_CONNECTORS") ?? false;
 
   return (
     <SearchRailProvider>
@@ -25,7 +26,12 @@ export default async function SettingsLayout({ children }: { children: React.Rea
           <h1 className="text-base font-semibold text-neutral-900">settings</h1>
         </div>
         <div className="flex flex-col md:flex-row">
-          <SettingsNav canManageRoles={canManageRoles} canManageArtifacts={canManageArtifacts} showApiKeys />
+          <SettingsNav
+            canManageRoles={canManageRoles}
+            canManageArtifacts={canManageArtifacts}
+            canManageConnectors={canManageConnectors}
+            showApiKeys
+          />
           <div className="min-w-0 flex-1">{children}</div>
         </div>
       </main>

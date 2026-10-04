@@ -85,6 +85,12 @@ paths:
       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
     post: { summary: Record one human-facing artifact view, responses: { "204": { description: recorded } } }
     get: { summary: Aggregate artifact views, responses: { "200": { description: view stats } } }
+  /api/artifacts/{id}/bookmark:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    get: { summary: Slug-wide bookmark count and whether the caller bookmarked it, responses: { "200": { description: bookmarks } } }
+    put: { summary: Bookmark the slug for the caller, responses: { "200": { description: bookmarks } } }
+    delete: { summary: Remove the caller's bookmark, responses: { "200": { description: bookmarks } } }
   /api/artifacts/{id}/files:
     parameters:
       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }

@@ -270,6 +270,82 @@ func TestReadArtifactReportsSize(t *testing.T) {
 	}
 }
 
+// A read_artifact probe on a slug that does not exist comes back as a normal
+// result carrying exists:false — not an RPC error — so a read-before-create
+// agent does not burn a failed tool call on every new slug. get_artifact
+// softens the same way.
+func TestReadArtifactMissingReturnsExistsFalse(t *testing.T) {
+	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
+	h := mcp.NewServer(artifacts.NewService(st, "http://localhost", nil, nil), nil).Handler()
+
+	slug := uniqueSlug("read-miss")
+	res := callToolResult(t, h, "alice@example.com", "read_artifact", map[string]any{"ident": slug})
+	var miss struct {
+		Exists bool   `json:"exists"`
+		Ident  string `json:"ident"`
+	}
+	if err := json.Unmarshal([]byte(firstText(t, res)), &miss); err != nil {
+		t.Fatalf("parse miss payload: %v", err)
+	}
+	if miss.Exists != false || miss.Ident != slug {
+		t.Errorf("miss payload = %+v, want {exists:false, ident:%q}", miss, slug)
+	}
+
+	res = callToolResult(t, h, "alice@example.com", "get_artifact", map[string]any{"ident": slug})
+	if err := json.Unmarshal([]byte(firstText(t, res)), &miss); err != nil {
+		t.Fatalf("parse get miss payload: %v", err)
+	}
+	if miss.Exists != false || miss.Ident != slug {
+		t.Errorf("get miss payload = %+v, want {exists:false, ident:%q}", miss, slug)
+	}
+}
+
+// An artifact the caller cannot read answers the same exists:false — the store
+// reports denied and missing identically (ErrNotFound), and the soft path keeps
+// it that way, so a probe still leaks nothing about the slug's existence.
+func TestReadArtifactDeniedReturnsExistsFalse(t *testing.T) {
+	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
+	h := mcp.NewServer(artifacts.NewService(st, "http://localhost", nil, nil), nil).Handler()
+
+	slug := uniqueSlug("read-denied")
+	if _, err := st.Put(context.Background(), pgstore.PutInput{
+		ArtifactType:  pgstore.TypeText,
+		NamedSlug:     &slug,
+		Title:         "secret " + slug,
+		ContentType:   "text/plain",
+		Content:       []byte("top secret"),
+		Creator:       "bob@example.com",
+		AllowedAccess: []string{}, // empty == creator-only
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	res := callToolResult(t, h, "alice@example.com", "read_artifact", map[string]any{"ident": slug})
+	var miss struct {
+		Exists bool `json:"exists"`
+	}
+	if err := json.Unmarshal([]byte(firstText(t, res)), &miss); err != nil {
+		t.Fatalf("parse denied payload: %v", err)
+	}
+	if miss.Exists != false {
+		t.Errorf("denied read should look like a miss, got %+v", miss)
+	}
+}
+
+// The soft-miss path lives at the JSON-RPC surface only: the in-process
+// dispatch the apps proxy uses still returns ErrNotFound, so a proxied call
+// keeps mapping a miss to 404.
+func TestCallToolInProcessMissingSlugStillErrors(t *testing.T) {
+	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
+	srv := mcp.NewServer(artifacts.NewService(st, "http://localhost", nil, nil), nil)
+
+	if _, err := srv.CallToolInProcess(
+		auth.WithIdentity(context.Background(), "alice@example.com"),
+		"read_artifact", json.RawMessage(`{"ident":"`+uniqueSlug("inproc-miss")+`"}`)); err == nil {
+		t.Fatalf("expected not-found error via CallToolInProcess")
+	}
+}
+
 // max_bytes returns only a prefix and flags truncated=true, while size_bytes
 // still reports the FULL size — so an agent can peek a large doc, see how much
 // it skipped, and decide whether to fetch the rest.

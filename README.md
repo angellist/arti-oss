@@ -54,7 +54,7 @@ path in [SECURITY.md](SECURITY.md).
 
 ## Quick start (local evaluation)
 
-One command brings up Postgres, MinIO, and arti with authentication disabled
+One command brings up Postgres, RustFS, and arti with authentication disabled
 and migrations applied:
 
 ```sh
@@ -90,7 +90,7 @@ ask it to do the setup. A prompt like:
 > Set up arti from this repo. Read `AGENTS.md` first. I want **[local
 > evaluation / a single-box deployment / a retrofit into my environment]**.
 > My infrastructure: Postgres at **[DSN / "none, use the compose one"]**,
-> object store **[AWS S3 / MinIO / R2 / B2 / "none"]**, login via **[my IdP
+> object store **[AWS S3 / RustFS / R2 / B2 / "none"]**, login via **[my IdP
 > (Okta, Google, Entra, Keycloak, …) / my authenticating proxy / disabled,
 > local only]**. Configure it, run `arti-server doctor` until it passes,
 > then verify a login and an upload round-trip.
@@ -138,14 +138,14 @@ boot when auth is enabled.
 | `disabled` | Local development only; refuses to start unless the configuration looks local. |
 
 **Storage**: any S3-compatible store — AWS S3 (static keys or the ambient
-IAM chain), MinIO, Cloudflare R2, Backblaze B2, and friends. TLS to the
+IAM chain), RustFS, Cloudflare R2, Backblaze B2, and friends. TLS to the
 store is on by default. Postgres holds all metadata; the store holds only
 content bytes.
 
 ## Building from source
 
 ```sh
-make setup && make dev-up          # tools check; Postgres + MinIO (+ OpenSearch, Dex)
+make setup && make dev-up          # tools check; Postgres + RustFS (+ OpenSearch, Dex)
 make migrate migrate-test          # apply migrations
 make build                         # ./bin/arti-server and ./bin/arti
 make lint && make test             # the same gates CI runs

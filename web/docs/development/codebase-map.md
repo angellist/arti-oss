@@ -108,7 +108,7 @@ API; `token.go` / `selfupdate.go` handle the cached token and the
 | `internal/admin` | Admin-only, read-only operational endpoints for debugging prod without DB access. Gated by `MANAGE_ARTIFACTS`. |
 | `internal/pkgzip` | PACKAGE zip handling — builds the per-entry manifest (path/size/SHA256) on upload, reads single entries on fetch, detects the entry point, skips macOS metadata junk. |
 | `internal/store/pgstore` | The Postgres read/write surface. Composes the `gen/sqlc` queries with a `blob.Store`, applies the inline-vs-S3 policy (TEXT ≤ 64 KiB inline; everything else an S3 blob with a `blob_ref`), and resolves access control (groups, roles, negations). See [Data model](../architecture/data-model.md). |
-| `internal/store/blob` | The `blob.Store` interface + an S3 implementation (minio-go) and an in-memory one for tests. Bytes only; metadata lives in Postgres. |
+| `internal/store/blob` | The `blob.Store` interface + an S3 implementation (rustfs-go) and an in-memory one for tests. Bytes only; metadata lives in Postgres. |
 
 ## `web/` — the Next.js sidecar
 
@@ -171,7 +171,7 @@ generate `gen/sqlc`. See [Code generation](codegen.md) and [Data model](../archi
 | Path | What |
 | --- | --- |
 | `angellist/` | Everything specific to the AngelList deployment — k8s manifests, infrastructure code, encrypted per-env config. Application code never imports from it, the tree builds with it deleted, and it is absent from the public repository. |
-| `deployments/docker-compose/` | Local Postgres + MinIO (+ Dex, OpenSearch), and the full-app evaluation profile. |
+| `deployments/docker-compose/` | Local Postgres + RustFS (+ Dex, OpenSearch), and the full-app evaluation profile. |
 | `Dockerfile` / `web/Dockerfile` | Server image (targets `api`, `test`) and the web sidecar image. |
 
 For how this all deploys, see the operations section: [Deploying](../operations/deploying.md).

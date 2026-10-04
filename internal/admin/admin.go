@@ -1,6 +1,7 @@
 // Package admin exposes admin-only, read-only operational endpoints — a small
 // surface for debugging prod without reaching the database directly. Every
-// handler is gated by the MANAGE_ARTIFACTS permission.
+// handler is gated by MANAGE_ARTIFACTS, except the connector list, which is
+// gated by MANAGE_CONNECTORS.
 package admin
 
 import (
@@ -18,8 +19,9 @@ import (
 )
 
 type Service struct {
-	pool  *pgxpool.Pool
-	store *pgstore.Store
+	pool       *pgxpool.Pool
+	store      *pgstore.Store
+	connectors ConnectorPolicy
 }
 
 func NewService(pool *pgxpool.Pool, store *pgstore.Store) *Service {
@@ -34,13 +36,18 @@ func (s *Service) Mount(r chi.Router) {
 	r.Post("/api/admin/blocks", s.addBlock)
 	r.Delete("/api/admin/blocks", s.removeBlock)
 	s.mountBlocked(r)
+	s.mountConnectors(r)
 }
 
 // requireAdmin answers the handler's gate: true to carry on, false when it has
 // already written the response. 404 (not 403) so the endpoint isn't
 // discoverable, consistent with the rest of the API.
 func (s *Service) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	ok, err := s.store.HasPermission(r.Context(), auth.EmailFromContext(r.Context()), rbac.ManageArtifacts)
+	return s.requirePerm(w, r, rbac.ManageArtifacts)
+}
+
+func (s *Service) requirePerm(w http.ResponseWriter, r *http.Request, perm rbac.Permission) bool {
+	ok, err := s.store.HasPermission(r.Context(), auth.EmailFromContext(r.Context()), perm)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return false

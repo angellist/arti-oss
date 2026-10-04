@@ -357,3 +357,64 @@ func TestUsers_AddUserRejectsPatternsAndJunk(t *testing.T) {
 		t.Error("an unknown kind must be rejected")
 	}
 }
+
+// Deactivating a principal with no other trace creates its users row, and
+// reactivating keeps it.
+func TestUsers_DeactivatedPrincipalStaysListed(t *testing.T) {
+	ctx := context.Background()
+	st, _ := rosterStore(t, pgstore.Config{})
+	email := strings.ToLower(unique("deact")) + "@example.com"
+	t.Cleanup(func() { _ = st.ReactivateUser(ctx, email) })
+
+	if err := st.DeactivateUser(ctx, email, "Admin@Example.com"); err != nil {
+		t.Fatalf("DeactivateUser: %v", err)
+	}
+	u := rosterFor(t, st, email)
+	if u.DeactivatedAt == nil || u.DeactivatedBy != "admin@example.com" {
+		t.Errorf("deactivation not on roster row: %+v", u)
+	}
+	if !st.IsDeactivated(email) {
+		t.Error("IsDeactivated = false after DeactivateUser")
+	}
+
+	if err := st.ReactivateUser(ctx, strings.ToUpper(email)); err != nil {
+		t.Fatalf("ReactivateUser: %v", err)
+	}
+	if st.IsDeactivated(email) {
+		t.Error("IsDeactivated = true after ReactivateUser")
+	}
+	if u := rosterFor(t, st, email); u.DeactivatedAt != nil || u.Source != pgstore.UserSourceAdmin || u.AddedBy != "" {
+		t.Errorf("reactivation must keep the row and clear only the deactivation: %+v", u)
+	}
+	if err := st.ReactivateUser(ctx, strings.ToLower(unique("never"))+"@example.com"); err == nil {
+		t.Error("reactivating an email with no row must report not found")
+	}
+	if err := st.DeactivateUser(ctx, "*@example.com", "admin@example.com"); err == nil {
+		t.Error("a glob must be refused")
+	}
+}
+
+func TestUsers_LoginRecordsPermanentRow(t *testing.T) {
+	ctx := context.Background()
+	st, _ := rosterStore(t, pgstore.Config{IdPGroupsMaxAge: time.Hour})
+	email := strings.ToLower(unique("login")) + "@example.com"
+
+	if err := st.UpsertIdPGroups(ctx, email, []string{"eng"}); err != nil {
+		t.Fatalf("UpsertIdPGroups: %v", err)
+	}
+	u := rosterFor(t, st, email)
+	if u.Source != pgstore.UserSourceLogin || u.Registered || u.AddedAt == nil {
+		t.Errorf("first login must record a login row: %+v", u)
+	}
+
+	if _, err := st.AddUser(ctx, email, pgstore.UserKindHuman, "on call", "admin@example.com"); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+	if err := st.UpsertIdPGroups(ctx, email, nil); err != nil {
+		t.Fatalf("UpsertIdPGroups: %v", err)
+	}
+	u = rosterFor(t, st, email)
+	if u.Source != pgstore.UserSourceAdmin || !u.Registered || u.Note != "on call" {
+		t.Errorf("a later login must not overwrite an admin's record: %+v", u)
+	}
+}

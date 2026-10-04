@@ -35,7 +35,7 @@ jobs:
 
       - run: make setup
 
-      - name: Start Postgres + MinIO (+ OpenSearch, Dex)
+      - name: Start Postgres + RustFS (+ OpenSearch, Dex)
         run: make dev-up
 
       - run: make migrate migrate-test

@@ -35,6 +35,12 @@ func (s *Service) SetAppConsentFns(sign func(email, artifactID string) (string, 
 	s.appConsentSign, s.appConsentVerify, s.appConsentSecure = sign, verify, cookieSecure
 }
 
+// SetAppCallableFn wires the apps proxy's routing check, so the consent page
+// marks a declared tool this arti cannot run instead of listing it as granted.
+func (s *Service) SetAppCallableFn(f func(ctx context.Context, server, tool string) (bool, error)) {
+	s.appCallable = f
+}
+
 // appConsented reports whether caller has recorded consent for row: either
 // for this exact version, or for the slug while the same publisher ships the
 // same declared tools. True when no bridge minter is wired: with no token to
@@ -178,8 +184,9 @@ func (s *Service) readAppManifest(ctx context.Context, row sqlc.Artifact) appMan
 }
 
 type appConsentTool struct {
-	Name   string
-	Access string // read | write | llm
+	Name        string
+	Access      string // read | write | llm
+	Unavailable bool   // this arti would refuse the call
 }
 
 type appConsentServer struct {
@@ -252,14 +259,21 @@ func (s *Service) writeAppConsentPage(w http.ResponseWriter, r *http.Request, ro
 	man := s.readAppManifest(r.Context(), row)
 	byServer := map[string][]appConsentTool{}
 	for _, t := range man.Tools {
-		byServer[t.Server] = append(byServer[t.Server], appConsentTool{Name: t.Tool, Access: toolAccess(t.Server, t.Tool)})
+		tool := appConsentTool{Name: t.Tool, Access: toolAccess(t.Server, t.Tool)}
+		if s.appCallable != nil {
+			// A failed check is shown as unavailable: the page must not
+			// present a tool as granted when arti cannot say it will run.
+			ok, err := s.appCallable(r.Context(), t.Server, t.Tool)
+			tool.Unavailable = err != nil || !ok
+		}
+		byServer[t.Server] = append(byServer[t.Server], tool)
 	}
 	var servers []appConsentServer
 	for name, tools := range byServer {
 		sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 		sv := appConsentServer{Server: name, Tools: tools}
 		for _, t := range tools {
-			if t.Access != "read" {
+			if t.Access != "read" && !t.Unavailable {
 				sv.Writes++
 			}
 		}
@@ -354,7 +368,7 @@ Version <code>{{.AppID}}</code></p>
 {{if .Automated}}<p class="auto">This version was published by an automated process, not by a person typing in arti. Treat its code as unreviewed.</p>{{end}}
 <h2>Connectors it declares</h2>
 {{if .Servers}}<div class="tools"><ul>{{range .Servers}}<li><span class="srv">{{.Server}}</span>{{if .Writes}} <span class="chip chip-count">{{.Writes}} write</span>{{end}}
-<ul>{{range .Tools}}<li><code>{{.Name}}</code> <span class="chip chip-{{.Access}}">{{.Access}}</span></li>{{end}}</ul></li>{{end}}</ul></div>
+<ul>{{range .Tools}}<li><code>{{.Name}}</code> {{if .Unavailable}}<span class="chip chip-count">unavailable on this arti</span>{{else}}<span class="chip chip-{{.Access}}">{{.Access}}</span>{{end}}</li>{{end}}</ul></li>{{end}}</ul></div>
 {{else}}<p class="none">No connector tools declared. The app can still read and write arti as you.</p>{{end}}
 <p class="warn">The app's code runs in your browser <strong>as you</strong>. It can read every arti document you can read, create and edit documents and comments in your name, and call the connectors above with your access. A <span class="chip chip-write">write</span> tool changes data in your name; the label comes from the tool's name and errs toward write. A new version of this app will ask again.</p>
 <form method="post" action="/app/{{.AppID}}/consent" id="arti-consent">

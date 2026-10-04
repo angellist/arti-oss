@@ -30,6 +30,7 @@ import { isDiagramContentType } from "@/lib/diagram";
 import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
 import { useAppConsentMessage } from "@/lib/useAppConsentMessage";
 import ViewTracker from "./ViewTracker";
+import BookmarkButton from "./BookmarkButton";
 import { useUpload } from "@/lib/upload-context";
 import { targetFromInfo } from "@/lib/upload-target";
 
@@ -278,54 +279,6 @@ export function EditableTitle({
   );
 }
 
-// PermalinkChip — UUID link to /a/<uuid> (slug- and version-free) with a
-// one-click copy button that grabs the absolute URL. Displays "a/UUID" as
-// a placeholder instead of the full UUID for cleaner presentation.
-function PermalinkChip({ href, copy }: { href: string; copy: string }) {
-  const [copied, setCopied] = useState(false);
-  const onCopy = async (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(copy);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // ignore — clipboard requires a user gesture; this click qualifies.
-    }
-  };
-  return (
-    <span className="inline-flex items-center overflow-hidden rounded-md border border-neutral-200 bg-white font-mono text-[11px]">
-      <a
-        href={href}
-        className="px-2 py-0.5 text-neutral-700 no-underline transition hover:bg-neutral-100"
-        title="permalink (UUID, version-free)"
-      >
-        <span className="text-neutral-400">a/</span>
-        UUID
-      </a>
-      <button
-        type="button"
-        onClick={onCopy}
-        className="border-l border-neutral-200 px-1.5 py-0.5 text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-800"
-        title={copied ? "copied!" : "copy permalink"}
-        aria-label="copy permalink"
-      >
-        {copied ? (
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <polyline points="3 8 7 12 13 4" />
-          </svg>
-        ) : (
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-            <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" />
-            <path d="M3 11V3.5C3 2.94772 3.44772 2.5 4 2.5H11" strokeLinecap="round" />
-          </svg>
-        )}
-      </button>
-    </span>
-  );
-}
-
 // SlugChip — the named-slug reference (s/<slug> · v<n>), styled like the
 // UUID permalink chip so the two identifiers sit together on one row. Links
 // to every version of the slug. When the viewed version is not the slug's
@@ -536,6 +489,8 @@ function ThreeDotsMenu({
   commentsBusy,
   onToggleComments,
   onShare,
+  uuid,
+  uuidLink,
 }: {
   downloadHref?: string;
   downloadName?: string;
@@ -574,8 +529,14 @@ function ThreeDotsMenu({
   commentsBusy?: boolean;
   onToggleComments?: () => void;
   onShare: () => void;
+  uuid: string;
+  uuidLink: string;
 }) {
   const [open, setOpen] = useState(false);
+  const copy = (text: string) => {
+    void navigator.clipboard.writeText(text).catch(() => {});
+    setOpen(false);
+  };
   const menuRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
@@ -735,6 +696,29 @@ function ThreeDotsMenu({
               Download zip
             </a>
           ) : null}
+          <button type="button" onClick={() => copy(uuid)} className={`${MENU_ROW} hover:bg-neutral-50`}>
+            <MenuIcon>
+              <svg {...MENU_SVG}>
+                <rect x="9" y="9" width="12" height="12" rx="2" />
+                <path d="M5 15V5a2 2 0 0 1 2-2h8" />
+              </svg>
+            </MenuIcon>
+            Copy UUID
+          </button>
+          <button
+            type="button"
+            onClick={() => copy(uuidLink)}
+            className={`${MENU_ROW} hover:bg-neutral-50`}
+            title="copy the version-free /a/<uuid> link"
+          >
+            <MenuIcon>
+              <svg {...MENU_SVG}>
+                <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.5 1.5" />
+                <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.5-1.5" />
+              </svg>
+            </MenuIcon>
+            Get UUID link
+          </button>
           {onToggleComments ? (
             <CommentsMenuItem
               on={!!commentsOn}
@@ -805,7 +789,7 @@ export function CollapseToggle({
   );
 }
 
-function RenderedBody({ body, ct, src, allowPopups, docKey }: { body: string; ct: string; src?: string; allowPopups?: boolean; docKey?: string }) {
+function RenderedBody({ body, ct, src, allowPopups, docKey, zoom = 1 }: { body: string; ct: string; src?: string; allowPopups?: boolean; docKey?: string; zoom?: number }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   useExternalLinkMessage(iframeRef);
   useAppConsentMessage(iframeRef);
@@ -822,9 +806,12 @@ function RenderedBody({ body, ct, src, allowPopups, docKey }: { body: string; ct
     // Static asset loads (img/script/link with no `crossorigin` attr)
     // still work; only JS-driven fetch/XHR back to arti is CORS-blocked,
     // which arti's interactive reports don't need (data is inlined).
+    // Text size reaches the sandboxed document only as `zoom` on the frame. The
+    // wrapper owns the viewport-unit height, which zoom would otherwise multiply.
     const common = {
-      className: "h-[calc(100vh-180px)] w-full rounded border border-neutral-200 bg-white",
+      className: "block h-full w-full border-0 bg-white",
       title: "artifact content",
+      style: zoom === 1 ? undefined : { zoom },
     } as const;
     // APP files carry the injected bridge; if previewed in-viewer, the Runlayer
     // OAuth consent needs window.open, so the parent iframe must allow popups
@@ -832,10 +819,14 @@ function RenderedBody({ body, ct, src, allowPopups, docKey }: { body: string; ct
     const sandbox = allowPopups
       ? "allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
       : "allow-scripts allow-downloads";
-    return src ? (
-      <iframe {...common} ref={iframeRef} src={src} sandbox={sandbox} />
-    ) : (
-      <iframe {...common} ref={iframeRef} srcDoc={body} sandbox={sandbox} />
+    return (
+      <div className="h-[calc(100vh-180px)] w-full overflow-hidden rounded border border-neutral-200 bg-white">
+        {src ? (
+          <iframe {...common} ref={iframeRef} src={src} sandbox={sandbox} />
+        ) : (
+          <iframe {...common} ref={iframeRef} srcDoc={body} sandbox={sandbox} />
+        )}
+      </div>
     );
   }
   if (isPlainCode(ct)) {
@@ -1171,15 +1162,22 @@ export default function ArtifactViewer({
   // same versioning/edit/compare plumbing, different renderer.
   const isDiagram = info.artifact_type === "TEXT" && isDiagramContentType(info.content_type);
   const isMap = info.artifact_type === "MAP";
+  const selectedInPkg = mode.kind === "package" ? mode.selected : null;
+  // Rendered HTML carries its own layout, so a reading column only crops it.
+  const selectedCT = selectedInPkg ? manifest?.entries.find((e) => e.path === selectedInPkg)?.content_type ?? "" : "";
+  const isHTMLView =
+    !original &&
+    !editing &&
+    !comparing &&
+    (isPackage ? !!selectedInPkg && isHTML(selectedCT) : isHTML(info.content_type));
   // A diagram renders at full width wherever it appears — reading it in a narrow
   // column just scales the picture down. A MAP's table and the markdown editor's
   // Split layout want the same thing, for the same reason: five columns, or two
   // panes, squeezed into a reading column are unreadable. Both are forced transiently, the way compare mode does it, so
   // neither writes to the persisted per-doc width — a reader who prefers Narrow
   // prose still gets Narrow prose on the next markdown doc.
-  const forcedWide = isDiagram || isMap || (editing && editorSplit);
+  const forcedWide = isDiagram || isMap || isHTMLView || (editing && editorSplit);
   const effectiveWidth: Width = forcedWide ? "wide" : comparing ? compareWidth : width;
-  const selectedInPkg = mode.kind === "package" ? mode.selected : null;
 
   // Permalink: stable, version-pinned, slug-free URL anyone can quote.
   const permalink = `/a/${info.artifact_id}`;
@@ -1287,19 +1285,13 @@ export default function ArtifactViewer({
 
           {!headerCollapsed ? (
             <>
-              {/* Row 2 — type + content-type + permalink (left), creator + size + time (right). */}
+              {/* Row 2 — bookmark + type + content-type (left), creator + size + time (right). */}
               <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-neutral-500">
+                <BookmarkButton key={info.artifact_id} artifactID={info.artifact_id} />
                 <span className="rounded bg-neutral-100 px-2 py-0.5 text-neutral-600">
                   {info.artifact_type}
                 </span>
                 <span>{info.content_type}</span>
-                {/* The UUID permalink is a copy target for desktop work
-                    (paste into a doc, a PR, a chat); on a phone the address
-                    bar is the share affordance and the chip only costs a
-                    wrapped line, so it folds away below `sm`. */}
-                <span className="hidden sm:inline-flex">
-                  <PermalinkChip href={permalink} copy={permalinkAbs} />
-                </span>
                 {info.named_slug ? <SlugChip slug={info.named_slug} version={info.version} /> : null}
                 <span className="ml-auto flex items-center gap-1">
                   <CreatorName email={info.creator} />
@@ -1456,6 +1448,8 @@ export default function ArtifactViewer({
                   commentsBusy={commentsBusy}
                   onToggleComments={commentable ? toggleComments : undefined}
                   onShare={() => setSharing(true)}
+                  uuid={info.artifact_id}
+                  uuidLink={permalinkAbs}
                 />
                 {sharing ? (
                   <ShareModal
@@ -1486,7 +1480,7 @@ export default function ArtifactViewer({
         <PackageBody
           info={info}
           manifest={manifest}
-          width={width}
+          width={effectiveWidth}
           textScale={textScale}
           original={original}
           selected={selectedInPkg}
@@ -1580,6 +1574,7 @@ export default function ArtifactViewer({
               // ignores src and renders from `body`.
               src={isHTML(info.content_type) ? `/api/artifacts/${info.artifact_id}` : undefined}
               docKey={info.artifact_id}
+              zoom={textScale}
             />
           )}
         </section>
@@ -1707,7 +1702,7 @@ function PackageBody({
           fileName={selected.split("/").pop() || "diagram"}
         />
       ) : (
-        <RenderedBody body={fileBody} ct={fileCT} src={fileSrc} allowPopups={info.artifact_type === "APP"} docKey={`${info.artifact_id}:${selected}`} />
+        <RenderedBody body={fileBody} ct={fileCT} src={fileSrc} allowPopups={info.artifact_type === "APP"} docKey={`${info.artifact_id}:${selected}`} zoom={textScale} />
       )}
     </section>
   );

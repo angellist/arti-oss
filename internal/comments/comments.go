@@ -228,6 +228,10 @@ func (s *Service) embedAuth(next http.Handler) http.Handler {
 			writeErr(w, http.StatusUnauthorized, "embed token missing scope")
 			return
 		}
+		if !auth.IsAllowed(c.Email) {
+			writeErr(w, http.StatusForbidden, "not permitted")
+			return
+		}
 		ctx := auth.WithProfile(auth.WithIdentity(r.Context(), c.Email), c.Name, c.Picture)
 		ctx = context.WithValue(ctx, embedArtifactKey{}, aid)
 		next.ServeHTTP(w, r.WithContext(ctx))

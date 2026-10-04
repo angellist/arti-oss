@@ -28,6 +28,9 @@ const (
 	// ManageAPIKeys: read/list and revoke ALL users' API keys — the
 	// cross-owner admin view.
 	ManageAPIKeys Permission = "MANAGE_API_KEYS"
+	// ManageConnectors: add, edit, enable, disable and delete the MCP
+	// connectors APP artifacts may reach through the apps proxy.
+	ManageConnectors Permission = "MANAGE_CONNECTORS"
 	// UseArtifacts: baseline ability to read/write one's own or otherwise
 	// visible artifacts. Held by every authenticated user via the USER role.
 	UseArtifacts Permission = "USE_ARTIFACTS"
@@ -42,6 +45,7 @@ var AllPermissions = []Permission{
 	ManageArtifacts,
 	ManageSkills,
 	ManageAPIKeys,
+	ManageConnectors,
 	UseArtifacts,
 }
 

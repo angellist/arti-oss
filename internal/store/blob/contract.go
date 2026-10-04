@@ -12,7 +12,7 @@ import (
 
 // RunContractSuite exercises the [Store] contract against a backend instance.
 // All subtests use unique key prefixes so the suite can run repeatedly against
-// a shared backend (e.g. a long-lived MinIO container) without collision.
+// a shared backend (e.g. a long-lived RustFS container) without collision.
 func RunContractSuite(t *testing.T, s Store) {
 	t.Helper()
 	t.Run("PutGet", func(t *testing.T) { contractPutGet(t, s) })

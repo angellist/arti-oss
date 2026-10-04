@@ -37,6 +37,7 @@ func newDenialAPI(t *testing.T) *denialAPI {
 	svc := artifacts.NewService(st, "https://arti.example.com", nil, nil)
 	r := chi.NewRouter()
 	artifacts.Mount(r, svc)
+	artifacts.MountApp(r, svc)
 	return &denialAPI{t: t, svc: svc, mux: r}
 }
 
@@ -271,5 +272,45 @@ func TestDenial_HidesRestrictedNewerVersionFromAnOlderVersionsReader(t *testing.
 	}
 	if strings.Contains(rec.Body.String(), "v2 restricted") {
 		t.Fatalf("leaked the restricted version's title: %s", rec.Body.String())
+	}
+}
+
+// /app is served by the Go server, not the web viewer, so a denied reader
+// there got raw JSON until it rendered its own card.
+func TestDenial_AppRouteShowsAccessCard(t *testing.T) {
+	api := newDenialAPI(t)
+	art := createArtifact(t, api.svc, denialOwner, "denial-app", withAccess(denialOwner),
+		withZipType(t, pgstore.TypeApp, map[string]string{"index.html": "<html>secret-app-body</html>"}))
+
+	rec := api.get("/app/"+*art.NamedSlug, denialSession(denialStranger))
+	body := rec.Body.String()
+	if rec.Code != http.StatusForbidden || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("denied app reader: %d %q, want 403 html", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	for _, want := range []string{art.Title, denialOwner, *art.NamedSlug, "mailto:"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("card missing %q:\n%s", want, body)
+		}
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors") {
+		t.Fatalf("CSP = %q, want the app's frame-ancestors so an embedding host shows the card", csp)
+	}
+	if strings.Contains(body, "secret-app-body") {
+		t.Fatal("card leaked the app's content")
+	}
+}
+
+func TestDenial_AppRouteStaysNotFoundWithoutADenial(t *testing.T) {
+	api := newDenialAPI(t)
+	art := createArtifact(t, api.svc, denialOwner, "denial-app-404", withAccess(denialOwner),
+		withZipType(t, pgstore.TypeApp, map[string]string{"index.html": "<html>a</html>"}))
+
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"unknown slug":       api.get("/app/no-such-app-slug-at-all", denialSession(denialStranger)),
+		"api-key credential": api.get("/app/"+*art.NamedSlug, denialAPIKey(denialStranger)),
+	} {
+		if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), art.Title) {
+			t.Fatalf("%s: %d %s, want the plain 404", name, rec.Code, rec.Body.String())
+		}
 	}
 }

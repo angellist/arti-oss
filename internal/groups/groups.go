@@ -41,6 +41,8 @@ func (s *Service) Mount(r chi.Router) {
 	r.Post("/api/groups", s.create)
 	r.Patch("/api/groups/{name}", s.update)
 	r.Delete("/api/groups/{name}", s.del)
+	r.Post("/api/groups/{name}/members", s.addMember)
+	r.Delete("/api/groups/{name}/members", s.removeMember)
 	r.Get("/api/idp-groups", s.listIdP)
 	// The person half of the same typeahead the group routes above feed — see
 	// people.go for why it lives here and how disclosure is bounded.
@@ -189,6 +191,46 @@ func (s *Service) update(w http.ResponseWriter, r *http.Request) {
 		members = *body.Members
 	}
 	g, err := s.store.UpdateGroup(r.Context(), cur.Name, display, members)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toDTO(g))
+}
+
+// addMember and removeMember change one membership atomically. They apply the
+// same ownership and role-bearing-group checks as a members edit in update.
+func (s *Service) addMember(w http.ResponseWriter, r *http.Request) {
+	cur, ok := s.loadManageable(w, r)
+	if !ok || !s.gatePrivileged(w, r, cur.Name) {
+		return
+	}
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	g, err := s.store.AddGroupMember(r.Context(), cur.Name, body.Email)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toDTO(g))
+}
+
+func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
+	cur, ok := s.loadManageable(w, r)
+	if !ok || !s.gatePrivileged(w, r, cur.Name) {
+		return
+	}
+	email := r.URL.Query().Get("email")
+	if strings.TrimSpace(email) == "" {
+		writeErr(w, http.StatusBadRequest, "email required")
+		return
+	}
+	g, err := s.store.RemoveGroupMember(r.Context(), cur.Name, email)
 	if err != nil {
 		writeStoreErr(w, err)
 		return

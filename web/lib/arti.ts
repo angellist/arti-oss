@@ -1,4 +1,4 @@
-import { ArtifactInfo, ArtifactListResponse, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Block, BlockedDoc, BlockedDocDetail, Group, IdpGroup, Me, Role, RoleAssignment, RosterResponse, RosterUser, UserAccess, ApiKey, CreatedApiKey, CredentialUsage, NotificationSettings, DeploymentNotificationSwitch, ShareLink, MintedShare, ShareOpen, DenialInfo } from "./types";
+import { ArtifactInfo, ArtifactListResponse, McpServer, McpServerApp, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Block, BlockedDoc, BlockedDocDetail, Group, IdpGroup, Me, Role, RoleAssignment, RosterResponse, RosterUser, UserAccess, ApiKey, CreatedApiKey, CredentialUsage, NotificationSettings, DeploymentNotificationSwitch, ShareLink, MintedShare, ShareOpen, DenialInfo } from "./types";
 
 // hasPerm reports whether `me` holds an RBAC permission key. Prefer this over
 // the bare is_admin flag for capability gating so a non-ADMIN role carrying a
@@ -156,6 +156,19 @@ export async function recordView(id: string): Promise<void> {
 
 export async function getViewStats(id: string): Promise<ViewStats> {
   return http<ViewStats>(`/api/artifacts/${id}/views`);
+}
+
+export interface Bookmarks {
+  count: number;
+  bookmarked: boolean;
+}
+
+export async function getBookmarks(id: string): Promise<Bookmarks> {
+  return http<Bookmarks>(`/api/artifacts/${id}/bookmark`);
+}
+
+export async function setBookmark(id: string, on: boolean): Promise<Bookmarks> {
+  return http<Bookmarks>(`/api/artifacts/${id}/bookmark`, { method: on ? "PUT" : "DELETE" });
 }
 
 export interface ListParams {
@@ -835,6 +848,22 @@ export async function updateGroup(
   return resp.json();
 }
 
+// setGroupMember adds or removes one literal member atomically, under the same
+// ownership and role-bearing-group checks as updateGroup.
+export async function setGroupMember(name: string, email: string, member: boolean): Promise<Group> {
+  const path = `/api/groups/${encodeURIComponent(name)}/members`;
+  const resp = await fetch(member ? path : `${path}?email=${encodeURIComponent(email)}`, {
+    method: member ? "POST" : "DELETE",
+    credentials: "include",
+    headers: member ? { "Content-Type": "application/json" } : undefined,
+    body: member ? JSON.stringify({ email }) : undefined,
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+  return resp.json();
+}
+
 // deleteGroup removes a group. Dangling `group:<name>` tokens in any artifact
 // resolve to no members (fail-closed). Admin only. Returns 204 (no body).
 export async function deleteGroup(name: string): Promise<void> {
@@ -932,6 +961,35 @@ export async function removeBlock(pattern: string): Promise<void> {
   return mutate(`/api/admin/blocks?pattern=${encodeURIComponent(pattern)}`, "DELETE");
 }
 
+// ─── APP MCP connectors (admin: MANAGE_CONNECTORS) ─────────────────────
+
+// listMcpServers returns every connector. The server answers 404 to a caller
+// without MANAGE_CONNECTORS; the page treats that as its own gate.
+export async function listMcpServers(cookie?: string): Promise<McpServer[]> {
+  const { servers } = await http<{ servers: McpServer[] }>("/api/admin/mcp-servers", undefined, cookie);
+  return servers ?? [];
+}
+
+export type McpServerInput = Partial<Pick<McpServer, "name" | "resource_url" | "auth" | "scope" | "enabled" | "tool_allowlist" | "notes">>;
+
+export async function createMcpServer(input: McpServerInput): Promise<void> {
+  return mutate("/api/admin/mcp-servers", "POST", input);
+}
+
+export async function updateMcpServer(name: string, input: McpServerInput): Promise<void> {
+  return mutate(`/api/admin/mcp-servers/${encodeURIComponent(name)}`, "PATCH", input);
+}
+
+export async function deleteMcpServer(name: string): Promise<void> {
+  return mutate(`/api/admin/mcp-servers/${encodeURIComponent(name)}`, "DELETE");
+}
+
+// listMcpServerApps returns the live APPs whose manifest declares a
+// connector: what a disable or delete breaks.
+export async function listMcpServerApps(name: string): Promise<{ apps: McpServerApp[]; scanned: number; unreadable: number }> {
+  return http(`/api/admin/mcp-servers/${encodeURIComponent(name)}/apps`);
+}
+
 // ─── users roster (admin: MANAGE_ROLES) ─────────────────────────────────
 
 // listUsers returns every principal arti knows. MANAGE_ROLES only — the server
@@ -956,6 +1014,21 @@ export async function addUser(input: {
     credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+  return resp.json();
+}
+
+// setUserActive deactivates or reactivates a principal. Deactivation refuses
+// every credential the email holds; it deletes nothing.
+export async function setUserActive(email: string, active: boolean): Promise<RosterUser> {
+  const resp = await fetch(`/api/users/${active ? "reactivate" : "deactivate"}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
   });
   if (!resp.ok) {
     throw await errorFrom(resp);

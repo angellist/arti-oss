@@ -67,7 +67,9 @@ func (e *RPCError) Error() string { return fmt.Sprintf("mcp error %d: %s", e.Cod
 // CallTool runs initialize (+ initialized when the server is stateful) then
 // tools/call, returning the raw JSON-RPC `result` (an MCP tool result with a
 // `content` array and optional `structuredContent`). bearer may be "".
-func (c *Client) CallTool(ctx context.Context, endpoint, bearer, tool string, args map[string]any) (json.RawMessage, error) {
+// consumer, when non-empty, is sent as params._meta.consumer so upstreams can
+// attribute the call to the calling app (e.g. "arti:<slug>").
+func (c *Client) CallTool(ctx context.Context, endpoint, bearer, tool string, args map[string]any, consumer string) (json.RawMessage, error) {
 	if args == nil {
 		args = map[string]any{}
 	}
@@ -81,9 +83,13 @@ func (c *Client) CallTool(ctx context.Context, endpoint, bearer, tool string, ar
 	if sess != "" {
 		_, _, _ = c.do(ctx, endpoint, bearer, sess, rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
 	}
+	params := map[string]any{"name": tool, "arguments": args}
+	if consumer != "" {
+		params["_meta"] = map[string]any{"consumer": consumer}
+	}
 	resp, _, err := c.do(ctx, endpoint, bearer, sess, rpcRequest{
 		JSONRPC: "2.0", ID: 2, Method: "tools/call",
-		Params: map[string]any{"name": tool, "arguments": args},
+		Params: params,
 	})
 	if err != nil {
 		return nil, err

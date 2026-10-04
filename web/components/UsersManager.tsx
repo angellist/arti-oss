@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { RosterRole, RosterUser } from "@/lib/types";
-import { addUser, listUsers } from "@/lib/arti";
+import { addUser, listUsers, setGroupMember, setUserActive } from "@/lib/arti";
 
 // UsersManager renders the Users roster and the one write it supports.
 //
@@ -66,17 +66,49 @@ function RoleChips({ roles }: { roles: RosterRole[] }) {
 // group captured at login. A stale idp chip is struck through — past
 // ARTI_IDP_GROUPS_MAX_AGE it grants nothing, and drawing it like a live grant
 // would overstate the person's access.
-function GroupChips({ user }: { user: RosterUser }) {
+function GroupChips({
+  user,
+  manageable,
+  busy,
+  onChange,
+}: {
+  user: RosterUser;
+  manageable: Record<string, string[]>;
+  busy: boolean;
+  onChange: (group: string, member: boolean) => void;
+}) {
+  const membersOf = (g: string) =>
+    Object.prototype.hasOwnProperty.call(manageable, g) ? manageable[g] : undefined;
+  const addable = Object.keys(manageable)
+    .filter((g) => !user.groups.includes(g))
+    .sort();
   const none = user.groups.length === 0 && user.idp_groups.length === 0;
-  if (none) return <span className="text-neutral-300">—</span>;
   return (
-    <div className="flex flex-wrap gap-1">
+    <div className="flex flex-wrap items-center gap-1">
+      {none && addable.length === 0 ? <span className="text-neutral-300">—</span> : null}
       {user.groups.map((g) => (
         <span
           key={`g:${g}`}
-          className="rounded border border-sky-200 bg-sky-50 px-1.5 text-[11px] leading-[1.45] text-sky-700"
+          title={
+            membersOf(g) && !membersOf(g)?.includes(user.email)
+              ? "member through a pattern such as *@domain; edit it on the Groups page"
+              : undefined
+          }
+          className="inline-flex items-center gap-0.5 rounded border border-sky-200 bg-sky-50 px-1.5 text-[11px] leading-[1.45] text-sky-700"
         >
           group:{g}
+          {membersOf(g)?.includes(user.email) ? (
+            <button
+              type="button"
+              aria-label={`remove ${user.email} from ${g}`}
+              title={`remove from ${g}`}
+              disabled={busy}
+              onClick={() => onChange(g, false)}
+              className="ml-0.5 text-sky-500 hover:text-rose-600 disabled:opacity-40"
+            >
+              ×
+            </button>
+          ) : null}
         </span>
       ))}
       {user.idp_groups.map((g) => (
@@ -85,7 +117,7 @@ function GroupChips({ user }: { user: RosterUser }) {
           title={
             user.idp_stale
               ? "this SSO snapshot has aged out — it currently grants nothing; a fresh sign-in restores it"
-              : "SSO group captured at sign-in"
+              : "SSO group captured at sign-in; managed in the identity provider"
           }
           className={
             "rounded border border-dashed px-1.5 text-[11px] leading-[1.45] " +
@@ -97,6 +129,24 @@ function GroupChips({ user }: { user: RosterUser }) {
           idp:{g}
         </span>
       ))}
+      {addable.length > 0 ? (
+        <select
+          aria-label={`add ${user.email} to a group`}
+          value=""
+          disabled={busy}
+          onChange={(e) => {
+            if (e.target.value) onChange(e.target.value, true);
+          }}
+          className="rounded border border-dashed border-neutral-300 bg-white px-1 text-[11px] leading-[1.45] text-neutral-500 disabled:opacity-40"
+        >
+          <option value="">+ group</option>
+          {addable.map((g) => (
+            <option key={g} value={g}>
+              {g}
+            </option>
+          ))}
+        </select>
+      ) : null}
     </div>
   );
 }
@@ -104,15 +154,23 @@ function GroupChips({ user }: { user: RosterUser }) {
 export default function UsersManager({
   initialUsers,
   sources,
+  currentEmail = "",
+  manageableGroups = [],
 }: {
   initialUsers: RosterUser[];
   sources: string[];
+  currentEmail?: string;
+  manageableGroups?: { name: string; members: string[] }[];
 }) {
   const [users, setUsers] = useState<RosterUser[]>(initialUsers);
   const [q, setQ] = useState("");
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState("");
   const [flash, setFlash] = useState("");
+  const [pending, setPending] = useState("");
+  const [groupMembers, setGroupMembers] = useState<Record<string, string[]>>(() =>
+    Object.fromEntries(manageableGroups.map((g) => [g.name, g.members])),
+  );
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -130,6 +188,46 @@ export default function UsersManager({
       setUsers((await listUsers()).users);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const toggleActive = async (u: RosterUser) => {
+    const activate = u.deactivated_at !== null;
+    if (
+      !activate &&
+      !window.confirm(
+        `Deactivate ${u.email}? Every sign-in, session, API key and token for this email will be refused until it is reactivated. Nothing is deleted.`,
+      )
+    ) {
+      return;
+    }
+    setErr("");
+    setFlash("");
+    setPending(u.email);
+    try {
+      const updated = await setUserActive(u.email, activate);
+      setUsers((prev) => prev.map((x) => (x.email === updated.email ? updated : x)));
+      setFlash(activate ? `${u.email} reactivated.` : `${u.email} deactivated.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending("");
+    }
+  };
+
+  const changeGroup = async (u: RosterUser, group: string, member: boolean) => {
+    setErr("");
+    setFlash("");
+    setPending(u.email);
+    try {
+      const g = await setGroupMember(group, u.email, member);
+      setGroupMembers((prev) => ({ ...prev, [g.name]: g.members }));
+      await refresh();
+      setFlash(member ? `${u.email} added to ${group}.` : `${u.email} removed from ${group}.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending("");
     }
   };
 
@@ -176,16 +274,17 @@ export default function UsersManager({
       <div className="overflow-x-auto rounded-md border border-neutral-200">
         <table className="w-full table-fixed border-collapse">
           <colgroup>
-            <col className="w-[30%]" />
-            <col className="w-[22%]" />
-            <col className="w-[31%]" />
-            <col className="w-[17%]" />
+            <col className="w-[28%]" />
+            <col className="w-[20%]" />
+            <col className="w-[26%]" />
+            <col className="w-[14%]" />
+            <col className="w-[12%]" />
           </colgroup>
           <thead>
             <tr className="bg-neutral-50">
-              {["Email", "Roles", "Groups", "Last sign-in"].map((h) => (
+              {["Email", "Roles", "Groups", "Last sign-in", ""].map((h, i) => (
                 <th
-                  key={h}
+                  key={h || i}
                   className="border-b border-neutral-200 px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider text-neutral-500"
                 >
                   {h}
@@ -196,13 +295,25 @@ export default function UsersManager({
           <tbody>
             {shown.map((u) => {
               const seen = relative(u.last_seen_at);
+              const inactive = u.deactivated_at !== null;
               return (
                 <tr key={u.email} className="border-b border-neutral-200 last:border-b-0 hover:bg-neutral-50">
                   <td className="px-3 py-2 align-top text-[13px] text-neutral-800">
-                    <span className="block truncate" title={u.email}>
+                    <span
+                      className={"block truncate" + (inactive ? " text-neutral-400 line-through" : "")}
+                      title={u.email}
+                    >
                       {u.email}
                     </span>
                     <span className="mt-0.5 flex flex-wrap items-center gap-1">
+                      {inactive ? (
+                        <span
+                          className="rounded border border-rose-200 bg-rose-50 px-1 text-[9px] uppercase tracking-wide text-rose-700"
+                          title={`deactivated${u.deactivated_by ? ` by ${u.deactivated_by}` : ""} ${relative(u.deactivated_at).title}`}
+                        >
+                          deactivated
+                        </span>
+                      ) : null}
                       {u.kind === "service" ? (
                         <span className="rounded border border-neutral-200 bg-neutral-100 px-1 text-[9px] uppercase tracking-wide text-neutral-500">
                           service
@@ -223,17 +334,39 @@ export default function UsersManager({
                     <RoleChips roles={u.roles} />
                   </td>
                   <td className="px-3 py-2 align-top">
-                    <GroupChips user={u} />
+                    <GroupChips
+                      user={u}
+                      manageable={groupMembers}
+                      busy={pending !== ""}
+                      onChange={(g, member) => changeGroup(u, g, member)}
+                    />
                   </td>
                   <td className="px-3 py-2 align-top text-[13px] text-neutral-800" title={seen.title}>
                     {u.last_seen_at ? seen.label : <span className="italic text-neutral-400">{seen.label}</span>}
+                  </td>
+                  <td className="px-3 py-2 text-right align-top">
+                    {u.email === currentEmail.toLowerCase() ? null : (
+                      <button
+                        type="button"
+                        onClick={() => toggleActive(u)}
+                        disabled={pending !== ""}
+                        className={
+                          "rounded-md border px-2 py-1 text-[11px] disabled:opacity-40 " +
+                          (inactive
+                            ? "border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-50"
+                            : "border-rose-200 bg-white text-rose-700 hover:bg-rose-50")
+                        }
+                      >
+                        {pending === u.email ? "…" : inactive ? "Reactivate" : "Deactivate"}
+                      </button>
+                    )}
                   </td>
                 </tr>
               );
             })}
             {shown.length === 0 ? (
               <tr>
-                <td colSpan={4} className="px-3 py-8 text-center text-[12px] text-neutral-400">
+                <td colSpan={5} className="px-3 py-8 text-center text-[12px] text-neutral-400">
                   {users.length === 0 ? "no users yet" : `nothing matches “${q}”`}
                 </td>
               </tr>

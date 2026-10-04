@@ -35,7 +35,7 @@ flowchart TB
   feproxy --> web
 
   pg[(Postgres -- metadata)]
-  s3[(S3 / MinIO -- bytes)]
+  s3[(S3 / RustFS -- bytes)]
   gateway[Upstream MCP servers / gateway]
 
   rest --> pg

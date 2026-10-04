@@ -52,9 +52,10 @@ func TestGenericDefaults(t *testing.T) {
 		{"Server.BaseURL", cfg.Server.BaseURL, "http://localhost:8090"},
 		{"Server.WebURL", cfg.Server.WebURL, ""},
 		{"Server.CookieSecure", cfg.Server.CookieSecure, false},
+		{"Database.MaxConns", cfg.Database.MaxConns, 20},
 		{"Storage.Endpoint", cfg.Storage.Endpoint, ""},
 		{"Storage.Region", cfg.Storage.Region, "us-east-1"},
-		{"Storage.UseSSL", cfg.Storage.UseSSL, true}, // TLS on by default; local MinIO opts out
+		{"Storage.UseSSL", cfg.Storage.UseSSL, true}, // TLS on by default; local RustFS opts out
 		{"Auth.Audience", cfg.Auth.Audience, "auth"},
 		{"Auth.SigningKey", cfg.Auth.SigningKey, "dev-key-not-for-prod"},
 		{"Auth.TestMode", cfg.Auth.TestMode, false},
@@ -190,7 +191,7 @@ func TestStorageEndpointValidation(t *testing.T) {
 		t.Errorf("Endpoint = %q, want scheme stripped", cfg.Storage.Endpoint)
 	}
 	// A path is a typo (bucket or console URL pasted in) — reject with the key named.
-	_, err = loadWith(t, required(map[string]string{"S3_ENDPOINT": "https://minio.example.com/arti"}), "")
+	_, err = loadWith(t, required(map[string]string{"S3_ENDPOINT": "https://rustfs.example.com/arti"}), "")
 	if err == nil || !strings.Contains(err.Error(), "S3_ENDPOINT") {
 		t.Fatalf("err = %v, want S3_ENDPOINT validation error", err)
 	}

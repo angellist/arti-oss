@@ -82,5 +82,15 @@ describe("selectApps", () => {
     selectApps(src, { sort: "recent" });
     expect(src.map((a) => a.named_slug)).toEqual(["quiet", "popular", "fresh"]);
   });
+
+  it("keeps only bookmarked apps when the bookmarked toggle is on", () => {
+    const set = [
+      app({ named_slug: "kept", bookmarked: true }),
+      app({ named_slug: "dropped", bookmarked: false }),
+      app({ named_slug: "unknown" }),
+    ];
+    expect(selectApps(set, { bookmarked: true }).map((a) => a.named_slug)).toEqual(["kept"]);
+    expect(selectApps(set, { bookmarked: false })).toHaveLength(3);
+  });
 });
 

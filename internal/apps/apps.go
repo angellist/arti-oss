@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -98,7 +99,21 @@ type ServerConfig struct {
 	ResourceURL string `json:"resource_url"`    // the MCP endpoint arti forwards to
 	Auth        string `json:"auth"`            // "none" | "oauth"
 	Scope       string `json:"scope,omitempty"` // OAuth scope for "oauth"
+
+	// Set only on resolver-supplied servers. An empty ToolAllowlist admits
+	// every tool the app's manifest allows.
+	ToolAllowlist []string `json:"-"`
+	Disabled      bool     `json:"-"`
 }
+
+func (sc ServerConfig) allowsTool(tool string) bool {
+	return len(sc.ToolAllowlist) == 0 || slices.Contains(sc.ToolAllowlist, tool)
+}
+
+// ServerResolver finds a non-built-in server by name. found is false when no
+// such server exists; a disabled one is returned with Disabled set, so the
+// enabled check and the resolve are one read.
+type ServerResolver func(ctx context.Context, name string) (sc ServerConfig, found bool, err error)
 
 // TokenProvider yields a per-user upstream Bearer for an auth'd server (the
 // arti→upstream OBO leg). BearerFor returns "" when the user hasn't authorized
@@ -165,9 +180,10 @@ type Service struct {
 	signer    *auth.JWTSigner
 	mcp       *mcpclient.Client
 	servers   map[string]ServerConfig
-	tokens    TokenProvider // may be nil (no OBO wired)
-	completer Completer     // may be nil (no llm wired)
-	arti      ArtiTools     // may be nil (arti calls fall back to OBO)
+	resolve   ServerResolver // non-built-ins; nil = built-ins only
+	tokens    TokenProvider  // may be nil (no OBO wired)
+	completer Completer      // may be nil (no llm wired)
+	arti      ArtiTools      // may be nil (arti calls fall back to OBO)
 	logger    *slog.Logger
 	rejects   rejectSampler
 
@@ -202,6 +218,40 @@ const upstreamFailStatus = http.StatusServiceUnavailable
 // SetArtiTools wires the in-process arti path (see ArtiTools). Optional; when
 // unset, arti's tools take the OBO path like any other server.
 func (s *Service) SetArtiTools(t ArtiTools) { s.arti = t }
+
+// SetServerResolver wires the lookup for every server that is not a built-in.
+func (s *Service) SetServerResolver(r ServerResolver) { s.resolve = r }
+
+func (s *Service) lookupServer(ctx context.Context, name string) (ServerConfig, bool, error) {
+	if sc, ok := s.servers[name]; ok {
+		return sc, true, nil
+	}
+	if s.resolve == nil {
+		return ServerConfig{}, false, nil
+	}
+	sc, ok, err := s.resolve(ctx, name)
+	if err == nil && ok {
+		sc.Name = name
+	}
+	return sc, ok, err
+}
+
+// Callable reports whether the proxy would route server/tool on this arti
+// today, before the app manifest and the viewer are considered. The consent
+// page uses it to mark declared tools that cannot run.
+func (s *Service) Callable(ctx context.Context, server, tool string) (bool, error) {
+	if isArtiSelf(server) && s.arti != nil && artiInProcess[tool] {
+		return true, nil
+	}
+	sc, ok, err := s.lookupServer(ctx, server)
+	if err != nil || !ok {
+		return false, err
+	}
+	if sc.Auth == "service" {
+		return tool == "complete" && s.completer != nil, nil
+	}
+	return !sc.Disabled && sc.allowsTool(tool), nil
+}
 
 func New(art *pgstore.Store, signer *auth.JWTSigner, servers map[string]ServerConfig, tokens TokenProvider, completer Completer, logger *slog.Logger) *Service {
 	if servers == nil {
@@ -590,10 +640,26 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. Resolve the named server (URL + auth policy live server-side).
-	sc, known := s.servers[req.Server]
+	sc, known, lerr := s.lookupServer(r.Context(), req.Server)
+	if lerr != nil {
+		s.logger.Error("apps proxy: server lookup failed", "server", req.Server, "err", lerr)
+		writeUpstreamCode(w, upstreamFailStatus, "server_lookup_failed", req.Server, req.Tool,
+			"arti could not look up server "+req.Server+"; retry in a moment")
+		return
+	}
 	if !known {
 		writeUpstreamCode(w, http.StatusBadRequest, "unknown_server", req.Server, req.Tool,
 			"unknown server "+req.Server+" (not configured on this arti)")
+		return
+	}
+	if sc.Disabled {
+		writeUpstreamCode(w, http.StatusBadRequest, "unknown_server", req.Server, req.Tool,
+			"server "+req.Server+" is disabled on this arti")
+		return
+	}
+	if !sc.allowsTool(req.Tool) {
+		writeUpstreamCode(w, http.StatusForbidden, "not_allowlisted", req.Server, req.Tool,
+			"tool "+req.Server+"/"+req.Tool+" is not in this arti's allowlist for server "+req.Server)
 		return
 	}
 
@@ -658,7 +724,13 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	result, callErr := s.mcp.CallTool(ctx, sc.ResourceURL, bearer, req.Tool, req.Arguments)
+	// Name the calling APP so upstreams can attribute the query: snowflake-v2
+	// folds _meta.consumer into QUERY_TAG (arti:<slug>, else arti:<uuid>).
+	consumer := "arti:" + req.AppID
+	if row.NamedSlug != nil && *row.NamedSlug != "" {
+		consumer = "arti:" + *row.NamedSlug
+	}
+	result, callErr := s.mcp.CallTool(ctx, sc.ResourceURL, bearer, req.Tool, req.Arguments, consumer)
 	if errors.Is(callErr, mcpclient.ErrUnauthorized) {
 		// A 401 only means "re-consent" for oauth (OBO) servers — the stored
 		// token expired/was revoked. For auth:"none" servers (e.g. arti-self) a

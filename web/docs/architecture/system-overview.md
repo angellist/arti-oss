@@ -22,9 +22,9 @@ Everything is fronted by one Go binary, `arti-server`.
 - **Postgres** — source of truth for artifact metadata, comments, OAuth/device
   tokens, groups, RBAC, and the LLM usage ledger. Small TEXT artifacts also live
   inline here.
-- **S3 / MinIO** — bytes. Every PACKAGE/APP/ATTACHMENT and any TEXT artifact over
+- **S3 / RustFS** — bytes. Every PACKAGE/APP/ATTACHMENT and any TEXT artifact over
   the inline cap is stored as a blob, with the Postgres row holding a pointer to
-  it. Real S3 in prod, MinIO in dev.
+  it. Real S3 in prod, RustFS in dev.
 - **CLI (`arti`)** — a Go binary for uploading/fetching from a terminal or a
   headless agent. Authenticates via browser login or the device flow.
 

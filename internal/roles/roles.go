@@ -35,6 +35,8 @@ func (s *Service) Mount(r chi.Router) {
 	r.Get("/api/role-lookup", s.lookup)
 	r.Get("/api/users", s.listUsers)
 	r.Post("/api/users", s.addUser)
+	r.Post("/api/users/deactivate", s.deactivateUser)
+	r.Post("/api/users/reactivate", s.reactivateUser)
 }
 
 // ─── DTOs ────────────────────────────────────────────────────────────
@@ -380,9 +382,14 @@ type RosterUserDTO struct {
 	// in": logins were only recorded from migration 0020 onward.
 	LastSeenAt *string `json:"last_seen_at"`
 
+	Source     string  `json:"source"` // "admin" | "login" | "backfill" | "" (no users row)
 	Registered bool    `json:"registered"`
 	AddedBy    string  `json:"added_by"`
 	AddedAt    *string `json:"added_at"`
+
+	// DeactivatedAt is non-null while every credential for this email is refused.
+	DeactivatedAt *string `json:"deactivated_at"`
+	DeactivatedBy string  `json:"deactivated_by"`
 }
 
 func stamp(t *time.Time) *string {
@@ -417,9 +424,13 @@ func toRosterDTO(u pgstore.RosterUser) RosterUserDTO {
 		IdPGroups:  idp,
 		IdPStale:   len(idp) > 0 && !u.IdPFresh,
 		LastSeenAt: stamp(u.LastSeenAt),
+		Source:     u.Source,
 		Registered: u.Registered,
 		AddedBy:    u.AddedBy,
 		AddedAt:    stamp(u.AddedAt),
+
+		DeactivatedAt: stamp(u.DeactivatedAt),
+		DeactivatedBy: u.DeactivatedBy,
 	}
 }
 
@@ -470,4 +481,61 @@ func (s *Service) addUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, toRosterDTO(u))
+}
+
+type userEmailReq struct {
+	Email string `json:"email"`
+}
+
+// deactivateUser refuses every credential the email holds until reactivated.
+// It refuses the caller's own email, which would otherwise lock them out of
+// the page that undoes it.
+func (s *Service) deactivateUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireManageRoles(w, r) {
+		return
+	}
+	var body userEmailReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	caller := auth.EmailFromContext(r.Context())
+	if strings.EqualFold(strings.TrimSpace(body.Email), strings.TrimSpace(caller)) {
+		writeErr(w, http.StatusBadRequest, "you cannot deactivate yourself")
+		return
+	}
+	if err := s.store.DeactivateUser(r.Context(), body.Email, caller); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	s.writeRosterUser(w, r, body.Email)
+}
+
+func (s *Service) reactivateUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireManageRoles(w, r) {
+		return
+	}
+	var body userEmailReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(body.Email) == "" {
+		writeErr(w, http.StatusBadRequest, "email required")
+		return
+	}
+	if err := s.store.ReactivateUser(r.Context(), body.Email); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	s.writeRosterUser(w, r, body.Email)
+}
+
+func (s *Service) writeRosterUser(w http.ResponseWriter, r *http.Request, email string) {
+	u, err := s.store.GetRosterUser(r.Context(), email)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toRosterDTO(u))
 }

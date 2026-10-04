@@ -86,7 +86,11 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "tools/call":
 		out, err := s.callTool(r.Context(), req.Params)
 		if err != nil {
-			resp.Error = &rpcError{Code: -32000, Message: err.Error()}
+			if res, ok := softMiss(req.Params, err); ok {
+				resp.Result = res
+			} else {
+				resp.Error = &rpcError{Code: -32000, Message: err.Error()}
+			}
 		} else {
 			resp.Result = out
 		}
@@ -263,7 +267,7 @@ func toolSpecs() []toolSpec {
 		},
 		{
 			Name:        "get_artifact",
-			Description: "Fetch metadata for one artifact by UUID or slug. The result includes size_bytes and sha256 — a cheap way to gauge how large the content is BEFORE reading it (for large/blob-backed artifacts this does not transfer the content). Check size_bytes here, then decide whether to read_artifact in full or with max_bytes.",
+			Description: "Fetch metadata for one artifact by UUID or slug. The result includes size_bytes and sha256 — a cheap way to gauge how large the content is BEFORE reading it (for large/blob-backed artifacts this does not transfer the content). Check size_bytes here, then decide whether to read_artifact in full or with max_bytes. A missing or unreadable ident returns {exists:false} instead of an error, so this is also the cheap existence check to run before add_artifact/append_artifact.",
 			InputSchema: map[string]any{
 				"type":     "object",
 				"required": []string{"ident"},
@@ -275,7 +279,7 @@ func toolSpecs() []toolSpec {
 		},
 		{
 			Name:        "read_artifact",
-			Description: "Fetch the content of an artifact. Textual content_types come back as UTF-8 text; binary as base64. The reply is annotated with size_bytes (full artifact size), sha256, returned_bytes, and truncated. For a large artifact, check size_bytes first (via get_artifact or a prior reply) and/or pass max_bytes to read only the first N bytes — avoids pulling a big document into context just to peek at it.",
+			Description: "Fetch the content of an artifact. Textual content_types come back as UTF-8 text; binary as base64. The reply is annotated with size_bytes (full artifact size), sha256, returned_bytes, and truncated. For a large artifact, check size_bytes first (via get_artifact or a prior reply) and/or pass max_bytes to read only the first N bytes — avoids pulling a big document into context just to peek at it. A missing or unreadable ident returns {exists:false} rather than an error, so probing a slug before writing costs no failed call.",
 			InputSchema: map[string]any{
 				"type":     "object",
 				"required": []string{"ident"},
@@ -430,6 +434,32 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) (any, error)
 		return nil, fmt.Errorf("bad params: %w", err)
 	}
 	return s.dispatch(ctx, p.Name, p.Arguments)
+}
+
+// softMiss turns a pgstore.ErrNotFound on the two probe tools into a normal
+// result rather than an RPC error. Agents that read-before-create hit
+// "pgstore: not found" once per new slug, and every miss surfaces as a failed
+// tool call in the caller's audit/session views even though it is expected
+// control flow. The store deliberately answers ErrNotFound for missing and
+// unreadable artifacts alike, so {exists:false} leaks nothing a hard error
+// would not. Only this JSON-RPC surface softens: CallToolInProcess still
+// returns the error, so the apps proxy keeps mapping a miss to 404.
+func softMiss(raw json.RawMessage, err error) (any, bool) {
+	if !errors.Is(err, pgstore.ErrNotFound) {
+		return nil, false
+	}
+	var p callParams
+	if json.Unmarshal(raw, &p) != nil {
+		return nil, false
+	}
+	if p.Name != "read_artifact" && p.Name != "get_artifact" {
+		return nil, false
+	}
+	var a struct {
+		Ident string `json:"ident"`
+	}
+	_ = json.Unmarshal(p.Arguments, &a)
+	return toolReply(map[string]any{"exists": false, "ident": a.Ident}), true
 }
 
 // dispatch routes a single tool call by name; args is the raw JSON each tool

@@ -1,12 +1,14 @@
 "use client";
 
 import { useState } from "react";
+import { setBookmark, type Bookmarks } from "@/lib/arti";
 import Link from "next/link";
 import type { ArtifactInfo, Me } from "@/lib/types";
 import { APP_SORTS, selectApps, type AppSort } from "@/lib/apps";
 import { LABEL_CHIP } from "@/lib/chips";
 import { appHref, artifactHref } from "@/lib/hrefs";
 import { relativeTime } from "@/lib/time";
+import { BookmarkToggle } from "@/components/BookmarkButton";
 import CreatorName from "@/components/CreatorName";
 import { SearchIcon } from "@/components/SearchIcon";
 
@@ -48,7 +50,7 @@ function SortIcon() {
   );
 }
 
-function AppCard({ a }: { a: ArtifactInfo }) {
+function AppCard({ a, onToggleBookmark }: { a: ArtifactInfo; onToggleBookmark: () => void }) {
   const run = appHref(a);
   const views = a.view_count_30d ?? 0;
   const extra = a.labels.length - LABELS_SHOWN;
@@ -66,6 +68,13 @@ function AppCard({ a }: { a: ArtifactInfo }) {
       ) : null}
 
       <div className="flex items-start gap-2">
+        <span className="relative mt-[3px] flex shrink-0">
+          <BookmarkToggle
+            count={a.bookmark_count ?? 0}
+            bookmarked={!!a.bookmarked}
+            onToggle={onToggleBookmark}
+          />
+        </span>
         <h3 className="line-clamp-2 min-w-0 flex-1 text-[15px] font-semibold leading-tight text-neutral-900">
           {a.title}
         </h3>
@@ -131,9 +140,33 @@ export default function AppsGrid({
 }) {
   const [query, setQuery] = useState("");
   const [mine, setMine] = useState(false);
+  const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [sort, setSort] = useState<AppSort>("recent");
+  // Optimistic bookmark state keyed like the server's (slug-scoped), layered
+  // over the rows so the filter sees a toggle immediately.
+  const [bookmarkOverride, setBookmarkOverride] = useState<Record<string, Bookmarks>>({});
+  const bookmarkKey = (a: ArtifactInfo) => a.named_slug || a.artifact_id;
 
-  const shown = selectApps(rows, { query, owner: mine ? (me?.email ?? null) : null, sort });
+  const merged = rows.map((a) => {
+    const b = bookmarkOverride[bookmarkKey(a)];
+    return b ? { ...a, bookmark_count: b.count, bookmarked: b.bookmarked } : a;
+  });
+  const shown = selectApps(merged, {
+    query,
+    owner: mine ? (me?.email ?? null) : null,
+    bookmarked: onlyBookmarked,
+    sort,
+  });
+
+  const toggleBookmark = (a: ArtifactInfo) => {
+    const key = bookmarkKey(a);
+    const prev: Bookmarks = { count: a.bookmark_count ?? 0, bookmarked: !!a.bookmarked };
+    const on = !prev.bookmarked;
+    setBookmarkOverride((m) => ({ ...m, [key]: { count: prev.count + (on ? 1 : -1), bookmarked: on } }));
+    setBookmark(a.artifact_id, on)
+      .then((b) => setBookmarkOverride((m) => ({ ...m, [key]: b })))
+      .catch(() => setBookmarkOverride((m) => ({ ...m, [key]: prev })));
+  };
 
   return (
     <>
@@ -168,6 +201,22 @@ export default function AppsGrid({
           </button>
         ) : null}
 
+        {me?.email ? (
+          <button
+            type="button"
+            aria-pressed={onlyBookmarked}
+            onClick={() => setOnlyBookmarked((v) => !v)}
+            className={
+              "flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] transition " +
+              (onlyBookmarked
+                ? "bg-blue-100 font-medium text-blue-800"
+                : "border border-neutral-200 text-neutral-600 hover:bg-neutral-50")
+            }
+          >
+            🔖 Bookmarked
+          </button>
+        ) : null}
+
         <label
           className="flex items-center gap-1.5 rounded-full border border-neutral-200 py-1 pl-3 pr-1.5 text-[12px] text-neutral-600"
           title="sort"
@@ -198,7 +247,7 @@ export default function AppsGrid({
       ) : (
         <div className="grid grid-cols-1 gap-3.5 px-6 py-4 pb-10 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {shown.map((a) => (
-            <AppCard key={a.artifact_id} a={a} />
+            <AppCard key={a.artifact_id} a={a} onToggleBookmark={() => toggleBookmark(a)} />
           ))}
         </div>
       )}

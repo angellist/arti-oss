@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerE
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { ArtifactInfo, Me } from "@/lib/types";
-import { archiveArtifact, hasPerm, sameEmail, unarchiveArtifact, type SortDir, type SortField } from "@/lib/arti";
+import { archiveArtifact, type Bookmarks, hasPerm, sameEmail, setBookmark, unarchiveArtifact, type SortDir, type SortField } from "@/lib/arti";
 import { ALL_VERSIONS_KEY, SEARCH_OPEN_KEY, SHOW_ARCHIVED_KEY, catalogView, rowSetKey } from "@/lib/catalog";
 import { useSearchBarOpen, useSetSearchBarOpen } from "@/lib/rail-context";
 import {
@@ -25,6 +25,7 @@ import { appHref, artifactHref } from "@/lib/hrefs";
 import { relativeTime } from "@/lib/time";
 import { formatBytes } from "@/lib/format";
 import CreatorName from "@/components/CreatorName";
+import { BookmarkToggle } from "@/components/BookmarkButton";
 import ColumnMenu from "@/components/ColumnMenu";
 import { LABEL_CHIP, SCOPE_CHIP, TYPE_PILL } from "@/lib/chips";
 import { BrowseIcon } from "@/components/BrowseIcon";
@@ -36,6 +37,9 @@ const PAGE_SIZE = 50;
 // tiny — it exists so the menu has a visible, keyboard-reachable affordance,
 // since a right-click menu is otherwise invisible.
 const MENU_COL_WIDTH = 30;
+// The leading bookmark toggle sits outside the column registry: it is not
+// reorderable, resizable or hideable.
+const BOOKMARK_COL_WIDTH = 52;
 
 // Stable empty pin list, so the no-pins case doesn't hand a fresh array to
 // visibleColumns (and any future memo) on every render.
@@ -569,9 +573,26 @@ export default function CatalogTable({
   const to = Math.min(total, from + rows.length - 1);
   // Body columns = the visible ones, plus the drill-in actions cell, plus the
   // trailing ⋮ cell.
-  const bodyColSpan = cols.length + (drilledIntoSlug ? 1 : 0) + 1;
+  const bodyColSpan = 1 + cols.length + (drilledIntoSlug ? 1 : 0) + 1;
   const ACTIONS_COL_WIDTH = 160;
+
+  // Bookmarks are slug-scoped, so an override is keyed the same way the server
+  // keys them and flips every version row of a drilled-in slug together.
+  const [bookmarkOverride, setBookmarkOverride] = useState<Record<string, Bookmarks>>({});
+  const bookmarkKey = (a: ArtifactInfo) => a.named_slug || a.artifact_id;
+  const bookmarksOf = (a: ArtifactInfo): Bookmarks =>
+    bookmarkOverride[bookmarkKey(a)] ?? { count: a.bookmark_count ?? 0, bookmarked: !!a.bookmarked };
+  const toggleBookmark = (a: ArtifactInfo) => {
+    const key = bookmarkKey(a);
+    const prev = bookmarksOf(a);
+    const on = !prev.bookmarked;
+    setBookmarkOverride((m) => ({ ...m, [key]: { count: prev.count + (on ? 1 : -1), bookmarked: on } }));
+    setBookmark(a.artifact_id, on)
+      .then((b) => setBookmarkOverride((m) => ({ ...m, [key]: b })))
+      .catch(() => setBookmarkOverride((m) => ({ ...m, [key]: prev })));
+  };
   const totalWidth =
+    BOOKMARK_COL_WIDTH +
     cols.reduce((sum, c) => sum + widthOf(prefs, c.key), 0) +
     (drilledIntoSlug ? ACTIONS_COL_WIDTH : 0) +
     MENU_COL_WIDTH;
@@ -741,6 +762,7 @@ export default function CatalogTable({
           }
         >
           <colgroup>
+            <col style={{ width: `${BOOKMARK_COL_WIDTH}px` }} />
             {cols.map((c) => (
               <col
                 key={c.key}
@@ -766,7 +788,12 @@ export default function CatalogTable({
             }}
           >
             <tr ref={headerRowRef}>
-              {cols.map((c, i) => {
+              <th
+                style={{ boxShadow: headerShadow(false, false) }}
+                className={HEADER_CELL + "py-2 pl-4"}
+                aria-label="bookmarked"
+              />
+              {cols.map((c) => {
                 const headerLabel = c.key === "version" ? versionColLabel : c.label;
                 const isDropBefore = dropAt?.key === c.key && dropAt.side === "before";
                 const isDropAfter = dropAt?.key === c.key && dropAt.side === "after";
@@ -783,7 +810,7 @@ export default function CatalogTable({
                     className={
                       HEADER_CELL +
                       "relative select-none py-2 font-bold " +
-                      (i === 0 ? "pl-6 pr-2 " : "px-2 ") +
+                      "px-2 " +
                       (c.numeric ? "text-right " : "") +
                       (dragKey ? "cursor-grabbing " : "") +
                       (dragKey === c.key ? "opacity-40 " : "")
@@ -881,12 +908,17 @@ export default function CatalogTable({
                     (archived ? "bg-neutral-50/60" : "")
                   }
                 >
-                  {cols.map((c, i) => (
+                  <td className="py-1.5 pl-4 align-top">
+                    {/* One title line tall, so the icon centres on the title. */}
+                    <div className="flex h-[21px] items-center">
+                      <BookmarkToggle {...bookmarksOf(a)} onToggle={() => toggleBookmark(a)} />
+                    </div>
+                  </td>
+                  {cols.map((c) => (
                     <td
                       key={c.key}
                       className={
-                        "py-1.5 align-top " +
-                        (i === 0 ? "pl-6 pr-2 " : "px-2 ") +
+                        "py-1.5 align-top px-2 " +
                         (c.numeric ? "text-right " : "") +
                         dim
                       }

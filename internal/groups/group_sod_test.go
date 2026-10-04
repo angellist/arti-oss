@@ -68,3 +68,74 @@ func TestGroups_PrivilegedMembershipSoD(t *testing.T) {
 		t.Errorf("non-admin recreate of role-bearing name: want 403, got %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestGroups_SingleMemberEndpoints(t *testing.T) {
+	r, st := testRouter(t)
+	ctx := context.Background()
+	const alice, bob, admin = "memalice@a.com", "membob@a.com", "memadmin@a.com"
+	if err := st.AssignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.UnassignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin) })
+
+	name := unique("mem")
+	if w := do(t, r, alice, "POST", "/api/groups", `{"name":"`+name+`","members":["m@a.com"]}`); w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	members := func() []string {
+		g, err := st.GetGroup(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g.Members
+	}
+	add := func(caller, email string) int {
+		return do(t, r, caller, "POST", "/api/groups/"+name+"/members", `{"email":"`+email+`"}`).Code
+	}
+	remove := func(caller, email string) int {
+		return do(t, r, caller, "DELETE", "/api/groups/"+name+"/members?email="+email, "").Code
+	}
+
+	if c := add(bob, "x@a.com"); c != http.StatusNotFound {
+		t.Errorf("non-owner add: want 404, got %d", c)
+	}
+	if c := remove(bob, "m@a.com"); c != http.StatusNotFound {
+		t.Errorf("non-owner remove: want 404, got %d", c)
+	}
+	if c := add(alice, "*@a.com"); c != http.StatusBadRequest {
+		t.Errorf("glob add: want 400, got %d", c)
+	}
+	if c := add(alice, "X@A.com"); c != http.StatusOK {
+		t.Fatalf("owner add: want 200, got %d", c)
+	}
+	if c := add(alice, "x@a.com"); c != http.StatusOK {
+		t.Errorf("repeat add: want 200, got %d", c)
+	}
+	if got := members(); len(got) != 2 || got[1] != "x@a.com" {
+		t.Errorf("after add, members = %v, want [m@a.com x@a.com]", got)
+	}
+	if c := remove(alice, "m@a.com"); c != http.StatusOK {
+		t.Errorf("owner remove: want 200, got %d", c)
+	}
+	if got := members(); len(got) != 1 || got[0] != "x@a.com" {
+		t.Errorf("after remove, members = %v, want [x@a.com]", got)
+	}
+
+	if err := st.AssignRole(ctx, rbac.PrincipalGroup, name, rbac.RoleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.UnassignRole(ctx, rbac.PrincipalGroup, name, rbac.RoleAdmin) })
+	if c := add(alice, "evil@a.com"); c != http.StatusForbidden {
+		t.Errorf("owner add to role-bearing group: want 403, got %d", c)
+	}
+	if c := remove(alice, "x@a.com"); c != http.StatusForbidden {
+		t.Errorf("owner remove from role-bearing group: want 403, got %d", c)
+	}
+	if c := add(admin, "trusted@a.com"); c != http.StatusOK {
+		t.Errorf("admin add to role-bearing group: want 200, got %d", c)
+	}
+	if c := do(t, r, admin, "POST", "/api/groups/"+unique("nope")+"/members", `{"email":"a@a.com"}`).Code; c != http.StatusNotFound {
+		t.Errorf("missing group: want 404, got %d", c)
+	}
+	_ = do(t, r, admin, "DELETE", "/api/groups/"+name, "")
+}

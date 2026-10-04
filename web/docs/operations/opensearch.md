@@ -48,7 +48,7 @@ security disabled:
 
 ```sh
 make dev-up
-# Starts: Postgres :5436, MinIO :9210, OpenSearch :9200
+# Starts: Postgres :5436, RustFS :9210, OpenSearch :9200
 ```
 
 The server auto-connects when you set the endpoint:

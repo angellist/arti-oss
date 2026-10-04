@@ -35,7 +35,7 @@ Every operation is available on every surface; the service layer in `internal/ar
 ## Backed by one table plus blob storage
 
 - **Postgres** holds every artifact row: UUID, slug, version, type, content type, scope, labels, access list, and a schema-less JSONB `metadata` column for type-specific extras (e.g. a PACKAGE's entry manifest). TEXT bodies ≤ 64 KiB are stored inline in the same row.
-- **S3-compatible blob storage** (AWS S3 in prod, MinIO locally) holds everything else: large TEXT bodies, all PACKAGE/APP zips, and all ATTACHMENT files. A `blob_ref` on the row points at the object.
+- **S3-compatible blob storage** (AWS S3 in prod, RustFS locally) holds everything else: large TEXT bodies, all PACKAGE/APP zips, and all ATTACHMENT files. A `blob_ref` on the row points at the object.
 
 That is the whole storage model. See [Data model](../architecture/data-model.md) for the column-level detail and [System overview](../architecture/system-overview.md) for how the pieces wire together.
 

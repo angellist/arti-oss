@@ -33,7 +33,7 @@ type S3 struct {
 // deployment concern.
 //
 // Credential mode is picked from the config:
-//   - AccessKey set → static credentials (MinIO local-dev, IAM users).
+//   - AccessKey set → static credentials (RustFS local-dev, IAM users).
 //   - AccessKey empty → chain creds (env → web identity / IRSA → EC2 metadata).
 //     This is how the pod-identity-based AWS S3 access works in prod / staging.
 func NewS3(cfg S3Config) (*S3, error) {

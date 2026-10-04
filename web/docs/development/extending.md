@@ -84,8 +84,9 @@ their `arti-app.json`:
 - `Auth: "service"` is the built-in `llm` server (`internal/llm/`), wired
   separately.
 
-The map is overridable at runtime via the `ARTI_APP_MCP_SERVERS` env var, which
-is how a deployment adds a server without a code change — see
+Every other server is a row in `app_mcp_servers`, which admins manage at
+Settings → App Connectors (`internal/admin/connectors.go`) and the proxy reads
+through `Service.SetServerResolver`. Built-ins always win over a row. See
 [Connect your own MCP servers](../guides/self-hosting.md#mcp-servers) for the JSON
 shape and what an `oauth` upstream must support, and the
 [Configuration reference](../reference/configuration.md). An app still only

@@ -52,6 +52,12 @@ func newRouter(svc *Service) http.Handler {
 // without the session cookie — but only on the ONE artifact it's scoped to.
 func TestComments_EmbedToken(t *testing.T) {
 	ctx := context.Background()
+	prev := auth.AllowedEmails()
+	t.Cleanup(func() {
+		auth.SetAllowedEmails(prev)
+		auth.SetDeactivationCheck(nil)
+	})
+	auth.SetAllowedEmails([]string{"example.com"})
 	pool := newPool(t)
 	art := pgstore.New(pool, blob.NewInMemory(), pgstore.Config{})
 	svc := NewService(pool, art, auth.NewJWTSigner([]byte("test-secret")))
@@ -106,6 +112,10 @@ func TestComments_EmbedToken(t *testing.T) {
 	// CORS preflight
 	if rec := do("OPTIONS", "/api/embed/artifacts/"+aID+"/comments", "", ""); rec.Code != http.StatusNoContent || rec.Header().Get("Access-Control-Allow-Origin") != "*" {
 		t.Fatalf("preflight: code %d acao %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+	auth.SetDeactivationCheck(func(email string) bool { return email == owner })
+	if rec := do("GET", "/api/embed/artifacts/"+aID+"/comments", tok, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("deactivated owner's embed token: want 403, got %d", rec.Code)
 	}
 }
 

@@ -24,35 +24,41 @@ services:
       timeout: 2s
       retries: 30
 
-  minio:
-    image: quay.io/minio/minio:latest
-    container_name: arti-minio
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    container_name: arti-rustfs
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
+      RUSTFS_ACCESS_KEY: admin
+      RUSTFS_SECRET_KEY: admin
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+    command: ["/usr/bin/rustfs"]
     ports:
       - "9210:9000"
       - "9211:9001"
     volumes:
-      - arti_minio_data:/data
+      - arti_rustfs_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health/ready"]
       interval: 3s
       timeout: 3s
       retries: 30
 
-  minio-init:
-    image: quay.io/minio/mc:latest
+  rustfs-init:
+    image: amazon/aws-cli:2.22.35
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: admin
+      AWS_DEFAULT_REGION: us-east-1
     entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 minioadmin minioadmin &&
-      mc mb -p local/arti-dev || true &&
-      mc mb -p local/arti-test || true &&
-      mc anonymous set download local/arti-dev || true
+      /bin/sh -ec "
+      (aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket arti-dev 2>/dev/null || aws --endpoint-url http://rustfs:9000 s3 mb s3://arti-dev) &&
+      (aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket arti-test 2>/dev/null || aws --endpoint-url http://rustfs:9000 s3 mb s3://arti-test)
       "
 
   # Dex — a lightweight OIDC issuer for developing and e2e-testing the
@@ -94,5 +100,5 @@ services:
 
 volumes:
   arti_pg_data:
-  arti_minio_data:
+  arti_rustfs_data:
   arti_os_data:

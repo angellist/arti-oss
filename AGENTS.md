@@ -17,7 +17,7 @@ Three supported profiles — pick by what the operator already has:
    `docker compose -f deployments/docker-compose/docker-compose.yml -f deployments/docker-compose/docker-compose.app.yml up -d --build`,
    then browse http://localhost:8090.
 2. **Single box**: the same compose services plus a chosen auth mode and the
-   operator's TLS proxy in front. Persist the `postgres` and `minio` volumes.
+   operator's TLS proxy in front. Persist the `postgres` and `rustfs` volumes.
 3. **Retrofit** (existing Postgres / S3-compatible store / IdP): follow
    `web/docs/guides/self-hosting.md` — each dependency maps to one config
    section and is verified independently.
@@ -53,7 +53,7 @@ prints `all checks passed`, then start the server.
 
 ## Verifying a change works
 
-`make dev-up` starts local Postgres/MinIO/Dex; `make lint` and `make test`
+`make dev-up` starts local Postgres/RustFS/Dex; `make lint` and `make test`
 are the repo gates; `web/` tests run with `cd web && npm test`. A local Dex
 issuer ships in the compose stack (static user `admin@example.com` /
 `password`) for exercising `oidc` mode end to end.

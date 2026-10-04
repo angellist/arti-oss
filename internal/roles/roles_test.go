@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -403,5 +404,73 @@ func TestUsers_RosterAgreesWithRoleLookup(t *testing.T) {
 		if !fromRoster[k] {
 			t.Errorf("roster is missing %q, which role-lookup reports", k)
 		}
+	}
+}
+
+func TestUsers_DeactivateAndReactivate(t *testing.T) {
+	r, st := setup(t)
+	ctx := context.Background()
+	const admin = "deactadmin@a.com"
+	if err := st.AssignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.UnassignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin) })
+
+	target := unique("deact") + "@example.com"
+	t.Cleanup(func() { _ = st.ReactivateUser(ctx, target) })
+	body := `{"email":"` + target + `"}`
+
+	if w := do(t, r, "deactplain@a.com", "POST", "/api/users/deactivate", body); w.Code != http.StatusNotFound {
+		t.Errorf("deactivate without MANAGE_ROLES: want 404, got %d", w.Code)
+	}
+	if w := do(t, r, "deactplain@a.com", "POST", "/api/users/reactivate", body); w.Code != http.StatusNotFound {
+		t.Errorf("reactivate without MANAGE_ROLES: want 404, got %d", w.Code)
+	}
+	if w := do(t, r, admin, "POST", "/api/users/deactivate", `{"email":"`+admin+`"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("self-deactivation: want 400, got %d", w.Code)
+	}
+	if w := do(t, r, admin, "POST", "/api/users/deactivate", `{"email":"*@example.com"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("glob deactivation: want 400, got %d", w.Code)
+	}
+
+	var u struct {
+		Email         string  `json:"email"`
+		DeactivatedAt *string `json:"deactivated_at"`
+		DeactivatedBy string  `json:"deactivated_by"`
+	}
+	w := do(t, r, admin, "POST", "/api/users/deactivate", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("deactivate: want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Email != target || u.DeactivatedAt == nil || u.DeactivatedBy != admin {
+		t.Errorf("deactivation not reflected: %+v", u)
+	}
+	if w := do(t, r, admin, "POST", "/api/users/reactivate", `{"email":"`+unique("never")+`@example.com"}`); w.Code != http.StatusNotFound {
+		t.Errorf("reactivating an email arti has no row for: want 404, got %d", w.Code)
+	}
+	if !st.IsDeactivated(strings.ToUpper(target)) {
+		t.Error("store must report the email deactivated, case-insensitively")
+	}
+
+	w = do(t, r, admin, "POST", "/api/users/reactivate", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("reactivate: want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	u = struct {
+		Email         string  `json:"email"`
+		DeactivatedAt *string `json:"deactivated_at"`
+		DeactivatedBy string  `json:"deactivated_by"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &u); err != nil {
+		t.Fatal(err)
+	}
+	if u.DeactivatedAt != nil {
+		t.Errorf("reactivated user still reports deactivated_at: %+v", u)
+	}
+	if st.IsDeactivated(target) {
+		t.Error("store still reports the email deactivated after reactivation")
 	}
 }

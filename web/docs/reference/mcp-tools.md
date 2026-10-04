@@ -143,6 +143,10 @@ Fetch metadata for one artifact by UUID or slug.
 `sha256`. This is the cheap way to gauge how large an artifact is *before* reading it:
 for a large (blob-backed) artifact it doesn't transfer the content.
 
+A missing or unreadable `ident` returns `{"exists": false, "ident": "<ident>"}` as a
+normal result rather than an RPC error, so `get_artifact` doubles as the existence
+check to run before `add_artifact`/`append_artifact`.
+
 ### `read_artifact`
 
 Fetch the content of an artifact. Textual content_types come back as UTF-8 text; other
@@ -160,6 +164,11 @@ artifact instead of pulling it whole into context.
 `returned_bytes` (how many this reply carries), and `truncated` (true when `max_bytes`
 cut it short). `size_bytes`/`sha256` describe the whole artifact, so they're accurate
 even on a capped read.
+
+A missing or unreadable `ident` returns `{"exists": false, "ident": "<ident>"}` as a
+normal result rather than an RPC error — a read-before-create probe no longer shows
+up as a failed tool call. (Missing and access-denied answer identically by design, so
+the soft miss leaks nothing about whether the slug exists.)
 
 ### `list_artifacts`
 

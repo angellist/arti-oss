@@ -12,11 +12,12 @@ interface ExpiringKey {
   daysLeft: number;
 }
 
-// The SETTINGS rail link, styled as one of the rail's action rows. It also
-// carries the expiring-API-key badge, because Settings → API Keys is where the
-// reader has to go to fix one.
-export default function SideNavSettings() {
-  const pathname = usePathname();
+export function expiringKeyMessage(k: ExpiringKey): string {
+  return `API key '${k.name}' expires in ${k.daysLeft} day${k.daysLeft === 1 ? "" : "s"}. Keys don't auto-refresh — create a new one in Settings → API Keys, update your agent's ARTI_TOKEN, then revoke the old key.`;
+}
+
+// The first live API key expiring within EXPIRY_WARN_DAYS, or null.
+export function useExpiringKey(): ExpiringKey | null {
   const [expiringKey, setExpiringKey] = useState<ExpiringKey | null>(null);
 
   useEffect(() => {
@@ -38,6 +39,16 @@ export default function SideNavSettings() {
       });
   }, []);
 
+  return expiringKey;
+}
+
+// The SETTINGS rail link, styled as one of the rail's action rows. It also
+// carries the expiring-API-key badge, because Settings → API Keys is where the
+// reader has to go to fix one.
+export default function SideNavSettings() {
+  const pathname = usePathname();
+  const expiringKey = useExpiringKey();
+
   return (
     <Link
       href="/settings"
@@ -52,7 +63,7 @@ export default function SideNavSettings() {
       Settings
       {expiringKey && (
         <span
-          title={`API key '${expiringKey.name}' expires in ${expiringKey.daysLeft} day${expiringKey.daysLeft === 1 ? "" : "s"}. Keys don't auto-refresh — create a new one in Settings → API Keys, update your agent's ARTI_TOKEN, then revoke the old key.`}
+          title={expiringKeyMessage(expiringKey)}
           className="rounded bg-yellow-400 px-1 text-[10px] leading-none font-bold text-white"
         >
           !
@@ -62,7 +73,7 @@ export default function SideNavSettings() {
   );
 }
 
-function GearIcon({ className }: { className?: string }) {
+export function GearIcon({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"

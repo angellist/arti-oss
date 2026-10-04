@@ -21,7 +21,7 @@ hooks:
 
 dev-up:
 	docker compose -f deployments/docker-compose/docker-compose.yml up -d
-	@echo "Postgres :5436, MinIO :9210 (console :9211)"
+	@echo "Postgres :5436, RustFS :9210 (console :9211)"
 
 dev-down:
 	docker compose -f deployments/docker-compose/docker-compose.yml down

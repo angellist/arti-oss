@@ -10,10 +10,12 @@ import (
 )
 
 const (
-	authzInvalidationChannel = "arti_authz_invalidate"
-	rbacInvalidationKind     = "rbac"
-	groupsInvalidationKind   = "groups"
-	blocksInvalidationKind   = "blocks"
+	authzInvalidationChannel      = "arti_authz_invalidate"
+	rbacInvalidationKind          = "rbac"
+	groupsInvalidationKind        = "groups"
+	blocksInvalidationKind        = "blocks"
+	connectorsInvalidationKind    = "connectors"
+	deactivationsInvalidationKind = "deactivations"
 )
 
 // invalidationBus keeps the small authorization snapshots coherent across
@@ -137,12 +139,18 @@ func (b *invalidationBus) run() {
 				b.store.groups.invalidate()
 			case blocksInvalidationKind:
 				b.store.blocks.invalidate()
+			case connectorsInvalidationKind:
+				b.store.connectors.invalidate()
+			case deactivationsInvalidationKind:
+				b.store.deactivations.invalidate()
 			default:
 				// Unknown payloads invalidate every cache so a future producer
 				// cannot accidentally leave one authorization snapshot stale.
 				b.store.rbac.invalidate()
 				b.store.groups.invalidate()
 				b.store.blocks.invalidate()
+				b.store.connectors.invalidate()
+				b.store.deactivations.invalidate()
 			}
 		}
 	}
@@ -178,6 +186,16 @@ func (s *Store) invalidateBlocks(ctx context.Context) {
 	s.publishInvalidation(ctx, blocksInvalidationKind)
 }
 
+func (s *Store) invalidateConnectors(ctx context.Context) {
+	s.connectors.invalidate()
+	s.publishInvalidation(ctx, connectorsInvalidationKind)
+}
+
+func (s *Store) invalidateDeactivations(ctx context.Context) {
+	s.deactivations.invalidate()
+	s.publishInvalidation(ctx, deactivationsInvalidationKind)
+}
+
 func (s *Store) publishInvalidation(ctx context.Context, kind string) {
 	// The write has committed before this helper runs, so the notification
 	// must outlive a canceled client request to avoid reopening the TTL window.
@@ -208,4 +226,6 @@ func (b *invalidationBus) markUnhealthy() {
 	b.store.rbac.invalidate()
 	b.store.groups.invalidate()
 	b.store.blocks.invalidate()
+	b.store.connectors.invalidate()
+	b.store.deactivations.invalidate()
 }

@@ -1168,3 +1168,67 @@ describe("comments overlay keeps the open composer in view", () => {
     dispose();
   });
 });
+
+describe("comments overlay lightbox sizing", () => {
+  afterEach(() => {
+    document.documentElement.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  const open = async (svg: string) => {
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
+    Object.defineProperty(window, "innerWidth", { value: 1900, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 1000, configurable: true });
+    const doc = document.createElement("article");
+    doc.dataset.artiDoc = "";
+    doc.innerHTML = `<div class="mermaid" data-arti-zoom>${svg}</div>`;
+    document.body.append(doc);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 900, 150));
+    const api: CommentsApi = {
+      list: async () => ({ threads: [] }),
+      create: vi.fn(),
+      reply: vi.fn(),
+      resolve: vi.fn(),
+      reopen: vi.fn(),
+      del: vi.fn(),
+      edit: vi.fn(),
+    };
+    const dispose = mountCommentsOverlay({
+      container: doc,
+      artifactId: "artifact",
+      me: { email: "test@example.com", name: "Test", is_admin: false },
+      allowPin: true,
+      api,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    doc.querySelector<HTMLElement>(".mermaid")!.click();
+    return { dispose, visual: () => document.querySelector<HTMLElement>(".ac-lb svg")! };
+  };
+
+  it("fills the window width with a wide diagram instead of capping it at the page column", async () => {
+    const { dispose, visual } = await open('<svg viewBox="0 0 1200 200"><text>Wide</text></svg>');
+    const w = parseFloat(visual().style.width);
+    expect(w).toBeGreaterThan(1700);
+    expect(w).toBeLessThanOrEqual(1900 * 0.98);
+    dispose();
+  });
+
+  it("limits a tall diagram by the window height so it is not cropped", async () => {
+    const { dispose, visual } = await open('<svg viewBox="0 0 400 800"><text>Tall</text></svg>');
+    const w = parseFloat(visual().style.width);
+    expect(w * 2, "rendered height clears the 64px chrome bands").toBeLessThanOrEqual(1000 - 128 - 36);
+    dispose();
+  });
+
+  it("zooms past the fit size so small text can be read by scrolling, and back", async () => {
+    const { dispose, visual } = await open('<svg viewBox="0 0 1200 200"><text>Wide</text></svg>');
+    const fit = parseFloat(visual().style.width);
+    const zoom = document.querySelector<HTMLElement>(".ac-lb-zoom")!;
+    zoom.click();
+    expect(parseFloat(visual().style.width)).toBeGreaterThan(fit * 1.5);
+    zoom.click();
+    expect(parseFloat(visual().style.width)).toBe(fit);
+    dispose();
+  });
+});

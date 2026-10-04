@@ -53,10 +53,10 @@ admin:
     - admin@example.com
 
 storage:
-  endpoint: "" # empty = AWS S3; host[:port] for MinIO, R2, or another S3-compatible store
+  endpoint: "" # empty = AWS S3; host[:port] for RustFS, R2, or another S3-compatible store
   bucket: arti
   region: us-east-1
-  use_ssl: true # plaintext is an explicit opt-out for local MinIO only
+  use_ssl: true # plaintext is an explicit opt-out for local RustFS only
 
 # Optional full-text search; empty endpoint = Postgres fallback.
 search:

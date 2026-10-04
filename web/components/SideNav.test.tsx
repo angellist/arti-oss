@@ -72,3 +72,43 @@ describe("SideNav mobile drawer", () => {
     expect(document.querySelector('[role="menu"]')).not.toBeNull();
   });
 });
+
+describe("SideNav collapsed rail", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    window.localStorage.setItem("arti.rail.collapsed", "1");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <RailModeShell>
+          <SideNav />
+        </RailModeShell>,
+      );
+    });
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    window.localStorage.clear();
+  });
+
+  const rail = () => container.querySelector('[aria-label="navigation rail (collapsed)"]');
+
+  it("shows the logo as the expand control and every nav link as an icon", () => {
+    expect(rail()).not.toBeNull();
+    const labels = Array.from(rail()!.querySelectorAll("[aria-label]")).map((el) => el.getAttribute("aria-label"));
+    expect(labels).toEqual(expect.arrayContaining(["expand navigation", "Search", "Apps", "Settings", "New", "Log Out"]));
+    expect(rail()!.querySelector('img[src="/logo.png"]')).not.toBeNull();
+  });
+
+  it("expands when the logo is clicked", () => {
+    click(rail()!.querySelector('[aria-label="expand navigation"]') as Element);
+    expect(rail()).toBeNull();
+    expect(container.querySelector('[aria-label="navigation rail"]')).not.toBeNull();
+  });
+});

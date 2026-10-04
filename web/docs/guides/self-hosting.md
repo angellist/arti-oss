@@ -48,7 +48,7 @@ The evaluation profile plus real auth and TLS:
    `ARTI_AUTH_DISABLED`, and set a strong `JWT_SIGNING_KEY` (≥32 bytes).
 3. Put your TLS proxy (Caddy, Traefik, nginx) in front of `:8090`, set
    `ARTI_BASE_URL` to the public https URL and `ARTI_COOKIE_SECURE=true`.
-4. Persist the `postgres` and `minio` volumes; back up Postgres and the
+4. Persist the `postgres` and `rustfs` volumes; back up Postgres and the
    bucket (all content is reproducible from those two).
 5. Verify: `arti-server doctor` passes; a browser login round-trips; and
    `curl -fsS https://<your-host>/healthz` returns 204.
@@ -67,10 +67,10 @@ independently — do them in order and run doctor between steps.
    Credentials: static keys via `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`,
    or leave them empty on AWS to use the ambient chain (IRSA, instance
    role, shared credentials file). TLS is on by default; `S3_USE_SSL=false`
-   is for local MinIO only. Verify: doctor's object-store check performs a
+   is for local RustFS only. Verify: doctor's object-store check performs a
    real write/read/delete probe.
    - **AWS S3**: endpoint empty; prefer the ambient chain over static keys.
-   - **MinIO**: `S3_ENDPOINT=host:9000`, static keys.
+   - **RustFS**: `S3_ENDPOINT=host:9000`, static keys.
    - **Cloudflare R2**: `S3_ENDPOINT=<account>.r2.cloudflarestorage.com`,
      static keys, `S3_REGION=auto`.
    - Backblaze B2, DigitalOcean Spaces, Wasabi, Garage, Ceph RGW: static
@@ -130,9 +130,17 @@ Three servers are built in and need no configuration:
 | `arti-self` | arti's own `/mcp` over loopback, with no credential. For local verification. |
 | `llm` | The built-in Claude completion. Needs `ANTHROPIC_API_KEY`. |
 
-Add your own through `ARTI_APP_MCP_SERVERS`, a JSON map of `name →
-{ resource_url, auth, scope }`. The entries merge over the built-ins. A
-malformed value stops the server at startup.
+Add your own at **Settings → App Connectors**, which needs the
+`MANAGE_CONNECTORS` permission (the `ADMIN` role has it). A connector's
+resource URL must be https and its host must be in
+`ARTI_APP_MCP_ALLOWED_HOSTS`. From that page you can also disable a connector,
+delete it, or narrow it to a tool allowlist.
+
+To start with a list, set `ARTI_APP_MCP_SERVERS`, a JSON map of `name →
+{ resource_url, auth, scope }`. arti copies it into the connector table on the
+first start that finds the table empty, and ignores it after that. A malformed
+value stops the server at startup. When `ARTI_APP_MCP_ALLOWED_HOSTS` is unset,
+the hosts in this map are the allowed hosts.
 
 ```json
 {
@@ -181,13 +189,13 @@ a single-purpose server of your own.
 
 ### Verify
 
-1. Start the server. A malformed `ARTI_APP_MCP_SERVERS` stops it with the parse
-   error.
+1. Add the connector at Settings → App Connectors, or seed it through
+   `ARTI_APP_MCP_SERVERS` and start the server.
 2. Upload a small APP whose `arti-app.json` allowlists one tool on the new server,
    open it, and call that tool.
 3. Read the structured failure code rather than the message: `unknown_server`
-   (400) means the name is not configured, `not_allowlisted` (403) means the
-   manifest does not name it, and `upstream_error` or `upstream_timeout` (503)
+   (400) means the name is not configured or is disabled, `not_allowlisted`
+   (403) means the manifest or the connector's tool allowlist does not name it, and `upstream_error` or `upstream_timeout` (503)
    come from the server itself. For an `oauth` server the first call answers 401
    with an `authorize_url`, and the injected bridge opens the consent popup.
 

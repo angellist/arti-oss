@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -77,10 +78,21 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		logger.Warn("ARTI_OBO_ENC_KEY is empty; OBO envelope encryption is deriving its key from JWT_SIGNING_KEY — provision a dedicated value in prod")
 	}
 
-	pool, err := pgxpool.New(ctx, cfg.Database.URL)
+	poolCfg, err := pgxpool.ParseConfig(cfg.Database.URL)
+	if err != nil {
+		return fmt.Errorf("parse ARTI_DATABASE_URL: %w", err)
+	}
+	// A write holds its connection across the slug critical section, so the
+	// pool bounds concurrent writers to one slug. Sizing it explicitly keeps
+	// that ceiling off the pod's CPU count, which is what pgx would use.
+	if cfg.Database.MaxConns > 0 {
+		poolCfg.MaxConns = int32(cfg.Database.MaxConns)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
+	logger.Info("postgres pool", "max_conns", poolCfg.MaxConns)
 	defer pool.Close()
 	if err := pool.Ping(ctx); err != nil {
 		return fmt.Errorf("ping postgres: %w", err)
@@ -132,6 +144,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	// have to thread it through.
 	auth.SetAllowedEmails(cfg.Auth.AllowedEmails)
 	logger.Info("email allowlist", "entries", auth.AllowedEmails())
+	auth.SetDeactivationCheck(pgstoreInst.IsDeactivated)
 
 	auth.SetAdminEmails(cfg.Admin.Emails)
 	logger.Info("admin allowlist", "emails", auth.AdminEmails())
@@ -400,8 +413,8 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	// (credential-free local verification, reachable when auth is disabled)
 	// and llm (the single-Claude completion, gated by each app's
 	// arti-app.json allowlist). Every remote upstream — MCP gateways,
-	// OBO-brokered connectors — comes from ARTI_APP_MCP_SERVERS, a JSON map
-	// name->{resource_url,auth,scope} merged over these built-ins.
+	// OBO-brokered connectors — is a row in app_mcp_servers, managed by
+	// admins; ARTI_APP_MCP_SERVERS only seeds that table while it is empty.
 	// Mounted on the public group (its own injected-token auth + CORS),
 	// like the comments embed. The OAuth TokenProvider is wired below once
 	// available; until then auth'd servers return 501.
@@ -409,14 +422,35 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		"arti-self": {Name: "arti-self", ResourceURL: "http://127.0.0.1" + cfg.Server.Addr + "/mcp", Auth: "none"},
 		"llm":       {Name: "llm", Auth: "service"},
 	}
+	connectorPolicy := admin.ConnectorPolicy{Reserved: []string{"arti-self", "llm"}, Hosts: cfg.Apps.MCPAllowedHosts}
 	if cfg.Apps.MCPServersJSON != "" {
 		var extra map[string]apps.ServerConfig
 		if err := json.Unmarshal([]byte(cfg.Apps.MCPServersJSON), &extra); err != nil {
 			return fmt.Errorf("bad ARTI_APP_MCP_SERVERS: %w", err)
 		}
+		var seed []pgstore.AppMCPServer
 		for k, v := range extra {
-			v.Name = k
-			appServers[k] = v
+			if _, builtin := appServers[k]; builtin {
+				logger.Warn("ARTI_APP_MCP_SERVERS: skipping entry named like a built-in", "name", k)
+				continue
+			}
+			seed = append(seed, pgstore.AppMCPServer{Name: k, ResourceURL: v.ResourceURL, Auth: v.Auth, Scope: v.Scope})
+			// Until ARTI_APP_MCP_ALLOWED_HOSTS is set, admins may register
+			// connectors on the hosts the seed already uses.
+			if len(cfg.Apps.MCPAllowedHosts) == 0 {
+				if u, uerr := url.Parse(v.ResourceURL); uerr == nil && u.Hostname() != "" && !slices.Contains(connectorPolicy.Hosts, u.Hostname()) {
+					connectorPolicy.Hosts = append(connectorPolicy.Hosts, u.Hostname())
+				}
+			}
+		}
+		n, serr := pgstoreInst.SeedAppMCPServers(ctx, seed)
+		if serr != nil {
+			return fmt.Errorf("seed app_mcp_servers from ARTI_APP_MCP_SERVERS: %w", serr)
+		}
+		if n > 0 {
+			logger.Info("seeded app_mcp_servers from ARTI_APP_MCP_SERVERS", "rows", n)
+		} else {
+			logger.Info("ARTI_APP_MCP_SERVERS ignored: app_mcp_servers already has rows")
 		}
 	}
 	// OBO OAuth broker — arti as an OAuth *client* (the user→arti→upstream OBO
@@ -496,6 +530,14 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	appsSvc := apps.New(pgstoreInst, signer, appServers, oboBroker, completer, logger)
 	appsSvc.SetLimits(time.Duration(cfg.Apps.CallTimeoutMax), cfg.Apps.CallMaxInflight)
 	appsSvc.SetArtiTools(mcpSrv)
+	appsSvc.SetServerResolver(func(ctx context.Context, name string) (apps.ServerConfig, bool, error) {
+		c, ok, err := pgstoreInst.LookupAppMCPServer(ctx, name)
+		return apps.ServerConfig{
+			Name: c.Name, ResourceURL: c.ResourceURL, Auth: c.Auth, Scope: c.Scope,
+			ToolAllowlist: c.ToolAllowlist, Disabled: !c.Enabled,
+		}, ok, err
+	})
+	svc.SetAppCallableFn(appsSvc.Callable)
 	svc.SetAppTokenFn(appsSvc.SignAppToken)
 	svc.SetAppTokenVerifyFn(appsSvc.VerifyEmbedToken)
 	svc.SetAppConsentFns(appsSvc.SignAppConsent, appsSvc.VerifyAppConsent, cfg.Server.CookieSecure)
@@ -585,7 +627,9 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		artifacts.Mount(r, svc)
 		artifacts.MountShareAdmin(r, svc, ipRateLimiter(cfg.Share.MintRPM))
 		commentsSvc.Mount(r)
-		admin.NewService(pool, pgstoreInst).Mount(r)
+		adminSvc := admin.NewService(pool, pgstoreInst)
+		adminSvc.SetConnectorPolicy(connectorPolicy)
+		adminSvc.Mount(r)
 		notifysettings.NewService(notifySettings, func(ctx context.Context, email string) (bool, error) {
 			return pgstoreInst.HasPermission(ctx, email, rbac.ManageArtifacts)
 		}, notifier != nil).Mount(r)

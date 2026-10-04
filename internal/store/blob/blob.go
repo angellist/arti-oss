@@ -1,6 +1,6 @@
 // Package blob is the blob-store abstraction. Artifact metadata lives in
 // Postgres; Artifact content lives behind a [Store]. Implementations: in-memory
-// (tests), S3 (AWS or MinIO via minio-go).
+// (tests), S3 (AWS or RustFS via minio-go).
 //
 // The interface is deliberately small. Anything more elaborate (multipart,
 // presigned URLs, lifecycle) is added as a backend-specific extension behind a

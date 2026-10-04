@@ -32,6 +32,7 @@ import {
   type Shift,
 } from "./commentsGeometry";
 import { createMentionMenu, mentionHTML, MENTION_CSS, type MentionResult } from "./mentionMenu";
+import { linkify } from "./linkify";
 
 // The overlay talks to the server through this small interface so it can be
 // driven by either the cookie-based client (in-app viewer) or a token-based
@@ -77,10 +78,12 @@ export interface OverlayOpts {
 const AV = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
 
 // Comment bodies are rendered through this rather than AV directly, so an
-// @-mention reads as one in the thread and not as a raw address. Display only:
-// the stored body is the plain text the author typed, and the edit box still
-// shows exactly that.
-const BODY = (s: string) => mentionHTML(s, AV);
+// @-mention reads as one in the thread and a bare URL is clickable. Display
+// only: the stored body is the plain text the author typed, and the edit box
+// still shows exactly that. URLs are matched first and mentions only in what
+// is left, so an address inside a path ("https://host/@bob@x.com") stays part
+// of the link.
+const BODY = (s: string) => linkify(s, AV, (t) => mentionHTML(t, AV));
 
 // One icon language for the card's top-right controls: paths drawn in a 24
 // box, 1.6 stroke, round joins — so edit / delete / link / minimize match in
@@ -170,7 +173,7 @@ const CSS = `
 .ac-prow .ac-pmeta{font-size:10px;color:#9b9b95;font-weight:600;margin-bottom:2px}
 .ac-panel .ac-pmeta,.ac-prow .ac-pmeta{display:flex;align-items:center;gap:4px}
 .ac-pmeta svg{display:block;width:11px;height:11px;flex:0 0 11px}
-.ac-prow .ac-psnip{font-size:12px;color:#33332e;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ac-prow .ac-psnip{font-size:12px;color:#33332e;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
 .ac-prow .ac-pacts{display:flex;gap:4px;flex-shrink:0}
 .ac-card.ac-active{border-color:#2563eb;box-shadow:0 0 0 3px #eff4ff,0 10px 30px -12px rgba(40,40,30,.35)}
 .ac-card.ac-resolved{opacity:.6}
@@ -187,7 +190,12 @@ const CSS = `
 .ac-av img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .ac-who{font-size:12px;font-weight:600;color:#1c1c1a}
 .ac-when{font-size:10.5px;color:#9b9b95;margin-left:6px}
-.ac-text{font-size:12.5px;line-height:1.5;color:#33332e;margin-top:3px;white-space:pre-wrap;word-wrap:break-word}
+/* overflow-wrap:anywhere, not break-word: only the former shrinks the
+   element's min-content width, so a pasted URL wraps instead of widening the
+   flex row past the card. Both break the line; only one stops the overflow. */
+.ac-text{font-size:12.5px;line-height:1.5;color:#33332e;margin-top:3px;white-space:pre-wrap;overflow-wrap:anywhere}
+.ac-text .ac-url{color:#2563eb;text-decoration:underline;text-underline-offset:2px}
+.ac-text .ac-url:hover{text-decoration-thickness:2px}
 /* The composer is a separate object from the discussion above it, so it sits
    further away than two messages sit from each other. */
 .ac-reply{display:flex;margin-top:16px}
@@ -243,13 +251,14 @@ const CSS = `
 .ac-zoomable{cursor:zoom-in}
 .ac-zoomable:hover{outline:2px solid rgba(37,99,235,.45);outline-offset:2px}
 .ac-lb{position:fixed;inset:0;z-index:90;background:rgba(22,22,20,.74);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:grid;place-items:center;pointer-events:auto;font-family:Inter,system-ui,sans-serif}
-.ac-lb-stage{background:#fff;border-radius:12px;box-shadow:0 24px 70px -24px rgba(0,0,0,.6);padding:18px;max-width:min(1040px,72vw);max-height:88vh;overflow:auto}
+.ac-lb-stage{background:#fff;border-radius:12px;box-shadow:0 24px 70px -24px rgba(0,0,0,.6);padding:18px;max-width:98vw;max-height:calc(100vh - 128px);overflow:auto}
 .ac-lb-vwrap{position:relative;display:inline-block;line-height:0}
 .ac-lb.ac-pinning .ac-lb-vwrap,.ac-lb.ac-pinning .ac-lb-vwrap *{cursor:crosshair}
 .ac-lb-close{position:fixed;top:16px;right:18px;width:38px;height:38px;border-radius:50%;border:none;background:rgba(255,255,255,.92);color:#33332e;font-size:17px;cursor:pointer;display:grid;place-items:center;box-shadow:0 6px 18px -6px rgba(0,0,0,.5)}
 .ac-lb-cmt{position:fixed;top:19px;right:66px;height:34px;padding:0 13px;display:inline-flex;align-items:center;gap:6px;border-radius:17px;border:none;background:rgba(255,255,255,.92);color:#33332e;font:600 12px Inter,system-ui,sans-serif;cursor:pointer;box-shadow:0 6px 18px -6px rgba(0,0,0,.5)}
 .ac-lb-cmt.ac-on{background:#2563eb;color:#fff}
 .ac-lb-cmt svg{display:block;width:14px;height:14px}
+.ac-lb-zoom{right:auto;left:18px}
 .ac-lb-hint{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.55);color:#fff;font-size:11.5px;padding:6px 12px;border-radius:8px;pointer-events:none}
 .ac-lb-card{position:fixed;width:300px;max-height:76vh;overflow:auto;background:#fff;border-radius:12px;box-shadow:0 16px 44px -16px rgba(0,0,0,.5);padding:12px}
 .ac-lb-pin{position:absolute;transform:translate(-50%,-100%);width:22px;height:28px;display:grid;place-items:center;pointer-events:auto;cursor:pointer}
@@ -337,6 +346,7 @@ html.ac-dark .ac-card.ac-active{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(3
 html.ac-dark .ac-card.ac-draft{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(37,99,235,.4)}
 html.ac-dark .ac-who{color:#f2f1ee}
 html.ac-dark .ac-text,html.ac-dark .ac-prow .ac-psnip{color:#dcdbd6}
+html.ac-dark .ac-text .ac-url{color:#93b8fb}
 html.ac-dark .ac-prow:hover{background:rgba(255,255,255,.07)}
 html.ac-dark .ac-chip{color:#bdbcb6;background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.1)}
 html.ac-dark .ac-reply textarea,html.ac-dark .ac-edit-input{color:#ececea;background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.14)}
@@ -849,7 +859,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       lead === null
         ? `<div class="ac-cmt-acts">${cmtActs(c, tid)}</div>`
         : `<div class="ac-cmt-acts ac-lead"><div class="ac-grp">${cmtActs(c, tid)}${lead ? `<span class="ac-sep"></span>` : ""}</div>${lead}</div>`;
-    return `<div class="ac-cmt" data-cid="${c.id}">${avatar(c.author, c.author_name, c.author_picture)}<div><div><span class="ac-who">${AV(name)}</span>${edited}</div><div class="ac-text">${BODY(c.body)}</div></div>${acts}</div>`;
+    return `<div class="ac-cmt" data-cid="${c.id}">${avatar(c.author, c.author_name, c.author_picture)}<div style="flex:1;min-width:0"><div><span class="ac-who">${AV(name)}</span>${edited}</div><div class="ac-text">${BODY(c.body)}</div></div>${acts}</div>`;
   }
   // A thread's card has two rendered forms, and they differ by ONE thing: the
   // open ("full") form carries a reply composer, the collapsed ("concise") form
@@ -1059,20 +1069,33 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     const visual = (clone.matches("img,svg") ? clone : clone.querySelector<HTMLElement>("img,svg")) || clone;
     visual.removeAttribute("width");
     visual.removeAttribute("height");
-    if (visual.tagName.toLowerCase() === "img") {
-      visual.style.cssText += ";max-width:100%;max-height:80vh;width:auto;height:auto";
-    } else { // vector / opt-in element — grow crisply to fill the card
-      visual.style.cssText += ";max-width:none;width:min(1000px,66vw);height:auto;max-height:80vh";
+    const isVector = visual.tagName.toLowerCase() !== "img";
+    if (!isVector) visual.style.cssText += ";max-width:100%;max-height:80vh;width:auto;height:auto";
+    const vb = (visual.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
+    const mr = mediaEl.getBoundingClientRect();
+    const natW = vb[2] > 0 ? vb[2] : mr.width;
+    const aspect = vb[2] > 0 && vb[3] > 0 ? vb[2] / vb[3] : mr.width / (mr.height || 1) || 1;
+    let zoomed = false;
+    // Vectors fill the window width (height-limited when tall, clear of the top/bottom chrome); "zoomed" scrolls.
+    function fitVector() {
+      const fitW = Math.min(window.innerWidth * 0.96 - 40, (window.innerHeight - 168) * aspect);
+      visual.style.width = Math.round(zoomed ? Math.max(natW, fitW * 2) : fitW) + "px";
     }
+    if (isVector) { visual.style.cssText += ";max-width:none;max-height:none;height:auto"; fitVector(); }
 
     const close = el("button", "ac-lb-close"); close.textContent = "✕"; close.setAttribute("aria-label", "Close");
     const hint = el("div", "ac-lb-hint"); hint.textContent = "Esc to close";
     lb.append(stage, close, hint);
     let cmtBtn: HTMLElement | null = null;
     if (allowPin) { cmtBtn = el("button", "ac-lb-cmt"); cmtBtn.innerHTML = `${icon("pin")}<span>Comment on a spot</span>`; lb.appendChild(cmtBtn); }
+    if (isVector) {
+      const zoomBtn = el("button", "ac-lb-cmt ac-lb-zoom"); zoomBtn.textContent = "Zoom in";
+      zoomBtn.onclick = () => { zoomed = !zoomed; zoomBtn.textContent = zoomed ? "Fit" : "Zoom in"; fitVector(); repositionCard(); };
+      lb.appendChild(zoomBtn);
+    }
     document.documentElement.appendChild(lb);
     stage.addEventListener("scroll", repositionCard); // keep the card on its pin
-    window.addEventListener("resize", repositionCard);
+    window.addEventListener("resize", onResize);
 
     let pinning = false;
     function setPinning(on: boolean) {
@@ -1088,7 +1111,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       if (pinning) { setPinning(false); return; } // then disarm pinning
       closeLb();
     };
-    function closeLb() { lb.remove(); stage.removeEventListener("scroll", repositionCard); document.removeEventListener("keydown", onEsc, true); window.removeEventListener("resize", repositionCard); if (closeLightbox === closeLb) closeLightbox = null; if (lightboxKeydown === onEsc) lightboxKeydown = null; }
+    function closeLb() { lb.remove(); stage.removeEventListener("scroll", repositionCard); document.removeEventListener("keydown", onEsc, true); window.removeEventListener("resize", onResize); if (closeLightbox === closeLb) closeLightbox = null; if (lightboxKeydown === onEsc) lightboxKeydown = null; }
     closeLightbox = closeLb; // teardown can detach this if a lightbox is open
     lightboxKeydown = onEsc; // the key shield re-delivers Escape to it
     document.addEventListener("keydown", onEsc, true);
@@ -1144,6 +1167,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     let cardAnchor: HTMLElement | null = null; // the pin element the open card tracks
     const clearCard = () => { if (card) { card.remove(); card = null; } cardAnchor = null; };
     function repositionCard() { if (card && cardAnchor) positionCard(cardAnchor); }
+    function onResize() { if (isVector) fitVector(); repositionCard(); }
     function positionCard(anchorEl: HTMLElement) {
       if (!card) return;
       const pr = anchorEl.getBoundingClientRect();

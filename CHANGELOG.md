@@ -8,6 +8,38 @@ and PATCH otherwise.
 Sections are generated from the commit subjects of the changes in each snapshot;
 entries describe only what ships in this repository.
 
+## 0.2.0 — 2026-10-04
+
+### Breaking changes
+
+- compose: the bundled object store moved from MinIO to RustFS, because the MinIO images are no longer published. The data volume changed from `arti_minio_data` to `arti_rustfs_data`, and the default credentials changed from `minioadmin` to `admin`. Existing blobs stay in the old volume. Before you upgrade a compose deployment, copy the bucket from the old store into RustFS (for example with `aws s3 sync`), and update `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `.env`.
+
+### Features
+
+- apps: admin-managed MCP connectors for APPs (DB migrate 0035-0036)
+- apps: pass calling app as _meta.consumer on proxied tool calls
+- bookmarks on documents (DB migrate 0037-0038)
+- mcp: return {exists:false} instead of an RPC error for missing idents on read_artifact/get_artifact
+- users: permanent users record, deactivation, and group editing on Settings → Users (DB migrate 0039)
+- web: bookmark apps from the apps page
+- web: collapsed rail shows the arti logo and nav icons
+- web: force Wide and apply text size to HTML in the viewer
+- web: split the settings nav into General and Admin sections
+
+### Fixes
+
+- app: show the access-denied card on /app instead of a JSON 404
+- arti: size the connection pool explicitly, and take the nanoid advisory
+- compose: stop granting anonymous read on the local `arti-dev` bucket
+- web: add apple-touch-icon so iOS home-screen shortcuts show the logo
+- web: lightbox enlarges vector diagrams to the window width
+- web: readable App Connectors table
+- web: wrap long comment URLs and linkify them
+
+### Documentation and performance
+
+- aggregates: serve cached sidebar aggregates while refreshing in the background
+
 ## 0.1.4 — 2026-09-18
 
 ### Features
@@ -59,7 +91,7 @@ entries describe only what ships in this repository.
 - apps: start the per-call budget at the tool call, not at the lookups
 - artifacts: pass keepAccess to TransferOwner in the share-mint test
 - credusage: notify only for keys on a new network, and harden the usage pipeline (DB migrate 0027)
-- dev: pull the MinIO images from quay.io, which still serves them
+- dev: pull the object-store images from quay.io, which still serves them
 - list: clamp an oversized limit to the page maximum instead of the default
 - opensearch: run the artifacts index with zero replicas
 - search: stop the slug-ACL fan-out resurrecting is_latest on every version

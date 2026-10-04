@@ -34,10 +34,15 @@ afterEach(() => {
   container.remove();
 });
 
-const render = (canManageRoles: boolean, canManageArtifacts = false) =>
+const render = (canManageRoles: boolean, canManageArtifacts = false, canManageConnectors = false) =>
   act(() => {
     root.render(
-      <SettingsNav canManageRoles={canManageRoles} canManageArtifacts={canManageArtifacts} showApiKeys />,
+      <SettingsNav
+        canManageRoles={canManageRoles}
+        canManageArtifacts={canManageArtifacts}
+        canManageConnectors={canManageConnectors}
+        showApiKeys
+      />,
     );
   });
 
@@ -53,11 +58,21 @@ describe("SettingsNav", () => {
     expect(hrefs()).toContain("/settings/groups");
   });
 
-  it("shows Users to a MANAGE_ROLES holder, above User Groups", () => {
-    render(true);
+  it("lists gated entries under Admin, after every General entry", () => {
+    render(true, true);
     const order = hrefs();
-    expect(order).toContain("/settings/users");
-    expect(order.indexOf("/settings/users")).toBeLessThan(order.indexOf("/settings/groups"));
+    expect(container.textContent).toContain("Admin");
+    for (const general of ["/settings/keys", "/settings/groups", "/settings/archived", "/help"]) {
+      expect(order.indexOf(general)).toBeLessThan(order.indexOf("/settings/users"));
+    }
+  });
+
+  // A caller with no admin permission must not see an Admin heading with
+  // nothing under it; User Groups stays in General because everyone has it.
+  it("omits the Admin section for a caller with no admin permission", () => {
+    render(false, false);
+    expect(container.textContent).not.toContain("Admin");
+    expect(hrefs()).toContain("/settings/groups");
   });
 
   it("gates Users and Roles on the same permission", () => {
@@ -76,6 +91,13 @@ describe("SettingsNav", () => {
     render(false, true);
     expect(hrefs()).toContain("/settings/blocks");
     expect(hrefs()).not.toContain("/settings/roles");
+  });
+
+  it("shows the Admin section to a caller holding only MANAGE_CONNECTORS", () => {
+    render(false, false, true);
+    expect(container.textContent).toContain("Admin");
+    expect(hrefs()).toContain("/settings/connectors");
+    expect(hrefs()).not.toContain("/settings/users");
   });
 
   it("marks the active entry when the roster page is open", () => {

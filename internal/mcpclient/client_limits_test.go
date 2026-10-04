@@ -25,7 +25,7 @@ func TestCallToolRejectsOversizedResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New().CallTool(context.Background(), srv.URL, "", "query", nil)
+	_, err := New().CallTool(context.Background(), srv.URL, "", "query", nil, "")
 	if !errors.Is(err, ErrResponseTooLarge) {
 		t.Fatalf("err = %v, want ErrResponseTooLarge", err)
 	}
@@ -45,7 +45,7 @@ func TestCallToolAcceptsResponseAtCap(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := New().CallTool(context.Background(), srv.URL, "", "query", nil)
+	res, err := New().CallTool(context.Background(), srv.URL, "", "query", nil, "")
 	if err != nil {
 		t.Fatalf("err = %v, want a parsed result", err)
 	}
@@ -66,7 +66,7 @@ func TestCallToolTimeoutIsDeadlineExceeded(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := New().CallTool(ctx, srv.URL, "", "query", nil)
+	_, err := New().CallTool(ctx, srv.URL, "", "query", nil, "")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
@@ -97,7 +97,7 @@ func TestCallToolReturnsTypedRPCError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New().CallTool(context.Background(), srv.URL, "", "nope", nil)
+	_, err := New().CallTool(context.Background(), srv.URL, "", "nope", nil, "")
 	var rpcErr *RPCError
 	if !errors.As(err, &rpcErr) || rpcErr.Code != -32602 || !strings.Contains(rpcErr.Message, "Unknown tool") {
 		t.Fatalf("err = %v, want *RPCError -32602 Unknown tool", err)

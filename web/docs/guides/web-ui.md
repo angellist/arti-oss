@@ -26,11 +26,12 @@ examples.
 
 The rail itself holds the filter groups:
 
-- **Type** — two families in one row. The uppercase chips (`TEXT`, `PACKAGE`,
+- **Filters** — two families in one row. The uppercase chips (`TEXT`, `PACKAGE`,
   `APP`, `ATTACHMENT`) are artifact types; the lowercase ones (`markdown`,
   `diagram`, `html`, `json`, `image`) filter by *body* type, and are
   exactly the families the viewer renders differently. `all` clears it. When
-  you're logged in, a `👤 Owned by Me` chip filters to artifacts you created.
+  you're logged in, a `👤 Owned by Me` chip filters to artifacts you created,
+  and `🔖 Bookmarked` to the documents you bookmarked (the `bookmarked:me` token).
   These lowercase names also work as `type:` search tokens (`type:diagram`) and
   in the REST/MCP/CLI list filters.
 - **Content types** — the exact content-type values that exist, with live counts,
@@ -179,15 +180,15 @@ Click a row to open the viewer. A sticky header carries the metadata and
 controls; the body below renders the content.
 
 The header shows the title (click to rename if you're the creator or an admin),
-a type badge and content type, a **permalink chip** (`a/<uuid>`, version-free)
-with a copy button, and a **slug chip** (`s/<slug> · v<version>`) that links to
+a bookmark button with its count, a type badge and content type, and a **slug chip** (`s/<slug> · v<version>`) that links to
 every version of that slug. Scopes (purple) and labels (gray) are shown as
 chips; creators and admins can add or remove them inline. Each chip is also a
 link that filters the catalog.
 
 The toolbar on the right gives you:
 
-- **Width** — `Wide` / `Medium` / `Narrow` for the rendered content column.
+- **Width** — `Wide` / `Medium` / `Narrow` for the rendered content column. Hidden for rendered HTML, diagrams and maps, which always use `Wide`.
+- **Text size** — small / medium / large. Applies to HTML too, by zooming the page.
 - **Full Page** — opens the content edge-to-edge, via a stable, slug/version-friendly `?v=full` URL. Works for any renderable artifact and for a selected file inside a PACKAGE (any directory). **APP** artifacts show **Visit app ↗** in this slot instead — the running app is already the chrome-less view.
 - **Raw Source** — toggle between rendered and raw text.
 - **↓ Download** — the file (or `↓ zip` for a whole PACKAGE).
@@ -254,7 +255,13 @@ A binary can be a versioned document too: publish it under a slug and it gets
 the same version lineage as anything else. Files posted by another app without a
 slug (couch's chat attachments) stay slugless and creator-only. The slug chip (`s/<slug> · v<version>`) links to a catalog view
 filtered to that slug, sorted newest-first, so you can open any prior version.
-The permalink chip (`a/<uuid>`) instead points at one specific version forever.
+The ⋯ menu's **Copy UUID** and **Get UUID link** (`/a/<uuid>`) instead point at one
+specific version forever.
+
+Bookmarks belong to the slug, not one version, so they carry over to new
+versions. Set one in the viewer or with the bookmark icon at the start of a
+catalog row, and find them again under **Filters › 🔖 Bookmarked**. Everyone
+sees how many people bookmarked a document; only you see whether you did.
 
 When a URL pins an older version than the slug's latest, a thin amber strip at
 the top of the page says so and links to the latest — in the normal viewer, in

@@ -24,8 +24,10 @@ import (
 //   - comments.author, comment_threads.created_by / .resolved_by — someone whose
 //     only trace is having said something on a document, or having tidied up
 //     after somebody who did.
-//   - users.email — a principal recorded deliberately (see migration 0023),
-//     which is the only arm that can name one who has done nothing else yet.
+//   - users.email — the permanent record (migrations 0023, 0039): everyone
+//     backfilled, everyone who has logged in since, and everyone added or
+//     deactivated by an admin. The other arms still cover a principal that
+//     reached arti without an interactive login after the backfill.
 //
 // The union is what a person typing an address means by "my colleagues". None
 // of these sources is authoritative on its own, and none can be made

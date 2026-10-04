@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 
 import { KINDS, type NewKind } from "@/lib/newartifact";
 import { useUpload } from "@/lib/upload-context";
+import { RailTip, railTileClass } from "./RailTile";
 import { UploadIcon } from "./UploadButton";
 
 // A boxes-and-connector glyph, drawn at the same weight as SearchIcon /
@@ -78,7 +79,9 @@ const ORDER: NewKind[] = ["text", "diagram"];
 //
 // Opens on hover AND on click/Enter: hover alone is unreachable by keyboard and
 // unusable on touch.
-export default function NewMenu() {
+// `compact` renders the trigger as the collapsed rail's accent tile, with the
+// panel opening to its right.
+export default function NewMenu({ compact = false }: { compact?: boolean }) {
   const { open: openUpload } = useUpload();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -98,8 +101,8 @@ export default function NewMenu() {
   const place = useCallback(() => {
     const r = triggerRef.current?.getBoundingClientRect();
     if (!r) return;
-    setPos({ top: r.bottom + 6, left: r.left + 14 });
-  }, []);
+    setPos(compact ? { top: r.top, left: r.right + 8 } : { top: r.bottom + 6, left: r.left + 14 });
+  }, [compact]);
 
   const cancelClose = () => {
     if (closeTimer.current) {
@@ -196,10 +199,24 @@ export default function NewMenu() {
         onClick={() => (open ? setOpen(false) : openNow())}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400 transition hover:text-neutral-600"
+        aria-label={compact ? "New" : undefined}
+        className={
+          compact
+            ? railTileClass({ accent: true })
+            : "flex w-full items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400 transition hover:text-neutral-600"
+        }
       >
-        <PlusIcon className="h-3 w-3 shrink-0" />
-        New
+        {compact ? (
+          <>
+            <PlusIcon className="h-4 w-4" />
+            {!open && <RailTip>New</RailTip>}
+          </>
+        ) : (
+          <>
+            <PlusIcon className="h-3 w-3 shrink-0" />
+            New
+          </>
+        )}
       </button>
 
       {typeof document === "undefined" ? panel : panel && createPortal(panel, document.body)}

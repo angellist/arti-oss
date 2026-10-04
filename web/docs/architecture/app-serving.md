@@ -94,7 +94,7 @@ every read, plus `add_artifact`, `append_artifact`, `update_artifact` and
 `archive_artifact` — is dispatched in-process instead of being forwarded. It
 runs as the viewer, so the handlers re-resolve their groups and access and the
 app reaches exactly what that person already can. There is no consent popup and
-no dependence on an `arti` entry in `ARTI_APP_MCP_SERVERS`: the branch sits
+no dependence on an `arti` connector: the branch sits
 ahead of the server lookup, so arti access works on a deployment that configures
 no gateway at all.
 

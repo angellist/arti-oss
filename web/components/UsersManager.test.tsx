@@ -10,13 +10,39 @@ import type { RosterUser } from "@/lib/types";
 const api = vi.hoisted(() => ({
   added: [] as unknown[],
   addResult: { email: "new@example.com" },
+  toggled: [] as [string, boolean][],
+  membership: [] as [string, string, boolean][],
+  roster: [] as unknown[],
 }));
 
 vi.mock("@/lib/arti", () => ({
-  listUsers: async () => ({ users: [], sources: [] }),
+  listUsers: async () => ({ users: api.roster, sources: [] }),
+  setGroupMember: async (group: string, email: string, member: boolean) => {
+    api.membership.push([group, email, member]);
+    return { name: group, members: member ? [email] : [] };
+  },
   addUser: async (input: unknown) => {
     api.added.push(input);
     return api.addResult;
+  },
+  setUserActive: async (email: string, active: boolean) => {
+    api.toggled.push([email, active]);
+    return {
+      email,
+      kind: "human",
+      note: "",
+      roles: [],
+      groups: [],
+      idp_groups: [],
+      idp_stale: false,
+      last_seen_at: null,
+      source: "admin",
+      registered: false,
+      added_by: "",
+      added_at: null,
+      deactivated_at: active ? null : new Date().toISOString(),
+      deactivated_by: active ? "" : "admin@example.com",
+    };
   },
 }));
 
@@ -31,9 +57,12 @@ const user = (over: Partial<RosterUser> = {}): RosterUser => ({
   idp_groups: [],
   idp_stale: false,
   last_seen_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+  source: "",
   registered: false,
   added_by: "",
   added_at: null,
+  deactivated_at: null,
+  deactivated_by: "",
   ...over,
 });
 
@@ -42,6 +71,9 @@ let root: Root;
 
 beforeEach(() => {
   api.added = [];
+  api.toggled = [];
+  api.membership = [];
+  api.roster = [];
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -197,5 +229,89 @@ describe("UsersManager", () => {
       (b) => b.textContent === "Add user",
     ) as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
+  });
+
+  const button = (label: string) =>
+    Array.from(container.querySelectorAll("button")).find((b) => b.textContent === label) as
+      | HTMLButtonElement
+      | undefined;
+
+  it("deactivates only after confirmation, then marks the row", async () => {
+    render([user()]);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+    await act(async () => button("Deactivate")!.click());
+    expect(api.toggled).toEqual([]);
+
+    await act(async () => button("Deactivate")!.click());
+    expect(api.toggled).toEqual([["sam@example.com", false]]);
+    expect(text()).toContain("deactivated");
+    expect(button("Reactivate")).toBeDefined();
+    confirm.mockRestore();
+  });
+
+  it("reactivates without a confirmation", async () => {
+    render([user({ deactivated_at: new Date().toISOString(), deactivated_by: "admin@example.com" })]);
+    const confirm = vi.spyOn(window, "confirm");
+    await act(async () => button("Reactivate")!.click());
+    expect(confirm).not.toHaveBeenCalled();
+    expect(api.toggled).toEqual([["sam@example.com", true]]);
+    expect(button("Deactivate")).toBeDefined();
+    confirm.mockRestore();
+  });
+
+  it("offers no deactivate button on the caller's own row", () => {
+    act(() => {
+      root.render(
+        <UsersManager initialUsers={[user({ email: "me@example.com" }), user()]} sources={[]} currentEmail="Me@Example.com" />,
+      );
+    });
+    expect(Array.from(container.querySelectorAll("button")).filter((b) => b.textContent === "Deactivate")).toHaveLength(1);
+  });
+
+  const renderWithGroups = (users: RosterUser[], manageableGroups: { name: string; members: string[] }[]) =>
+    act(() => {
+      root.render(<UsersManager initialUsers={users} sources={[]} manageableGroups={manageableGroups} />);
+    });
+
+  it("adds a user to a manageable group they are not in", async () => {
+    api.roster = [user({ groups: ["eng", "ops"] })];
+    renderWithGroups([user({ groups: ["eng"] })], [
+      { name: "eng", members: ["sam@example.com"] },
+      { name: "ops", members: [] },
+    ]);
+    const select = container.querySelector('select[aria-label="add sam@example.com to a group"]') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["", "ops"]);
+
+    await act(async () => {
+      select.value = "ops";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(api.membership).toEqual([["ops", "sam@example.com", true]]);
+    expect(text()).toContain("group:ops");
+    expect(text()).toContain("added to ops");
+  });
+
+  it("removes a group only where the caller manages it", async () => {
+    api.roster = [user({ groups: ["finance"] })];
+    renderWithGroups([user({ groups: ["eng", "finance"] })], [{ name: "eng", members: ["sam@example.com"] }]);
+    expect(container.querySelector('button[aria-label="remove sam@example.com from finance"]')).toBeNull();
+
+    const remove = container.querySelector('button[aria-label="remove sam@example.com from eng"]') as HTMLButtonElement;
+    await act(async () => remove.click());
+    expect(api.membership).toEqual([["eng", "sam@example.com", false]]);
+    expect(text()).not.toContain("group:eng");
+  });
+
+  it("offers no remove control for membership that comes from a pattern", () => {
+    renderWithGroups([user({ groups: ["everyone"] })], [{ name: "everyone", members: ["*@example.com"] }]);
+    expect(container.querySelector('button[aria-label="remove sam@example.com from everyone"]')).toBeNull();
+    const chip = Array.from(container.querySelectorAll("span")).find((s) => s.textContent === "group:everyone");
+    expect(chip?.getAttribute("title")).toContain("pattern");
+  });
+
+  it("survives a group named after an Object.prototype key", () => {
+    renderWithGroups([user({ groups: ["constructor"] })], [{ name: "eng", members: [] }]);
+    expect(text()).toContain("group:constructor");
   });
 });

@@ -58,6 +58,7 @@ type Service struct {
 	// consent an APP document load requires before the bridge is minted (see
 	// app_consent.go). Wired in cmd_serve next to appToken.
 	appConsentSign   func(email, artifactID string) (string, error)
+	appCallable      func(ctx context.Context, server, tool string) (bool, error)
 	appConsentVerify func(tok string) (email, artifactID string, err error)
 	appConsentSecure bool
 	// embedFilesToken, when set, mints the email-less files token user-mode
@@ -1071,6 +1072,8 @@ func (s *Service) Search(ctx context.Context, q string, in pgstore.ListInput) (L
 	// archived latest version. Postgres computes the latest over the
 	// archive-inclusive candidate set, which is the correct composition.
 	//
+	// `bookmarked:` stays on Postgres too: bookmarks live only in artifact_bookmarks.
+	//
 	// A `via:` filter stays on Postgres for a different reason: the index has
 	// no written_via field, and EnsureIndex never revises the mapping of an
 	// index that already exists, so the field would map dynamically as text and
@@ -1078,7 +1081,7 @@ func (s *Service) Search(ctx context.Context, q string, in pgstore.ListInput) (L
 	// with other credentials' documents. `via:` is an audit filter, where
 	// missing a document costs more than losing relevance ranking.
 	if q != "" && in.OrderBy == "" && s.osClient.Enabled() &&
-		!(in.LatestPerSlug && in.IncludeArchived) && in.WrittenVia == nil {
+		!(in.LatestPerSlug && in.IncludeArchived) && in.WrittenVia == nil && in.BookmarkedBy == nil {
 		osResult, err := s.osSearch(ctx, q, in)
 		if err == nil {
 			return osResult, nil
@@ -1209,6 +1212,7 @@ func (s *Service) osSearch(ctx context.Context, q string, in pgstore.ListInput) 
 	// column doesn't blank out the moment a query routes through OpenSearch.
 	s.fillCommentCounts(ctx, out.Artifacts)
 	s.fillViewCounts(ctx, out.Artifacts)
+	s.fillBookmarks(ctx, out.Artifacts)
 	return out, nil
 }
 
@@ -1219,6 +1223,7 @@ func (s *Service) listResp(ctx context.Context, res pgstore.ListResult) ListResp
 	}
 	s.fillCommentCounts(ctx, out.Artifacts)
 	s.fillViewCounts(ctx, out.Artifacts)
+	s.fillBookmarks(ctx, out.Artifacts)
 	return out
 }
 
@@ -1641,6 +1646,9 @@ func Mount(r chi.Router, svc *Service) {
 	r.Get("/api/artifacts/{id}/files/*", svc.httpFileByID)
 	r.Post("/api/artifacts/{id}/views", svc.httpRecordView)
 	r.Get("/api/artifacts/{id}/views", svc.httpViewStats)
+	r.Get("/api/artifacts/{id}/bookmark", svc.httpBookmarks)
+	r.Put("/api/artifacts/{id}/bookmark", svc.httpSetBookmark)
+	r.Delete("/api/artifacts/{id}/bookmark", svc.httpSetBookmark)
 	r.Get("/api/artifacts/{id}", svc.httpGetContent)
 	r.Delete("/api/artifacts/{id}", svc.httpArchive)
 	r.Post("/api/artifacts/{id}/unarchive", svc.httpUnarchive)
@@ -1940,6 +1948,12 @@ func (s *Service) httpSearch(w http.ResponseWriter, r *http.Request) {
 	// substring search.
 	filters, negated, remainder := parseQuery(q)
 	mergeFilters(&in, filters, negated)
+	// `bookmarked:me` is the only form: it reads the signed-in identity, never
+	// callerForList's, which is empty for admins.
+	if len(filters["bookmarked"]) > 0 {
+		me := auth.EmailFromContext(r.Context())
+		in.BookmarkedBy = &me
+	}
 	if remainder == "" && len(filters) == 0 && len(negated) == 0 && q != "" {
 		// User typed bare text — keep it as the substring.
 		remainder = q
@@ -2746,6 +2760,9 @@ func (s *Service) httpApp(w http.ResponseWriter, r *http.Request) {
 	_, identErr := uuid.Parse(ident)
 	pinned := ver != nil || identErr == nil
 	row, err := s.resolveIdent(r.Context(), ident, ver, caller)
+	if errors.Is(err, pgstore.ErrNotFound) && s.writeAppDenial(w, r, ident, ver) {
+		return
+	}
 	if writeMaybeNotFound(w, err) {
 		return
 	}
@@ -4286,7 +4303,7 @@ func interactiveCaller(ctx context.Context) bool {
 // value is taken verbatim so it may itself contain colons.
 var fieldKeys = map[string]bool{
 	"slug": true, "creator": true, "scope": true, "type": true, "label": true,
-	"content_type": true, "via": true,
+	"content_type": true, "via": true, "bookmarked": true,
 }
 
 // negatableKeys are the fields a leading `-` may exclude (e.g. `-label:foo`).

@@ -23,8 +23,8 @@ function versions(a: ArtifactInfo): number {
   return a.version ?? 0;
 }
 
-// selectApps applies the portal's filter box, the "owned by me" toggle and the
-// sort, in that order. Sorting is over the whole loaded set, so it only means
+// selectApps applies the portal's filter box, the "owned by me" and
+// "bookmarked" toggles and the sort, in that order. Sorting is over the whole loaded set, so it only means
 // what the caller thinks it means while every app is on the page — see the
 // note in app/apps/page.tsx.
 //
@@ -33,7 +33,7 @@ function versions(a: ArtifactInfo): number {
 // the long tail in whatever order the server happened to return.
 export function selectApps(
   rows: readonly ArtifactInfo[],
-  opts: { query?: string; owner?: string | null; sort?: AppSort },
+  opts: { query?: string; owner?: string | null; bookmarked?: boolean; sort?: AppSort },
 ): ArtifactInfo[] {
   const q = (opts.query ?? "").trim().toLowerCase();
   const owner = opts.owner?.toLowerCase() ?? null;
@@ -41,6 +41,7 @@ export function selectApps(
 
   const kept = rows.filter((a) => {
     if (owner && a.creator.toLowerCase() !== owner) return false;
+    if (opts.bookmarked && !a.bookmarked) return false;
     if (q && !haystack(a).includes(q)) return false;
     return true;
   });

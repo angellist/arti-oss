@@ -135,6 +135,14 @@ type Store struct {
 	// groups and rbac; see blocklist.go.
 	blocks blockCache
 
+	// connectors caches app_mcp_servers, read by every proxied APP tool call.
+	// Same cache discipline; see app_mcp_servers.go.
+	connectors connectorCache
+
+	// deactivations caches the deactivated users, read by every auth.IsAllowed
+	// call. Same cache discipline; see deactivations.go.
+	deactivations deactivationCache
+
 	busMu sync.RWMutex
 	bus   *invalidationBus
 
@@ -1034,9 +1042,12 @@ type ListInput struct {
 	// (artifacts.written_via). Glob-aware like the other scalar filters, so
 	// `apikey:*` narrows to every key-written document.
 	WrittenVia *string
-	Scope      *string
-	Slug       *string
-	Labels     []string
+	// BookmarkedBy keeps only slugs this email has bookmarked. An empty value
+	// matches nothing, so a caller with no identity gets an empty list.
+	BookmarkedBy *string
+	Scope        *string
+	Slug         *string
+	Labels       []string
 	// Not* fields are exclusions parsed from `-field:value` tokens. Each
 	// value is an independent NOT condition (ANDed together), so
 	// `-label:a -label:b` excludes rows carrying either. Glob (`*`) is
@@ -1258,6 +1269,12 @@ func buildWhere(in ListInput) (where []string, args []any) {
 	}
 	if in.Creator != nil && *in.Creator != "" {
 		addFilter("creator", *in.Creator)
+	}
+	if in.BookmarkedBy != nil {
+		args = append(args, *in.BookmarkedBy)
+		where = append(where, fmt.Sprintf(`EXISTS (SELECT 1 FROM artifact_bookmarks r
+ WHERE r.email = lower($%d)
+   AND r.view_key = COALESCE(NULLIF(artifacts.named_slug, ''), artifacts.artifact_id::text))`, len(args)))
 	}
 	if in.Scope != nil && *in.Scope != "" {
 		addArray("scopes", *in.Scope, false)

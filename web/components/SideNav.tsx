@@ -11,6 +11,7 @@ import SideNavPackage from "./SideNavPackage";
 import SideNavHelp from "./SideNavHelp";
 import SideNavSettings from "./SideNavSettings";
 import SideNavAccount from "./SideNavAccount";
+import SideNavCompact from "./SideNavCompact";
 import UploadButton from "./UploadButton";
 
 const COLLAPSE_KEY = "arti.rail.collapsed";
@@ -235,17 +236,12 @@ export default function SideNav() {
       <>
         {mobile}
         <aside
-          className="sticky top-0 hidden h-screen w-10 shrink-0 flex-col items-center border-r border-neutral-200 bg-white pt-3 md:flex"
+          className="sticky top-0 hidden h-screen w-14 shrink-0 flex-col items-center border-r border-neutral-200 bg-white md:flex"
           aria-label="navigation rail (collapsed)"
         >
-          <button
-            type="button"
-            onClick={toggle}
-            aria-label="expand navigation"
-            className="rounded p-1 text-neutral-500 hover:bg-neutral-100"
-          >
-            <CollapseIcon expanded={false} />
-          </button>
+          <Suspense fallback={null}>
+            <SideNavCompact me={me} onExpand={toggle} expandIcon={<CollapseIcon expanded={false} />} />
+          </Suspense>
         </aside>
       </>
     );

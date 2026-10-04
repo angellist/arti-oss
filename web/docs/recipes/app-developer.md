@@ -223,8 +223,8 @@ directly in new apps.
 ## Available servers
 
 Two servers are built into the `appServers` map
-(`cmd/arti-server/cmd_serve.go`); the deployment adds the rest via
-`ARTI_APP_MCP_SERVERS` — any MCP server the operator runs or subscribes to, wired
+(`cmd/arti-server/cmd_serve.go`); an admin adds the rest at Settings → App
+Connectors — any MCP server the operator runs or subscribes to, wired
 as described in [Connect your own MCP servers](../guides/self-hosting.md#mcp-servers):
 
 | Server | Auth | What it is |

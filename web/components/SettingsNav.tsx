@@ -3,14 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-// SettingsNav is the left sub-navigation inside the Settings area. API Keys
-// leads (it's the most-visited surface) and User Groups follows; both are
-// visible to everyone. Users and Roles and Permissions show only when the
-// caller holds MANAGE_ROLES (the server layout decides and passes
-// canManageRoles) — a roster of every colleague's email and role is admin
-// information.
-//
-// Blocked Documents shows only to MANAGE_ARTIFACTS, on the same terms.
+// SettingsNav is the left sub-navigation inside the Settings area, in two
+// sections. General holds what every signed-in user sees. Admin holds the
+// permission-gated entries (Users and Roles for MANAGE_ROLES, Blocked
+// Documents for MANAGE_ARTIFACTS, App Connectors for MANAGE_CONNECTORS), and
+// its heading renders only when at least
+// one of them does, so a non-admin never sees an empty Admin section.
 //
 // Hiding the entry is the whole of the UI gating: both pages still RENDER for a
 // caller without the permission, showing a "you need MANAGE_ROLES" notice rather
@@ -23,10 +21,12 @@ import { usePathname } from "next/navigation";
 export default function SettingsNav({
   canManageRoles,
   canManageArtifacts,
+  canManageConnectors,
   showApiKeys,
 }: {
   canManageRoles: boolean;
   canManageArtifacts?: boolean;
+  canManageConnectors?: boolean;
   showApiKeys?: boolean;
 }) {
   const pathname = usePathname();
@@ -44,13 +44,14 @@ export default function SettingsNav({
       </Link>
     );
   };
+  const heading = (label: string) => (
+    <div className="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">{label}</div>
+  );
   return (
     <nav className="w-full shrink-0 space-y-0.5 border-b border-neutral-200 p-2 md:w-52 md:border-b-0 md:border-r">
+      {heading("General")}
       {showApiKeys ? item("/settings/keys", "API Keys") : null}
-      {canManageRoles ? item("/settings/users", "Users") : null}
       {item("/settings/groups", "User Groups")}
-      {canManageRoles ? item("/settings/roles", "Roles and Permissions") : null}
-      {canManageArtifacts ? item("/settings/blocks", "Blocked Documents") : null}
       {item("/settings/notifications", "Notifications")}
       {item("/settings/appearance", "Appearance")}
       {item("/settings/archived", "Archived")}
@@ -60,6 +61,11 @@ export default function SettingsNav({
       >
         Help &amp; Docs
       </Link>
+      {canManageRoles || canManageArtifacts || canManageConnectors ? <div className="pt-2">{heading("Admin")}</div> : null}
+      {canManageRoles ? item("/settings/users", "Users") : null}
+      {canManageRoles ? item("/settings/roles", "Roles and Permissions") : null}
+      {canManageArtifacts ? item("/settings/blocks", "Blocked Documents") : null}
+      {canManageConnectors ? item("/settings/connectors", "App Connectors") : null}
     </nav>
   );
 }

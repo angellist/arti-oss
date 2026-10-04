@@ -49,6 +49,11 @@ type Server struct {
 // is environment-only.
 type Database struct {
 	URL string `yaml:"-"` // ARTI_DATABASE_URL, required
+	// MaxConns is the server's connection-pool size. Left to pgx it is
+	// max(4, NumCPU), which ties the pool to the pod's CPU allocation and
+	// gives a small pod four connections. 0 restores that behaviour, or lets
+	// a `pool_max_conns` in the DSN decide.
+	MaxConns int `yaml:"max_conns"`
 }
 
 // Storage configures the S3-compatible blob store.
@@ -195,11 +200,14 @@ type Search struct {
 
 // Apps configures APP-artifact serving.
 type Apps struct {
-	// MCPServersJSON is the raw ARTI_APP_MCP_SERVERS JSON map, merged over the
-	// built-in catalog by the apps package. Environment-only until the catalog
-	// itself moves into configuration data.
+	// MCPServersJSON is the raw ARTI_APP_MCP_SERVERS JSON map. It seeds the
+	// app_mcp_servers table once, while that table is empty.
 	MCPServersJSON string `yaml:"-"`
-	FrameAncestors string `yaml:"frame_ancestors"`
+	// MCPAllowedHosts limits the hosts an admin may register a connector on:
+	// exact hostnames, or ".example.com" for subdomains. Unset, it defaults to
+	// the hosts ARTI_APP_MCP_SERVERS uses.
+	MCPAllowedHosts []string `yaml:"mcp_allowed_hosts"`
+	FrameAncestors  string   `yaml:"frame_ancestors"`
 	// CallTimeoutMax caps the per-call timeout_ms an app may request through
 	// the tool proxy. Keep it under the edge's read timeout.
 	CallTimeoutMax Duration `yaml:"call_timeout_max"`

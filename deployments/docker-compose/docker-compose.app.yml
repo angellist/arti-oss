@@ -1,5 +1,5 @@
 # Local-evaluation profile: the full arti application in one command, built
-# from this repository — Postgres, MinIO, migrations, arti-server, and the
+# from this repository — Postgres, RustFS, migrations, arti-server, and the
 # web UI, with authentication disabled. Browse http://localhost:8090 when up.
 #
 #   docker compose -f deployments/docker-compose/docker-compose.yml \
@@ -31,18 +31,18 @@ services:
       - "8090:8090"
     environment:
       ARTI_DATABASE_URL: postgres://postgres:postgres@postgres:5432/arti_dev?sslmode=disable
-      S3_ENDPOINT: minio:9000
+      S3_ENDPOINT: rustfs:9000
       S3_BUCKET: arti-dev
       S3_USE_SSL: "false"
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: admin
       ARTI_BASE_URL: http://localhost:8090
       ARTI_WEB_URL: http://web:3030
       ARTI_AUTH_DISABLED: "true"
     depends_on:
       migrate:
         condition: service_completed_successfully
-      minio-init:
+      rustfs-init:
         condition: service_completed_successfully
 
   web:

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -187,8 +188,11 @@ func ReadEntry(zipBytes []byte, path string) ([]byte, string, error) {
 		}
 		return body, ContentTypeOfBytes(f.Name, body), nil
 	}
-	return nil, "", fmt.Errorf("pkgzip: entry %q not found", path)
+	return nil, "", fmt.Errorf("%w: %q", ErrEntryNotFound, path)
 }
+
+// ErrEntryNotFound is returned by ReadEntry when no candidate path exists.
+var ErrEntryNotFound = errors.New("pkgzip: entry not found")
 
 // resolveCandidates returns the ordered list of zip entry names to try
 // for a requested package path, replicating static-host clean-URL

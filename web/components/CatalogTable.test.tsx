@@ -97,13 +97,40 @@ describe("CatalogTable columns", () => {
     columns.hidden = columns.order.filter((key) => key !== "views");
     render(columns, [row(), row({ artifact_id: "22222222-3333-4444-5555-666666666666", view_count: 0, view_count_30d: 0 })]);
     const cells = Array.from(container.querySelectorAll("tbody tr")).map((tr) =>
-      tr.querySelector("td:first-child")!,
+      tr.querySelector("td:nth-child(2)")!,
     );
     expect(cells[0].textContent).toContain("—");
     expect(cells[1].textContent).toContain("0");
     expect(cells[1].querySelector("[title]")?.getAttribute("title")).toBe(
       "0 views · 0 in the last 30 days",
     );
+  });
+
+  it("bookmarks a row's whole slug, and rolls the bookmark back when the server refuses", async () => {
+    nav.search = "slug=weekly-report";
+    const rows = [row(), row({ artifact_id: "22222222-3333-4444-5555-666666666666", version: 2 })];
+    const bookmarks = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>("tbody button[aria-pressed]")).map((b) =>
+        b.getAttribute("aria-pressed"),
+      );
+    for (const [status, want] of [[200, "true"], [500, "false"]] as const) {
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response(JSON.stringify({ count: 1, bookmarked: true }), { status }));
+      vi.stubGlobal("fetch", fetchMock);
+      render(defaultColumnPrefs(), rows);
+      expect(bookmarks()).toEqual(["false", "false"]);
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("tbody button[aria-pressed]")!.click();
+      });
+      expect(fetchMock.mock.calls[0][0]).toContain("/bookmark");
+      expect(fetchMock.mock.calls[0][1].method).toBe("PUT");
+      expect(bookmarks()).toEqual([want, want]);
+      expect(container.querySelector("tbody button[aria-pressed]")!.textContent).toBe(status === 200 ? "1" : "");
+      vi.unstubAllGlobals();
+    }
   });
 
   it("renders a column layout supplied by the server without a client re-shuffle", () => {
@@ -192,8 +219,8 @@ describe("CatalogTable columns", () => {
     render();
     const grips = container.querySelectorAll('thead [role="separator"]');
     const colCount = container.querySelectorAll("colgroup col").length;
-    expect(grips.length).toBe(headers().length - 1); // every column but the ⋮ cell
-    expect(colCount).toBe(grips.length + 1); // + the ⋮ column
+    expect(grips.length).toBe(headers().length - 2); // every column but the bookmark and ⋮ cells
+    expect(colCount).toBe(grips.length + 2);
   });
 });
 

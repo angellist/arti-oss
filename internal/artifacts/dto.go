@@ -96,6 +96,8 @@ type ArtifactInfo struct {
 	OpenThreadCount *int32 `json:"open_thread_count,omitempty"`
 	ViewCount       *int64 `json:"view_count,omitempty"`
 	ViewCount30d    *int64 `json:"view_count_30d,omitempty"`
+	BookmarkCount   *int64 `json:"bookmark_count,omitempty"`
+	Bookmarked      *bool  `json:"bookmarked,omitempty"`
 
 	// Score is the BM25 relevance score from OpenSearch. Zero when search
 	// is handled by Postgres or the result is from a non-search endpoint.

@@ -77,6 +77,8 @@ Registered by `artifacts.Mount` (`internal/artifacts/server.go:764`).
 | GET | `/api/artifacts/{id}/meta` | Metadata only |
 | POST | `/api/artifacts/{id}/views` | Record one human-facing view |
 | GET | `/api/artifacts/{id}/views` | Aggregate view stats (viewer rows owner/admin-only) |
+| GET | `/api/artifacts/{id}/bookmark` | Slug-wide bookmark count, plus whether the caller bookmarked it |
+| PUT / DELETE | `/api/artifacts/{id}/bookmark` | Add / remove the caller's bookmark |
 | GET | `/api/artifacts/{id}/files` | PACKAGE/APP file manifest |
 | GET | `/api/artifacts/{id}/files/*` | One file inside a PACKAGE/APP |
 | PATCH | `/api/artifacts/{id}` | Edit mutable fields |

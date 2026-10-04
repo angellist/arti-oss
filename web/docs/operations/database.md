@@ -87,7 +87,7 @@ The dev database is Postgres in docker-compose
 (`deployments/docker-compose/docker-compose.yml`), brought up by `make dev-up`:
 
 ```
-make dev-up      # Postgres on :5436, MinIO on :9210 (console :9211)
+make dev-up      # Postgres on :5436, RustFS on :9210 (console :9211)
 ```
 
 It exposes **two databases on the same instance**: `arti_dev` (your runtime DB)

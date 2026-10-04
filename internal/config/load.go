@@ -29,7 +29,7 @@ func Defaults() *Config {
 		Storage: Storage{
 			Region: "us-east-1",
 			// TLS to the object store defaults ON; plaintext is an explicit
-			// opt-out intended for local MinIO (S3_USE_SSL=false).
+			// opt-out intended for local RustFS (S3_USE_SSL=false).
 			UseSSL: true,
 		},
 		Auth: Auth{
@@ -57,6 +57,9 @@ func Defaults() *Config {
 				MaxTTL:  Duration(8760 * time.Hour), // 365d
 				MintRPM: 10,
 			},
+		},
+		Database: Database{
+			MaxConns: 20,
 		},
 		Share: Share{
 			Enabled: false,
@@ -235,6 +238,7 @@ func bindings(c *Config) []binding {
 
 		// Database
 		str("ARTI_DATABASE_URL", &c.Database.URL),
+		integer("ARTI_DATABASE_MAX_CONNS", &c.Database.MaxConns),
 
 		// Storage
 		str("S3_ENDPOINT", &c.Storage.Endpoint),
@@ -292,6 +296,7 @@ func bindings(c *Config) []binding {
 
 		// Apps
 		str("ARTI_APP_MCP_SERVERS", &c.Apps.MCPServersJSON),
+		csv("ARTI_APP_MCP_ALLOWED_HOSTS", &c.Apps.MCPAllowedHosts),
 		str("ARTI_APP_FRAME_ANCESTORS", &c.Apps.FrameAncestors),
 		duration("ARTI_APP_CALL_TIMEOUT_MAX", &c.Apps.CallTimeoutMax),
 		integer("ARTI_APP_CALL_MAX_INFLIGHT", &c.Apps.CallMaxInflight),

@@ -1,13 +1,13 @@
 ---
 title: Local setup
 order: 1
-summary: Get arti-server, the Next.js web sidecar, and the CLI running locally against a docker-compose Postgres and MinIO, with auth disabled.
+summary: Get arti-server, the Next.js web sidecar, and the CLI running locally against a docker-compose Postgres and RustFS, with auth disabled.
 ---
 
 # Local setup
 
 Everything runs on your machine: `arti-server` (Go) on `:8095`, the Next.js
-sidecar on `:3031`, Postgres on `:5436`, and MinIO on `:9210`. Auth is off by
+sidecar on `:3031`, Postgres on `:5436`, and RustFS on `:9210`. Auth is off by
 default in dev — every write is attributed to `ARTI_LOCAL_EMAIL`.
 
 ## Prerequisites
@@ -15,7 +15,7 @@ default in dev — every write is attributed to `ARTI_LOCAL_EMAIL`.
 | Tool | Version | Why |
 | --- | --- | --- |
 | Go | 1.25+ | `go.mod` declares `go 1.25.7`. Builds both binaries. |
-| Docker | any recent | Runs the Postgres + MinIO compose stack. |
+| Docker | any recent | Runs the Postgres + RustFS compose stack. |
 | Node | 20+ | The web sidecar (`node:20-alpine` in `web/Dockerfile`). |
 | `goose` | latest | DB migrations (`db/Makefile`). |
 | `sqlc` | latest | Regenerates `gen/sqlc` from SQL. |
@@ -40,15 +40,15 @@ make setup
 `core.hooksPath` to `.githooks/`, so the pre-push gate runs before any push to
 `main`. See [Build & test](build-test.md#the-pre-push-hook).
 
-## Bring up Postgres + MinIO
+## Bring up Postgres + RustFS
 
 ```sh
-make dev-up        # Postgres :5436, MinIO :9210 (console :9211)
+make dev-up        # Postgres :5436, RustFS :9210 (console :9211)
 ```
 
 This runs `deployments/docker-compose/docker-compose.yml`: a `postgres:16-alpine`
-(DB `arti_dev`, user/pass `postgres`/`postgres`) and `quay.io/minio/minio` with a
-`minio-init` sidecar that creates the `arti-dev` and `arti-test` buckets. Tear
+(DB `arti_dev`, user/pass `postgres`/`postgres`) and `quay.io/rustfs/rustfs` with a
+`rustfs-init` sidecar that creates the `arti-dev` and `arti-test` buckets. Tear
 down with `make dev-down`; nuke the volumes with `make dev-reset`.
 
 ## Apply migrations
@@ -81,8 +81,8 @@ cp .env.example .env
 | `ARTI_ADDR` | `:8095` | Where the Go binary listens (`:8090` collides with couch on the dev box). |
 | `ARTI_BASE_URL` | `http://localhost:3031` | Canonical hostname stamped into emitted URLs, and the CLI's default endpoint. Points at the Next dev server, which forwards `/api/*` + `/auth/*` back to `:8095` (`web/middleware.ts`). |
 | `ARTI_DATABASE_URL` | `postgres://postgres:postgres@localhost:5436/arti_dev?sslmode=disable` | Dev Postgres. |
-| `S3_ENDPOINT` | `http://localhost:9210` | MinIO. Unset in prod to hit AWS S3. |
-| `S3_BUCKET` | `arti-dev` | Created by the compose `minio-init` sidecar. |
+| `S3_ENDPOINT` | `http://localhost:9210` | RustFS. Unset in prod to hit AWS S3. |
+| `S3_BUCKET` | `arti-dev` | Created by the compose `rustfs-init` sidecar. |
 | `ARTI_AUTH_DISABLED` | `true` | Skip auth entirely — see below. |
 | `ARTI_LOCAL_EMAIL` | `local@example.com` | Creator attributed to every write when auth is disabled. |
 

@@ -88,18 +88,19 @@ above.
 | `ARTI_API_KEY_MAX_TTL` | `8760h` | Ceiling on a minted key's lifetime (365 days). The request's `ttl_days` is clamped to `[1 day, this]`; default 90 days. |
 | `ARTI_API_KEY_RPM` | `10` | Per-IP rate limit (requests/min) on the mint route `POST /api/keys`. `0` disables. |
 
-## Storage (S3 / MinIO)
+## Storage (S3 / RustFS)
 
-Real S3 in prod, MinIO in dev. An empty `S3_ENDPOINT` targets AWS.
+Real S3 in prod, RustFS in dev. An empty `S3_ENDPOINT` targets AWS.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `ARTI_DATABASE_URL` | *(required)* | Postgres connection string. |
+| `ARTI_DATABASE_MAX_CONNS` | `20` | Server connection-pool size. A write holds its connection across the slug critical section, so this also bounds concurrent writers to one slug. `0` hands sizing back to pgx, which uses `max(4, NumCPU)` unless the DSN carries `pool_max_conns` — that ties the pool to the pod's CPU allocation. |
 | `S3_BUCKET` | *(required)* | Blob bucket name. |
 | `S3_ENDPOINT` | `""` | S3-compatible endpoint (scheme is stripped). Empty → AWS. |
 | `S3_REGION` | `us-east-1` | |
 | `S3_USE_SSL` | `false` | Use TLS to reach the endpoint. |
-| `AWS_ACCESS_KEY_ID` | `""` | Access key (MinIO: `minioadmin` in dev). |
+| `AWS_ACCESS_KEY_ID` | `""` | Access key (RustFS: `admin` in dev). |
 | `AWS_SECRET_ACCESS_KEY` | `""` | Secret key. |
 
 ## Apps & MCP
@@ -111,7 +112,8 @@ of your own.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ARTI_APP_MCP_SERVERS` | `""` | JSON map `name → { resource_url, auth, scope }` of upstream MCP servers, merged over the built-in defaults (`arti-self`, `llm`). A bad value fails startup. |
+| `ARTI_APP_MCP_SERVERS` | `""` | JSON map `name → { resource_url, auth, scope }` of upstream MCP servers. Seeds the connector table (Settings → App Connectors) on the first start that finds it empty, and is ignored after that. Entries named like a built-in (`arti-self`, `llm`) are skipped. A bad value fails startup. |
+| `ARTI_APP_MCP_ALLOWED_HOSTS` | hosts in `ARTI_APP_MCP_SERVERS` | Comma-separated hosts an admin may register a connector on. An entry is an exact hostname, or `.example.com` for any subdomain. With neither variable set, every connector write is refused. |
 | `ARTI_APP_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` source list for served APP HTML **and for served artifact HTML bodies** — which origins may iframe an arti app, or the full-page viewer's nested content frame (`X-Frame-Options` is dropped for those responses so this list is authoritative; it is checked against every ancestor, so the inner frame needs it whenever the viewer itself is embedded). Non-HTML bodies keep `X-Frame-Options: SAMEORIGIN`. Kept in sync with `ARTI_CATALOG_FRAME_ANCESTORS` (the build-time catalog-viewer default). |
 | `ARTI_APP_CALL_TIMEOUT_MAX` | `90s` | Cap on the per-call `timeout_ms` an APP may pass to `window.arti.callTool` (default when unset: 60s). Keep it under the edge's read timeout — arti's public ingress reads for 95s and Cloudflare for 100s — so a slow upstream yields arti's structured 503 `upstream_timeout`, not an edge error page. |
 | `ARTI_APP_CALL_MAX_INFLIGHT` | `16` | Upstream tool calls one arti-server process relays at once; each may buffer up to 16 MiB twice while parsed. Beyond it the proxy answers 503 `proxy_busy` with `Retry-After: 1`. `0` removes the bound. |

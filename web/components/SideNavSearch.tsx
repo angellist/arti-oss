@@ -4,8 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getAggregates, getMe } from "@/lib/arti";
-import { SEARCH_OPEN_KEY } from "@/lib/catalog";
-import { useSetSearchBarOpen } from "@/lib/rail-context";
+import { catalogURL, useOpenSearch, useStickyFilter } from "@/lib/catalog-nav";
 import type { AggregatesResponse, Me } from "@/lib/types";
 import NewMenu from "./NewMenu";
 import SideNavSettings from "./SideNavSettings";
@@ -18,11 +17,8 @@ const TOP_CONTENT_TYPES = 10;
 // The active catalog filter (type + q) is sticky: the rail stays mounted
 // when you open a doc (/s/…, /a/…) whose URL carries no filter, so without
 // this the chips would snap back to "all" the moment you enter a doc view.
-// We persist the last catalog filter to localStorage (it also survives the
-// rail unmounting when it switches to a package's file tree) and show it
-// while off the catalog.
-const FILTER_TYPE_KEY = "arti.filter.type";
-const FILTER_Q_KEY = "arti.filter.q";
+// The last catalog filter is persisted to localStorage (see catalog-nav) and
+// shown while off the catalog.
 
 // Two families in one row. The uppercase values are real artifact_types; the
 // lowercase ones are pseudo-types the server resolves to a content_type glob
@@ -56,7 +52,7 @@ const TYPES = [
 
 // A four-pane glyph for the APPS rail link — same stroke weight and size as
 // SearchIcon / UploadButton's arrow so the rail links read as one set.
-function AppsIcon({ className }: { className?: string }) {
+export function AppsIcon({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -199,37 +195,7 @@ export default function SideNavSearch() {
   const sp = useSearchParams();
   const pathname = usePathname();
   const onCatalog = pathname === "/";
-  const urlType = sp.get("type") ?? "";
-  const urlQ = sp.get("q") ?? "";
-
-  // Sticky filter (see FILTER_*_KEY note). Initialized from localStorage so
-  // a doc view shows the right chips immediately, with no all→filter flash.
-  const [sticky, setSticky] = useState<{ type: string; q: string }>(() => {
-    try {
-      return {
-        type: window.localStorage.getItem(FILTER_TYPE_KEY) ?? "",
-        q: window.localStorage.getItem(FILTER_Q_KEY) ?? "",
-      };
-    } catch {
-      return { type: "", q: "" };
-    }
-  });
-  // On the catalog the URL is authoritative; mirror it into the sticky
-  // store so a later doc view can read it back.
-  useEffect(() => {
-    if (!onCatalog) return;
-    setSticky({ type: urlType, q: urlQ });
-    try {
-      window.localStorage.setItem(FILTER_TYPE_KEY, urlType);
-      window.localStorage.setItem(FILTER_Q_KEY, urlQ);
-    } catch {
-      // localStorage may be unavailable; the in-memory sticky still works
-      // until the rail unmounts.
-    }
-  }, [onCatalog, urlType, urlQ]);
-
-  const currentType = onCatalog ? urlType : sticky.type;
-  const currentQ = onCatalog ? urlQ : sticky.q;
+  const { type: currentType, q: currentQ } = useStickyFilter();
 
   const [agg, setAgg] = useState<AggregatesResponse | null>(null);
   useEffect(() => {
@@ -264,56 +230,16 @@ export default function SideNavSearch() {
     };
   }, []);
 
+  // TODO(arti#56): the sticky store only carries type+q, so toggling a chip
+  // from a doc view returns to the catalog with default sort.
+  const current = { type: currentType, q: currentQ };
   const navigate = (params: Record<string, string | null>) => {
-    // On the catalog, preserve any other params already in the URL (sort,
-    // etc.). On a doc view the URL carries no filter, so rebuild from the
-    // sticky type + q — otherwise toggling one chip would drop the others.
-    // TODO(arti#56): the sticky store only carries type+q, so toggling a chip
-    // from a doc view returns to the catalog with default sort (order_by/dir
-    // are dropped). Persist sort too if that round-trip matters.
-    const next = onCatalog ? new URLSearchParams(sp.toString()) : new URLSearchParams();
-    if (!onCatalog) {
-      if (currentQ) next.set("q", currentQ);
-      if (currentType) next.set("type", currentType);
-    }
-    for (const [k, v] of Object.entries(params)) {
-      if (v === null || v === "") next.delete(k);
-      else next.set(k, v);
-    }
-    next.delete("page");
-    // Any search/chip/type action leaves a slug drill-in: that lives under the
-    // dedicated `slug` param (which none of these actions set), so drop it or
-    // the drill-in would silently combine with the new search.
-    next.delete("slug");
-    router.push(`/?${next.toString()}`);
+    router.push(catalogURL(onCatalog ? sp : null, current, params));
   };
 
-  // The search box itself no longer lives in the rail — it's a reveal-on-demand
-  // bar at the top of the listing (see CatalogTable).
-  //
-  // On the catalog listing the bar is already mounted a flag away, so flip that
-  // flag directly: the UI-only `find` param never affected the row set, and
-  // routing through it made the box wait on a full re-render of a
-  // force-dynamic page. `page` is left in the URL because a shallow update
-  // swaps no rows (see revealSearch in CatalogTable).
-  //
-  // A slug drill-in is excluded even though its pathname is also `/`:
-  // CatalogTable hides the bar while `slug` is set, so flipping the flag there
-  // would look like SEARCH doing nothing. That case needs navigate(), which
-  // drops `slug` and lands on the catalog with the bar open. Off the catalog
-  // entirely, likewise — there is no bar to flip yet, and navigate() preserves
-  // the sticky filter so arriving via SEARCH doesn't discard the active view.
-  const setBarOpen = useSetSearchBarOpen();
-  const openSearch = () => {
-    if (onCatalog && !sp.get("slug")) {
-      setBarOpen(true);
-      const params = new URLSearchParams(window.location.search);
-      params.set(SEARCH_OPEN_KEY, "1");
-      window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
-      return;
-    }
-    navigate({ [SEARCH_OPEN_KEY]: "1" });
-  };
+  // The search box lives in a reveal-on-demand bar at the top of the listing
+  // (see CatalogTable); useOpenSearch explains the catalog vs. elsewhere split.
+  const openSearch = useOpenSearch(current);
 
   const setType = (t: string) => {
     navigate({ type: currentType === t ? null : t });
@@ -398,7 +324,7 @@ export default function SideNavSearch() {
 
       <section>
         <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400">
-          types
+          filters
         </h3>
         <div className="flex flex-wrap gap-1.5">
           {/* Attachments are visible to everyone now; only couch's private
@@ -442,6 +368,27 @@ export default function SideNavSearch() {
                     }
                   >
                     👤 Owned by Me
+                  </button>
+                );
+              })()
+            : null}
+          {me?.email
+            ? (() => {
+                const token = "bookmarked:me";
+                const active = tokenActive(token);
+                return (
+                  <button
+                    type="button"
+                    onClick={() => toggleToken(token)}
+                    title={token}
+                    className={
+                      "rounded-md px-2.5 py-0.5 text-[11px] transition " +
+                      (active
+                        ? "bg-neutral-200 text-neutral-800"
+                        : "border border-neutral-200 text-neutral-600 hover:bg-neutral-50")
+                    }
+                  >
+                    🔖 Bookmarked
                   </button>
                 );
               })()

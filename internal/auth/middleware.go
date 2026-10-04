@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -72,6 +73,18 @@ func SetAllowedEmails(entries []string) {
 	allowedEmails = cleaned
 }
 
+var deactivationCheck atomic.Pointer[func(email string) bool]
+
+// SetDeactivationCheck installs the predicate IsAllowed uses to refuse a
+// deactivated email. nil removes it.
+func SetDeactivationCheck(fn func(email string) bool) {
+	if fn == nil {
+		deactivationCheck.Store(nil)
+		return
+	}
+	deactivationCheck.Store(&fn)
+}
+
 // AllowedEmails returns the active allowlist (lower-cased copy). Useful
 // for /healthz introspection and tests.
 func AllowedEmails() []string {
@@ -133,8 +146,9 @@ func WithTestClaims(ctx context.Context, c Claims) context.Context {
 // (case-insensitive) — either as a full address or by its domain. Full
 // addresses matter for anyone hosting against a consumer IdP, where the
 // only expressible domain (say gmail.com) would otherwise admit every
-// account at that provider. It does NOT check email_verified — that's the
-// OIDC issuer's responsibility.
+// account at that provider. A deactivated email is refused even when it
+// matches. It does NOT check email_verified — that's the OIDC issuer's
+// responsibility.
 func IsAllowed(email string) bool {
 	// Normalize here rather than at the call sites. IsAllowed is the shared
 	// gate for every auth path — bearer claims, API keys, embed mints,
@@ -146,7 +160,16 @@ func IsAllowed(email string) bool {
 	if at < 0 {
 		return false
 	}
-	dom := email[at+1:]
+	if !matchesAllowlist(email, email[at+1:]) {
+		return false
+	}
+	if fn := deactivationCheck.Load(); fn != nil && (*fn)(email) {
+		return false
+	}
+	return true
+}
+
+func matchesAllowlist(email, dom string) bool {
 	allowedEmailsMu.RLock()
 	defer allowedEmailsMu.RUnlock()
 	for _, allowed := range allowedEmails {

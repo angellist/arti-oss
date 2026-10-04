@@ -186,7 +186,7 @@ func groupNamesFor(snap []Group, email string) []string {
 // UpsertIdPGroups records a user's current IdP (SSO) group memberships,
 // replacing any prior snapshot. Group names are normalized (lowercased,
 // trimmed, deduped, blanks dropped); email is lowercased. Called at every
-// interactive login. Best-effort at the call site — a failure here must not
+// interactive login, so it also records the principal in users. Best-effort at the call site — a failure here must not
 // block the login.
 func (s *Store) UpsertIdPGroups(ctx context.Context, email string, groups []string) error {
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -211,6 +211,17 @@ func (s *Store) UpsertIdPGroups(ctx context.Context, email string, groups []stri
 		VALUES ($1, $2, now())
 		ON CONFLICT (email) DO UPDATE SET groups = EXCLUDED.groups, captured_at = now()`,
 		email, norm)
+	if err != nil {
+		return err
+	}
+	return s.recordLogin(ctx, email)
+}
+
+// recordLogin gives a principal its permanent users row the first time it
+// logs in; an existing row is left untouched.
+func (s *Store) recordLogin(ctx context.Context, email string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO users (email, source) VALUES ($1, 'login') ON CONFLICT (email) DO NOTHING`, email)
 	return err
 }
 
@@ -350,6 +361,40 @@ func (s *Store) UpdateGroup(ctx context.Context, name, displayName string, membe
 		  WHERE name = $1
 		  RETURNING name, display_name, members, created_by, created_at, modified_at`,
 		normalizeGroupName(name), strings.TrimSpace(displayName), normalizeMembers(members)).
+		Scan(&g.Name, &g.DisplayName, &g.Members, &g.CreatedBy, &g.CreatedAt, &g.ModifiedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Group{}, ErrNotFound
+	}
+	if err != nil {
+		return Group{}, err
+	}
+	s.invalidateGroups(ctx)
+	return g, nil
+}
+
+// AddGroupMember adds one address in a single statement, so a concurrent
+// membership edit is not lost. Adding an existing member is a no-op.
+func (s *Store) AddGroupMember(ctx context.Context, name, email string) (Group, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if !emailRe.MatchString(email) {
+		return Group{}, fmt.Errorf("%w: %q is not a single email address", ErrInvalidInput, email)
+	}
+	return s.editMembers(ctx, name, email,
+		`CASE WHEN $2 = ANY(members) THEN members ELSE array_append(members, $2) END`)
+}
+
+// RemoveGroupMember removes one address; removing a non-member is a no-op.
+func (s *Store) RemoveGroupMember(ctx context.Context, name, email string) (Group, error) {
+	return s.editMembers(ctx, name, strings.ToLower(strings.TrimSpace(email)), `array_remove(members, $2)`)
+}
+
+func (s *Store) editMembers(ctx context.Context, name, email, expr string) (Group, error) {
+	var g Group
+	err := s.pool.QueryRow(ctx,
+		`UPDATE user_groups SET members = `+expr+`, modified_at = now()
+		  WHERE name = $1
+		  RETURNING name, display_name, members, created_by, created_at, modified_at`,
+		normalizeGroupName(name), email).
 		Scan(&g.Name, &g.DisplayName, &g.Members, &g.CreatedBy, &g.CreatedAt, &g.ModifiedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Group{}, ErrNotFound

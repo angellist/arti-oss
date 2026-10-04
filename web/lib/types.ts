@@ -71,6 +71,9 @@ export interface ArtifactInfo {
   // undefined means the optional catalog count query was unavailable.
   view_count?: number;
   view_count_30d?: number;
+  // Slug-scoped bookmark count, and whether the signed-in viewer is one of them.
+  bookmark_count?: number;
+  bookmarked?: boolean;
   score?: number;
   highlights?: Record<string, string[]>;
 }
@@ -137,6 +140,30 @@ export interface Block {
   reason: string;
   created_by: string;
   created_at: string;
+}
+
+// McpServer is one APP MCP connector: an upstream the apps proxy may reach.
+// An empty tool_allowlist admits every tool an app's manifest allows.
+export interface McpServer {
+  name: string;
+  resource_url: string;
+  auth: "none" | "oauth";
+  scope: string;
+  enabled: boolean;
+  tool_allowlist: string[];
+  notes: string;
+  created_by: string;
+  created_at: string;
+  updated_by: string;
+  updated_at: string;
+}
+
+// McpServerApp is a live APP whose manifest declares a connector.
+export interface McpServerApp {
+  artifact_id: string;
+  named_slug: string | null;
+  title: string;
+  creator: string;
 }
 
 // BlockedDoc is what a block currently hides, as the admin review surface
@@ -371,9 +398,15 @@ export interface RosterUser {
   // null = no login recorded, which is NOT "never signed in": logins were only
   // recorded from migration 0020 (2026-07-27) onward.
   last_seen_at: string | null;
+  // how the users row arrived; "" when arti has none
+  source: "admin" | "login" | "backfill" | "";
+  // an admin recorded this principal (source "admin")
   registered: boolean;
   added_by: string;
   added_at: string | null;
+  // non-null while every credential for this email is refused
+  deactivated_at: string | null;
+  deactivated_by: string;
 }
 
 export interface RosterResponse {

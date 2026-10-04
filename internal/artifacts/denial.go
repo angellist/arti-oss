@@ -3,10 +3,14 @@ package artifacts
 import (
 	"context"
 	"errors"
+	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
 	"github.com/angellist/arti-oss/internal/auth"
@@ -81,55 +85,60 @@ func denialCaller(r *http.Request) (string, bool) {
 // same 404 the ordinary read path gives, so the route adds no signal beyond
 // that single case.
 func (s *Service) answerDenial(ctx context.Context, w http.ResponseWriter, row sqlc.Artifact, caller string, lookupErr error) {
+	info, ok, err := s.denialFor(ctx, row, caller, lookupErr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if !ok {
+		writeNotDenied(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+// denialFor returns ok only when row exists and caller is shut out of it.
+func (s *Service) denialFor(ctx context.Context, row sqlc.Artifact, caller string, lookupErr error) (DenialInfo, bool, error) {
 	if lookupErr != nil {
 		if errors.Is(lookupErr, pgstore.ErrNotFound) {
-			writeNotDenied(w)
-			return
+			return DenialInfo{}, false, nil
 		}
-		writeError(w, http.StatusInternalServerError, "internal", lookupErr.Error())
-		return
+		return DenialInfo{}, false, lookupErr
 	}
 	// An archived document is one its owner took down. Naming it here would
 	// undo that decision, so it keeps the 404 every other read gives it.
 	if row.DeletedAt.Valid {
-		writeNotDenied(w)
-		return
+		return DenialInfo{}, false, nil
 	}
 	switch err := s.checkAccess(ctx, row, caller); {
 	case err == nil:
 		// The caller can read it after all — a grant that landed between the
 		// page's failed read and this call, or an admin arriving by hand.
 		// There is no denial to explain.
-		writeNotDenied(w)
+		return DenialInfo{}, false, nil
 	case errors.Is(err, pgstore.ErrNotFound):
 		shutOut, serr := s.deniedWholeSlug(ctx, row, caller)
-		if serr != nil {
-			writeError(w, http.StatusInternalServerError, "internal", serr.Error())
-			return
-		}
-		if !shutOut {
-			writeNotDenied(w)
-			return
+		if serr != nil || !shutOut {
+			return DenialInfo{}, false, serr
 		}
 		owner, oerr := s.denialOwner(ctx, row)
 		if oerr != nil {
-			writeError(w, http.StatusInternalServerError, "internal", oerr.Error())
-			return
+			return DenialInfo{}, false, oerr
 		}
 		slog.Info("served access-denied details",
 			"caller", caller,
 			"artifact_id", pgstore.UUIDFromPG(row.ArtifactID).String(),
 			"slug", row.NamedSlug)
-		writeJSON(w, http.StatusOK, DenialInfo{
+		return DenialInfo{
 			NamedSlug: row.NamedSlug,
 			Version:   row.Version,
 			Title:     row.Title,
 			Owner:     owner,
-		})
+		}, true, nil
 	default:
 		// A group-lookup failure must not read as a denial, which would
 		// disclose an artifact this caller may well be allowed to read.
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return DenialInfo{}, false, err
 	}
 }
 
@@ -170,3 +179,84 @@ func (s *Service) denialOwner(ctx context.Context, row sqlc.Artifact) (string, e
 func writeNotDenied(w http.ResponseWriter) {
 	writeError(w, http.StatusNotFound, "not-found", "not found")
 }
+
+// writeAppDenial renders the access-denied card for /app/{ident}, which the
+// server serves directly and so never reaches the web viewer's denial page.
+// It reports false (writing nothing) when there is no denial to explain.
+func (s *Service) writeAppDenial(w http.ResponseWriter, r *http.Request, ident string, ver *int32) bool {
+	caller, ok := denialCaller(r)
+	if !ok {
+		return false
+	}
+	var row sqlc.Artifact
+	var err error
+	if id, perr := uuid.Parse(ident); perr == nil {
+		row, err = s.store.GetByID(r.Context(), id)
+	} else {
+		row, err = s.store.GetBySlug(r.Context(), ident, ver)
+	}
+	info, ok, err := s.denialFor(r.Context(), row, caller, err)
+	if err != nil {
+		slog.Warn("app denial lookup failed", "ident", ident, "err", err)
+		return false
+	}
+	if !ok {
+		return false
+	}
+	p := appDenialPage{Title: info.Title, Owner: info.Owner, Mailto: denialMailto(info)}
+	if info.NamedSlug != nil {
+		p.Slug = *info.NamedSlug
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	// Same framing rule as the app it stands in for: trusted hosts iframe /app.
+	w.Header().Set("Content-Security-Policy", "frame-ancestors "+s.artifactFrameAncestors())
+	w.Header().Del("X-Frame-Options")
+	w.WriteHeader(http.StatusForbidden)
+	_ = appDenialTmpl.Execute(w, p)
+	return true
+}
+
+type appDenialPage struct {
+	Title, Slug, Owner, Mailto string
+}
+
+// denialMailto matches the web AccessDenied page's request email.
+func denialMailto(info DenialInfo) string {
+	doc := info.Title
+	if info.NamedSlug != nil {
+		doc += " (" + *info.NamedSlug + ")"
+	}
+	body := "Hi — I don't have access to this arti document and would like to read it.\n\nDocument: " + doc
+	esc := func(v string) string { return strings.ReplaceAll(url.QueryEscape(v), "+", "%20") }
+	return "mailto:" + esc(info.Owner) + "?subject=" + esc("arti access request: "+info.Title) + "&body=" + esc(body)
+}
+
+var appDenialTmpl = template.Must(template.New("appdenial").Parse(`<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Access required · arti</title>
+<style>
+body{margin:0;background:#fafafa;color:#171717;font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+ display:flex;align-items:flex-start;justify-content:center;padding:64px 16px;-webkit-font-smoothing:antialiased}
+.card{width:100%;max-width:576px;box-sizing:border-box;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:32px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.kicker{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#b45309;font-weight:600;margin:0}
+h1{font-size:24px;font-weight:600;margin:12px 0 0;word-break:break-word}
+.slug{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;color:#737373;margin:4px 0 0}
+p.msg{font-size:14px;line-height:1.5;color:#404040;margin:24px 0 0}
+dl{margin:24px 0 0;border-top:1px solid #e5e5e5;padding-top:16px;font-size:14px;display:flex;gap:12px}
+dt{width:80px;flex:none;color:#737373}
+dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;word-break:break-all}
+a.btn{display:inline-block;margin-top:24px;border-radius:6px;background:#171717;color:#fff;padding:8px 16px;font-size:14px;font-weight:500;text-decoration:none}
+a.btn:hover{background:#404040}
+</style>
+<main class="card">
+<p class="kicker">Access required</p>
+<h1>{{.Title}}</h1>
+{{if .Slug}}<p class="slug">{{.Slug}}</p>{{end}}
+<p class="msg">This app exists, but it is not shared with you. Its owner can grant you access.</p>
+<dl><dt>Owner</dt><dd>{{.Owner}}</dd></dl>
+<a class="btn" href="{{.Mailto}}">Ask {{.Owner}} for access</a>
+</main>
+`))
