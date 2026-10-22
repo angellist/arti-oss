@@ -13,9 +13,22 @@ const api = vi.hoisted(() => ({
   toggled: [] as [string, boolean][],
   membership: [] as [string, string, boolean][],
   roster: [] as unknown[],
+  lookupFails: false,
 }));
 
 vi.mock("@/lib/arti", () => ({
+  lookupUserAccess: async (email: string) => {
+    if (api.lookupFails) throw new Error("role lookup failed");
+    return {
+    email,
+    roles: [
+      { name: "USER", source: "baseline", permissions: ["USE_ARTIFACTS"] },
+      { name: "ADMIN", source: "group:admins", permissions: ["MANAGE_ROLES", "USE_ARTIFACTS"] },
+    ],
+    effective_permissions: ["MANAGE_ROLES", "USE_ARTIFACTS"],
+    };
+  },
+  getCredentialAudit: async () => ({ api_keys: [], device_tokens: [], connections: [], share_links: [], usage: [], usage_days: 30 }),
   listUsers: async () => ({ users: api.roster, sources: [] }),
   setGroupMember: async (group: string, email: string, member: boolean) => {
     api.membership.push([group, email, member]);
@@ -66,6 +79,16 @@ const user = (over: Partial<RosterUser> = {}): RosterUser => ({
   ...over,
 });
 
+// jsdom has no <dialog> modal API.
+if (!HTMLDialogElement.prototype.showModal) {
+  HTMLDialogElement.prototype.showModal = function () {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function () {
+    this.removeAttribute("open");
+  };
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -74,6 +97,7 @@ beforeEach(() => {
   api.toggled = [];
   api.membership = [];
   api.roster = [];
+  api.lookupFails = false;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -157,6 +181,66 @@ describe("UsersManager", () => {
     act(() => type(input, "ADMIN"));
     expect(text()).toContain("b@example.com");
     expect(text()).not.toContain("a@example.com");
+  });
+
+  it("narrows by role, group and status dropdowns together", () => {
+    render([
+      user({ email: "a@example.com", groups: ["funds-team"] }),
+      user({ email: "b@example.com", groups: ["funds-team"], deactivated_at: "2026-01-01T00:00:00Z" }),
+      user({ email: "c@example.com", kind: "service", idp_groups: ["funds-team"], roles: [{ name: "ADMIN", source: "direct" }] }),
+    ]);
+    const pick = (label: string, value: string) => {
+      const el = container.querySelector(`select[aria-label="filter by ${label}"]`) as HTMLSelectElement;
+      act(() => {
+        el.value = value;
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    };
+
+    pick("group", "group:funds-team");
+    expect(text()).toContain("a@example.com");
+    expect(text()).toContain("b@example.com");
+    expect(text()).not.toContain("c@example.com");
+
+    pick("status", "active");
+    expect(text()).toContain("a@example.com");
+    expect(text()).not.toContain("b@example.com");
+
+    pick("group", "");
+    pick("status", "");
+    pick("type", "service");
+    expect(text()).toContain("c@example.com");
+    expect(text()).not.toContain("a@example.com");
+
+    pick("type", "");
+    pick("role", "ADMIN");
+    expect(text()).toContain("c@example.com");
+    expect(text()).not.toContain("a@example.com");
+  });
+
+  it("keeps a selected group in its dropdown after the roster drops it, so the filter stays visible", async () => {
+    api.roster = [user({ email: "a@example.com" })];
+    act(() => {
+      root.render(
+        <UsersManager
+          initialUsers={[user({ email: "a@example.com", groups: ["solo"] })]}
+          sources={[]}
+          manageableGroups={[{ name: "solo", members: ["a@example.com"] }]}
+        />,
+      );
+    });
+    const sel = container.querySelector('select[aria-label="filter by group"]') as HTMLSelectElement;
+    act(() => {
+      sel.value = "group:solo";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const remove = container.querySelector('button[aria-label="remove a@example.com from solo"]') as HTMLButtonElement;
+    await act(async () => {
+      remove.click();
+    });
+    expect(text()).not.toContain("group:solo×");
+    expect(Array.from(sel.options).map((o) => o.value)).toContain("group:solo");
+    expect(sel.value).toBe("group:solo");
   });
 
   it("names the sources it read, so a missing principal class is diagnosable", () => {
@@ -258,6 +342,59 @@ describe("UsersManager", () => {
     expect(api.toggled).toEqual([["sam@example.com", true]]);
     expect(button("Deactivate")).toBeDefined();
     confirm.mockRestore();
+  });
+
+  it("opens a user's permission matrix, with where each role came from, by clicking the email", async () => {
+    act(() => {
+      root.render(<UsersManager initialUsers={[user({ email: "sam@example.com" })]} sources={[]} permissions={["MANAGE_ROLES", "USE_ARTIFACTS"]} />);
+    });
+    await act(async () => button("sam@example.com")!.click());
+    const dialog = document.querySelector("dialog")!;
+    expect(dialog.textContent).toContain("Manage roles");
+    expect(dialog.textContent).toContain("from group:admins");
+    expect(dialog.textContent).toContain("Stored credentials");
+  });
+
+  it("reports a failed permission lookup in its own section and still shows credentials", async () => {
+    api.lookupFails = true;
+    act(() => {
+      root.render(<UsersManager initialUsers={[user({ email: "sam@example.com" })]} sources={[]} permissions={["USE_ARTIFACTS"]} />);
+    });
+    await act(async () => button("sam@example.com")!.click());
+    const dialog = document.querySelector("dialog")!;
+    expect(dialog.textContent).toContain("Permissionsrole lookup failed");
+    expect(dialog.textContent).toContain("Stored credentials");
+  });
+
+  it("sorts by last sign-in newest first on the first click, with unknown sign-ins last", () => {
+    render([
+      user({ email: "a@example.com", last_seen_at: null }),
+      user({ email: "b@example.com", last_seen_at: "2026-01-01T00:00:00Z" }),
+      user({ email: "c@example.com", last_seen_at: "2026-06-01T00:00:00Z" }),
+    ]);
+    act(() => button("Last sign-in")!.click());
+    const order = () =>
+      Array.from(container.querySelectorAll("tbody tr td:first-child button")).map((b) => b.textContent);
+    expect(order()).toEqual(["c@example.com", "b@example.com", "a@example.com"]);
+    act(() => button("Last sign-in▼")!.click());
+    expect(order()).toEqual(["a@example.com", "b@example.com", "c@example.com"]);
+  });
+
+  it("pages 100 rows at a time and returns to page 1 when a filter changes", () => {
+    render(Array.from({ length: 150 }, (_, i) => user({ email: `u${String(i).padStart(3, "0")}@example.com` })));
+    const rows = () => container.querySelectorAll("tbody tr").length;
+    expect(rows()).toBe(100);
+    expect(text()).toContain("150 total · 0 deactivated");
+    act(() => (container.querySelector('button[aria-label="next page"]') as HTMLButtonElement).click());
+    expect(rows()).toBe(50);
+    expect(text()).toContain("Showing 101–150 of 150");
+    act(() => type(container.querySelector("input") as HTMLInputElement, "u0"));
+    expect(text()).toContain("Showing 1–100 of 100 matching");
+  });
+
+  it("draws reactivate in neutral, not red", () => {
+    render([user({ deactivated_at: new Date().toISOString(), deactivated_by: "admin@example.com" })]);
+    expect(button("Reactivate")!.className).not.toContain("rose");
   });
 
   it("offers no deactivate button on the caller's own row", () => {

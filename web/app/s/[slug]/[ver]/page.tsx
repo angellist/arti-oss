@@ -122,7 +122,7 @@ export default async function BySlugVersion({
     return (
       <>
         {staleBanner}
-        <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />
+        <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} info={info} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />
       </>
     );
   }

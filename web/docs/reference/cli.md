@@ -30,11 +30,15 @@ Additional environment variables:
 | `ARTI_DISABLE_UPDATE_CHECK` | Disables the throttled "newer build available" nudge. `cmd/arti/selfupdate.go` |
 
 **Auth resolution** (`loadToken`, `cmd/arti/token.go:36`): `ARTI_TOKEN` if set, else the
-saved login at `~/.config/arti/token.json` (`$XDG_CONFIG_HOME/arti/token.json`, mode
-`0600`). Commands that need auth fail with a "not logged in" error when neither is
-present. The HTTP client has a 30s timeout and sends `Authorization: Bearer <token>`.
+saved login at `arti/token.json` in the OS user config directory (Go's
+`os.UserConfigDir`: `$XDG_CONFIG_HOME` or `~/.config` on Linux,
+`~/Library/Application Support` on macOS), mode `0600`. With neither, requests go out
+unauthenticated, which only a server with `ARTI_AUTH_DISABLED` accepts; anything else
+answers `401`. The HTTP client has a 30s timeout and sends
+`Authorization: Bearer <token>`. The CLI does not refresh the saved token: a login
+lasts 7 days, after which you run `arti login` again.
 
-An optional `~/.config/arti/config.json` supplies a default access list:
+An optional `arti/config.json` in the same directory supplies a default access list:
 
 ```json
 { "default_access": ["*@example.com", "bob@example.com"] }
@@ -48,7 +52,7 @@ An optional `~/.config/arti/config.json` supplies a default access list:
 
 ### `arti login`
 
-OAuth login via the PKCE pair flow. Opens a browser to `<base>/auth/google/login` with a
+OAuth login via the PKCE pair flow. Opens a browser to `<base>/auth/login` with a
 one-time `cli_code`; after authenticating, explicitly confirm the displayed code, then
 the CLI polls `POST /auth/cli/exchange` and saves the returned token. Waits up to 5 minutes.
 
@@ -63,7 +67,7 @@ arti login --email alice@example.com   # dev/test-mode only
 
 ### `arti logout`
 
-Delete the local token at `~/.config/arti/token.json`.
+Delete the saved login (`arti/token.json` in the user config directory).
 
 ### `arti whoami`
 
@@ -73,7 +77,11 @@ Print the logged-in email (from the token's `email` field, or decoded from the J
 
 Create an artifact, or a new version of an existing slug. The artifact type and content
 type are usually inferred (markdown vs plain text; a directory or `.zip` becomes a
-PACKAGE). An explicit `--type` wins.
+PACKAGE). An explicit `--type` wins. A non-text file (PDF, image, binary) uploaded
+without `--slug` becomes a slugless ATTACHMENT. With `--slug`, pass `--type attachment`
+to publish it as a versioned document (an API key or upload token is refused here), or
+`--type package`. With `--slug` and no `--type`, the server treats it as TEXT and
+refuses the non-text content type.
 
 | Positional | Meaning |
 |---|---|
@@ -84,7 +92,7 @@ PACKAGE). An explicit `--type` wins.
 | `--slug` | string | Named slug. Re-adding the same slug creates a new version unless `--ensure-new`. |
 | `--title` | string | Title (default: filename stem, first markdown heading, or `stdin`). |
 | `--description` | string | Description. |
-| `--type` | string | `text` \| `package` \| `app` — usually inferred. |
+| `--type` | string | `text` \| `package` \| `app` \| `attachment` (alias `file`) — usually inferred. `md`/`markdown`, `html` and `plain`/`txt` set the content type instead. |
 | `--content-type` | string | MIME override. |
 | `--entry-point` | string | PACKAGE `entry_point` override. |
 | `--scope` | string[] | Scope, repeatable (e.g. `a:bt-auto-route`). |
@@ -93,7 +101,7 @@ PACKAGE). An explicit `--type` wins.
 | `--allow-type-change` | bool | With `--slug`: allow this version to change the document's `artifact_type` or content type. Without it such a version is refused (409), so a markdown document can't silently become an HTML one. |
 | `--access` | string[] | Read-access pattern, repeatable; glob-on-email; `*` = everyone. Defaults to client config, then server `*`. |
 | `--private` | bool | Creator-only read (sends empty `allowed_access`). Mutually exclusive with `--access`. |
-| `--write-access` | string[] | Write-access pattern, repeatable; the subset of readers allowed to push new versions / append / edit. Absent = writers follow readers. Server unions these into `--access`. |
+| `--write-access` | string[] | Write-access pattern, repeatable; the subset of readers allowed to push new versions / append / edit. Absent = writers follow readers, except that a skill (label `skill` or `kind:skill`) is owner-only. Server unions these into `--access`. |
 | `--write-private` | bool | Only you (the creator) may write; readers stay read-only (sends empty `allowed_write`). Mutually exclusive with `--write-access`. |
 | `--compress` | string | `auto` (default) \| `gzip` \| `none`. `auto` gzips textual uploads (HTML/JS/JSON/text) with `Content-Encoding: gzip` so Cloudflare's WAF can't `403` inline `<script>`; already-compressed uploads (zip/image/PDF) are sent as-is. `gzip` forces it; `none` disables it. |
 
@@ -236,13 +244,15 @@ resolves to: changing access, the comment switch, minting a share link.
 | Flag | Type | Meaning |
 |---|---|---|
 | `--to` | string | Transfer ownership to this email address. Omit to just print the current owner. |
+| `--keep-access` / `--no-keep-access` | bool | Default on: also grant the outgoing owner read and write. Write access follows the owner, so without this grant the previous owner can lose write. It only adds; `--no-keep-access` removes nothing the outgoing owner already holds. |
 
 Transferring grants the new owner read access on every version, so they are
 never locked out of what they now own. Current owner or an admin only.
 
 ```sh
-arti owner my-doc                        # who owns it
-arti owner my-doc --to alice@example.com # hand it over
+arti owner my-doc                                          # who owns it
+arti owner my-doc --to alice@example.com                   # hand it over
+arti owner my-doc --to alice@example.com --no-keep-access  # no extra grant for you
 ```
 
 ### `arti get`
@@ -299,7 +309,9 @@ List the catalog, or — when given a UUID — the entries inside that PACKAGE.
 
 ### `arti search`
 
-Substring search over title, description, and slug.
+Substring search over title, description, and slug. The query also takes the
+`field:value` tokens of the web search box (`label:`, `creator:`, `-label:` to exclude,
+and so on); see [Searching the catalog](../guides/search.md#structured-filters).
 
 | Positional | Meaning |
 |---|---|

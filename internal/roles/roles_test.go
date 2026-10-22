@@ -474,3 +474,118 @@ func TestUsers_DeactivateAndReactivate(t *testing.T) {
 		t.Error("store still reports the email deactivated after reactivation")
 	}
 }
+
+func TestUsers_AccessAuditListsAndRevokesOwnerScoped(t *testing.T) {
+	r, st := setup(t)
+	ctx := context.Background()
+	dbURL := os.Getenv("ARTI_TEST_DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://postgres:postgres@localhost:5436/arti_test?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	const admin = "auditadmin@a.com"
+	if err := st.AssignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.UnassignRole(ctx, rbac.PrincipalUser, admin, rbac.RoleAdmin) })
+
+	target, other := unique("audit")+"@example.com", unique("auditother")+"@example.com"
+	fam, otherFam := unique("fam"), unique("fam")
+	resource := "https://" + unique("mcp") + ".example.com/mcp"
+	var keyID, otherKeyID string
+	for _, q := range []struct {
+		sql  string
+		args []any
+		dst  *string
+	}{
+		{`INSERT INTO api_keys (key_hash, key_prefix, owner_email, name, scopes, expires_at)
+		  VALUES (sha256(gen_random_uuid()::text::bytea), 'arti_upload_x', $1, 'k', '{upload}', now() + interval '1 day') RETURNING id::text`, []any{target}, &keyID},
+		{`INSERT INTO api_keys (key_hash, key_prefix, owner_email, name, scopes, expires_at)
+		  VALUES (sha256(gen_random_uuid()::text::bytea), 'arti_upload_y', $1, 'k', '{upload}', now() + interval '1 day') RETURNING id::text`, []any{other}, &otherKeyID},
+	} {
+		if err := pool.QueryRow(ctx, q.sql, q.args...).Scan(q.dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, q := range []struct {
+		sql  string
+		args []any
+	}{
+		{`INSERT INTO device_token (family_id, email, current_refresh_jti, expires_at) VALUES ($1, $2, 'j', now() + interval '1 day')`, []any{fam, target}},
+		{`INSERT INTO device_token (family_id, email, current_refresh_jti, expires_at) VALUES ($1, $2, 'j', now() + interval '1 day')`, []any{otherFam, other}},
+		{`INSERT INTO oauth_obo_tokens (email, resource, access_token_enc, expiry) VALUES ($1, $2, '\xdeadbeef', now())`, []any{target, resource}},
+	} {
+		if _, err := pool.Exec(ctx, q.sql, q.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM api_keys WHERE owner_email IN ($1, $2)`, target, other)
+		_, _ = pool.Exec(ctx, `DELETE FROM device_token WHERE email IN ($1, $2)`, target, other)
+		_, _ = pool.Exec(ctx, `DELETE FROM oauth_obo_tokens WHERE email = $1`, target)
+	})
+
+	path := "/api/users/access?email=" + url.QueryEscape(strings.ToUpper(target))
+	if w := do(t, r, "auditplain@a.com", "GET", path, ""); w.Code != http.StatusNotFound {
+		t.Errorf("audit without MANAGE_ROLES: want 404, got %d", w.Code)
+	}
+	if w := do(t, r, "auditplain@a.com", "POST", "/api/users/access/revoke",
+		`{"email":"`+target+`","kind":"apikey","id":"`+keyID+`"}`); w.Code != http.StatusNotFound {
+		t.Errorf("revoke without MANAGE_ROLES: want 404, got %d", w.Code)
+	}
+
+	w := do(t, r, admin, "GET", path, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("audit: want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "token_enc") || strings.Contains(w.Body.String(), "3q2+7w") {
+		t.Fatalf("audit response must never carry stored token bytes: %s", w.Body.String())
+	}
+	var got pgstore.UserAccess
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.APIKeys) != 1 || got.APIKeys[0].ID != keyID || len(got.DeviceTokens) != 1 ||
+		got.DeviceTokens[0].FamilyID != fam || len(got.Connections) != 1 || got.Connections[0].Resource != resource {
+		t.Fatalf("audit must list exactly the target's credentials: %+v", got)
+	}
+
+	revoke := func(kind, id string) int {
+		return do(t, r, admin, "POST", "/api/users/access/revoke",
+			`{"email":"`+target+`","kind":"`+kind+`","id":"`+id+`"}`).Code
+	}
+	if c := revoke("apikey", otherKeyID); c != http.StatusNotFound {
+		t.Errorf("revoking another owner's key under this email: want 404, got %d", c)
+	}
+	if c := revoke("device", otherFam); c != http.StatusNotFound {
+		t.Errorf("revoking another owner's device family under this email: want 404, got %d", c)
+	}
+	if c := revoke("bogus", keyID); c != http.StatusBadRequest {
+		t.Errorf("unknown kind: want 400, got %d", c)
+	}
+	for _, c := range []struct{ kind, id string }{{"apikey", keyID}, {"device", fam}, {"connection", resource}} {
+		if code := revoke(c.kind, c.id); code != http.StatusNoContent {
+			t.Errorf("revoke %s: want 204, got %d", c.kind, code)
+		}
+	}
+	if c := revoke("apikey", keyID); c != http.StatusNotFound {
+		t.Errorf("second revoke of the same key: want 404, got %d", c)
+	}
+
+	after, err := st.UserAccess(ctx, target, 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.APIKeys[0].RevokedAt == nil || !after.DeviceTokens[0].Revoked || len(after.Connections) != 0 {
+		t.Errorf("revocations not reflected: %+v", after)
+	}
+	var otherRevoked bool
+	if err := pool.QueryRow(ctx, `SELECT revoked FROM device_token WHERE family_id = $1`, otherFam).Scan(&otherRevoked); err != nil || otherRevoked {
+		t.Errorf("another owner's device family must stay live (revoked=%v, err=%v)", otherRevoked, err)
+	}
+}

@@ -222,8 +222,9 @@ exactly these operations:
 | Create an artifact | `POST /api/artifacts` |
 | Append a version | `POST /api/artifacts/by-slug/{slug}/append` |
 
-Everything else — `DELETE`, `PATCH`, `suggest-metadata`, MCP, admin, comments —
-is `403`. Two more guardrails apply on every upload-scoped request:
+Everything else — `DELETE`, `PATCH`, `suggest-metadata`, MCP, admin, comment
+writes, MAP writes — is `403`. (Reads under `/api/artifacts`, including an
+artifact's comment list and MAP entries, fall under the read rule.) Two more guardrails apply on every upload-scoped request:
 
 - **Body cap.** Upload requests are limited to 200 MiB by default
   (`ARTI_DEVICE_MAX_UPLOAD_BYTES`); overflow is `413`. That matches the global

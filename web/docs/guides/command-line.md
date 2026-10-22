@@ -45,10 +45,11 @@ arti login
 
 This opens a browser, signs you in through the server's configured identity
 provider (your email domain must be on the server's allowlist), and
-stashes `{access_token, refresh_token, expires_at}` in
-`~/.config/arti/token.json` (mode 0600). The token auto-refreshes on use, so you
-rarely log in again. `arti whoami` prints the logged-in email; `arti logout`
-clears the cached token.
+stashes `{access_token, refresh_token, expires_at}` in `arti/token.json` under
+your OS config directory (`~/.config` on Linux, `~/Library/Application Support`
+on macOS), mode 0600. The login lasts 7 days and the CLI does not refresh it, so
+when commands start failing with `401`, run `arti login` again. `arti whoami`
+prints the logged-in email; `arti logout` clears the cached token.
 
 ### Headless: `ARTI_TOKEN`
 
@@ -61,8 +62,10 @@ export ARTI_TOKEN="<device-flow-upload-token>"
 arti add report.md --slug nightly-report
 ```
 
-These tokens come from arti's device-authorization flow (RFC 8628) — the same
-mechanism the [MCP `authenticate` tool](mcp.md) drives for headless agents. See
+These tokens come from arti's device-authorization flow (RFC 8628, see the
+[agent recipe](../recipes/agent.md)) or are a self-serve `arti_upload_…`
+[API key](api.md#api-keys-self-serve). Both are upload-scoped: they work for
+`arti add` and other REST writes, but `/mcp` refuses them. See
 [Authentication](../architecture/auth.md) for how the flow issues and refreshes
 them.
 
@@ -217,8 +220,10 @@ arti url daily-notes
 # → https://arti.example.com/s/daily-notes/v_2
 ```
 
-`arti search` recognizes the keys `slug:`, `creator:`, `scope:`, `type:`, and
-`label:` (repeatable), mixed freely with plain text.
+`arti search` recognizes the keys `slug:`, `creator:`, `owner:`, `scope:`,
+`type:`, `content_type:`, `label:` (repeatable), `via:` and `bookmarked:`, mixed
+freely with plain text. A leading `-` excludes a match (`-label:draft`). See
+[Searching the catalog](search.md#structured-filters) for what each key matches.
 
 ## Append (atomic logs)
 

@@ -14,16 +14,11 @@ deploy, so the running code and the schema move together.
 ## Migration files
 
 One file per migration, numbered and named: `db/migrations/NNNN_name.sql`.
-Current set:
+The set runs from `0001_baseline.sql` to `0042_read_org_shared.sql` (41 files;
+`0022` is unused). List the directory for the current set:
 
-```
-0001_baseline.sql              0008_oauth_obo.sql
-0002_mcp_oauth.sql             0009_llm_usage.sql
-0003_allowed_access.sql        0010_user_groups.sql
-0004_comments.sql              0011_rbac.sql
-0005_scopes_add.sql            0012_device_auth.sql
-0006_idempotency_keys.sql      0013_device_token_unique_active.sql
-0007_comment_author_profile.sql
+```sh
+ls db/migrations
 ```
 
 Each file has both a `-- +goose Up` and a `-- +goose Down` section. The `Up`
@@ -91,7 +86,8 @@ make dev-up      # Postgres on :5436, RustFS on :9210 (console :9211)
 ```
 
 It exposes **two databases on the same instance**: `arti_dev` (your runtime DB)
-and `arti_test` (used by integration tests). Default credentials are
+and `arti_test` (used by integration tests). `postgres-init.sql` creates
+`arti_test` the first time the volume initializes. Default credentials are
 `postgres`/`postgres`.
 
 ### Apply migrations
@@ -134,7 +130,7 @@ make dev-reset            # nuke the docker-compose volumes entirely
 
 ## Adding a migration safely
 
-1. Create the next-numbered file: `db/migrations/0014_my_change.sql` with
+1. Create the next-numbered file: `db/migrations/0043_my_change.sql` with
    `-- +goose Up` and `-- +goose Down` sections. Keep the number monotonic.
 2. If the change adds/edits a query, also update `db/queries/*.sql` and run
    `make generate` — CI fails if `gen/sqlc/` drifts.
@@ -150,6 +146,16 @@ make dev-reset            # nuke the docker-compose volumes entirely
    tables.
 7. `Down` is for local reset only; prod never runs it. To undo a prod migration,
    ship a *new* forward migration.
+
+## Connection pool
+
+`arti-server serve` opens one `pgxpool` sized by `ARTI_DATABASE_MAX_CONNS`
+(default `20`) and logs the size at boot (`postgres pool`, `max_conns`). A
+write holds its connection for the whole slug critical section, so the pool
+size is also the ceiling on concurrent writers to one slug. `0` gives sizing
+back to pgx, which uses `max(4, NumCPU)` unless the DSN carries
+`pool_max_conns`; on a small pod that is four connections. A positive value
+overrides `pool_max_conns` in the DSN. See [Configuration](../reference/configuration.md).
 
 See [Local setup](../development/local-setup.md) for the full dev bootstrap and
 [Deploying](deploying.md) for how the migrate step fits into the pipeline.

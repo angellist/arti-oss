@@ -21,6 +21,21 @@ type ApiKey struct {
 	ExpiresAt  pgtype.Timestamptz
 	LastUsedAt pgtype.Timestamptz
 	RevokedAt  pgtype.Timestamptz
+	MintedBy   *string
+}
+
+type AppMcpServer struct {
+	Name          string
+	ResourceUrl   string
+	Auth          string
+	Scope         string
+	Enabled       bool
+	ToolAllowlist []string
+	Notes         string
+	CreatedBy     string
+	CreatedAt     pgtype.Timestamptz
+	UpdatedBy     string
+	UpdatedAt     pgtype.Timestamptz
 }
 
 type AppSetting struct {
@@ -56,6 +71,20 @@ type Artifact struct {
 	WrittenVia      *string
 	WrittenViaName  *string
 	MapID           pgtype.UUID
+	AssertedBy      *string
+}
+
+type ArtifactBlock struct {
+	Pattern   string
+	Reason    string
+	CreatedBy string
+	CreatedAt pgtype.Timestamptz
+}
+
+type ArtifactBookmark struct {
+	ViewKey string
+	Email   string
+	At      pgtype.Timestamptz
 }
 
 type ArtifactMapEntry struct {
@@ -266,11 +295,14 @@ type ShareLinkOpen struct {
 }
 
 type User struct {
-	Email   string
-	Kind    string
-	Note    string
-	AddedBy string
-	AddedAt pgtype.Timestamptz
+	Email         string
+	Kind          string
+	Note          string
+	AddedBy       string
+	AddedAt       pgtype.Timestamptz
+	Source        string
+	DeactivatedAt pgtype.Timestamptz
+	DeactivatedBy string
 }
 
 type UserGroup struct {

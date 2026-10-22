@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/go-chi/httprate"
+
+	"github.com/angellist/arti-oss/internal/auth"
 )
 
 // ipRateLimiter builds a per-client-IP rate limiter (rpm requests per minute)
@@ -28,4 +30,16 @@ func ipRateLimiter(rpm int) func(http.Handler) http.Handler {
 		return func(next http.Handler) http.Handler { return next }
 	}
 	return httprate.LimitByIP(rpm, time.Minute)
+}
+
+// viewerRateLimiter caps rpm requests per minute per signed-in viewer. It must
+// sit behind auth: it keys on the email the auth middleware resolved.
+// rpm <= 0 disables it.
+func viewerRateLimiter(rpm int) func(http.Handler) http.Handler {
+	if rpm <= 0 {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return httprate.Limit(rpm, time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		return auth.EmailFromContext(r.Context()), nil
+	}))
 }

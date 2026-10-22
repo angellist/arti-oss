@@ -1,29 +1,30 @@
 flowchart TB
-  cli[arti CLI / headless agent]
+  cli[arti CLI / headless agent / MCP client]
   browser[Browser]
-  iframe[Cross-site iframe e.g. Front panel]
+  iframe[Cross-site iframe or sandboxed APP page]
 
   subgraph ingress[Ingress]
     prot[ProtectedIngress -- oauth2-proxy plus Dex]
     pub[PublicIngress -- no SSO]
   end
 
-  browser --> prot
-  cli --> prot
+  browser -- web UI, login, /oauth/authorize, /app --> prot
+  browser -- /api --> pub
+  cli --> pub
   iframe --> pub
 
   subgraph server[arti-server -- Go]
     authmw[RequireAuth plus EnforceUploadScope]
     rest[REST API -- /api/artifacts]
     mcp[MCP server -- /mcp]
-    apps[Apps proxy -- /apps]
+    apps[Apps proxy -- /api/apps/mcp]
     obo[OBO broker]
     embed[Embed surfaces -- /embed]
     devauth[Device + CLI + MCP-OAuth endpoints]
     feproxy[FE reverse proxy]
   end
 
-  prot --> authmw
+  pub --> authmw
   authmw --> rest
   authmw --> mcp
   pub --> apps
@@ -41,6 +42,7 @@ flowchart TB
   rest --> pg
   rest --> s3
   mcp --> pg
+  apps --> pg
   apps --> obo
   obo --> gateway
   embed --> s3

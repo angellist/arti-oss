@@ -18,7 +18,7 @@ type fakeArt struct {
 	gotVer                                 *int32
 	gotFileAID, gotFilePath, gotFileCaller string
 	gotPinned                              string
-	pinMismatch                            bool
+	pinMismatch, isApp                     bool
 }
 
 func (f *fakeArt) ServeForEmbed(w http.ResponseWriter, _ *http.Request, surface, ident string, ver *int32, caller, fa string) bool {
@@ -63,6 +63,16 @@ func (f *fakeArt) ServeForEmbedPinned(w http.ResponseWriter, _ *http.Request, su
 	w.Header().Set("Content-Type", "text/html")
 	_, _ = io.WriteString(w, "SERVED-VIEWER:"+ident+":"+viewer)
 	return true, false
+}
+
+func (f *fakeArt) ServeForEmbedViewer(w http.ResponseWriter, _ *http.Request, surface, ident string, ver *int32, viewer, fa string) bool {
+	f.gotSurface, f.gotIdent, f.gotVer, f.gotCaller, f.gotFA = surface, ident, ver, viewer, fa
+	if f.isApp || !f.serveOK {
+		return false
+	}
+	w.Header().Set("Content-Type", "text/html")
+	_, _ = io.WriteString(w, "SERVED-VIEWER-COOKIE:"+ident+":"+viewer)
+	return true
 }
 
 func (f *fakeArt) ServeEmbedFilePublic(w http.ResponseWriter, _ *http.Request, aid, p, _, _ string) bool {

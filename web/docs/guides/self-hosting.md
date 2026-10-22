@@ -8,7 +8,9 @@ summary: The three setup profiles — local evaluation, single box, and retrofit
 
 arti needs three dependencies: **Postgres** (metadata), an **S3-compatible
 object store** (content bytes), and — for real deployments — an **identity
-provider or SSO proxy** (login). This guide is written as checklists with an
+provider or SSO proxy** (login). Full-text search through OpenSearch is
+optional; without it, search uses Postgres (see [OpenSearch](../operations/opensearch.md)).
+This guide is written as checklists with an
 explicit verification after every step, so a human or their AI assistant can
 drive an install and know exactly where it stands. Your main tool throughout
 is [`arti-server doctor`](../reference/configuration.md): run it after every

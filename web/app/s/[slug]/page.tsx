@@ -4,7 +4,7 @@ import AccessDenied from "@/components/AccessDenied";
 import ArtifactViewer from "@/components/ArtifactViewer";
 import FullPageView from "@/components/FullPageView";
 import { ArtiError, fetchContent, fetchPackageFile, getBySlug, getDenialBySlug, getMe, listPackageFiles } from "@/lib/arti";
-import { fullPageKind, isFullPageView, resolvePackageEntry, textScaleFromParam } from "@/lib/viewer";
+import { fullPageKind, isFullPageView, isTextualContentType, resolvePackageEntry, textScaleFromParam } from "@/lib/viewer";
 import { PackageRailProvider, SearchRailProvider } from "@/lib/rail-context";
 
 export const dynamic = "force-dynamic";
@@ -83,7 +83,7 @@ export default async function BySlug({
         : (await fetchContent(info.artifact_id, cookie)).body
       : "";
     const textScale = textScaleFromParam(sp);
-    return <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />;
+    return <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} info={info} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />;
   }
 
   if (info.artifact_type === "PACKAGE" || info.artifact_type === "APP") {
@@ -103,7 +103,8 @@ export default async function BySlug({
       </PackageRailProvider>
     );
   }
-  const { body } = await fetchContent(info.artifact_id, cookie);
+  const needsBody = isTextualContentType(info.content_type);
+  const body = needsBody ? (await fetchContent(info.artifact_id, cookie)).body : "";
   return (
     <SearchRailProvider>
       <main className="min-h-screen bg-white pb-12">

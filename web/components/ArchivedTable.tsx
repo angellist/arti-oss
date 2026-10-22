@@ -55,7 +55,8 @@ export default function ArchivedTable({
   const from = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
   const to = Math.min(total, from + rows.length - 1);
 
-  const canActOn = (row: ArtifactInfo) => hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(row.creator, me.email);
+  const canActOn = (row: ArtifactInfo) =>
+    hasPerm(me, "MANAGE_ARTIFACTS") || (!row.asserted_by && sameEmail(row.creator, me.email));
 
   const doUnarchive = async (row: ArtifactInfo) => {
     if (!canActOn(row)) return;

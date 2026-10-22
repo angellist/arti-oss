@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mountCommentsOverlay, type CommentsApi } from "./commentsOverlay";
 import type { ThreadDTO } from "./arti";
+import { MAX_SECONDS, type Dictation, type DictationHandlers } from "./dictation";
 
 class TestResizeObserver {
   observe() {}
@@ -1229,6 +1230,274 @@ describe("comments overlay lightbox sizing", () => {
     expect(parseFloat(visual().style.width)).toBeGreaterThan(fit * 1.5);
     zoom.click();
     expect(parseFloat(visual().style.width)).toBe(fit);
+    dispose();
+  });
+});
+
+describe("comments overlay dictation", () => {
+  afterEach(() => {
+    localStorage.clear();
+    document.documentElement.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  const fakeDictation = () => {
+    const d = {
+      h: null as DictationHandlers | null,
+      start: vi.fn((h: DictationHandlers) => { d.h = h; h.onState("recording"); }),
+      stop: vi.fn(),
+      cancel: vi.fn(),
+    };
+    return d;
+  };
+
+  const mount = async (dictation: Dictation, threads: ThreadDTO[], reply: CommentsApi["reply"] = vi.fn()) => {
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const doc = document.createElement("article");
+    doc.dataset.artiDoc = "";
+    doc.innerHTML = "<p>First quote</p><p>Second quote</p>";
+    document.body.append(doc);
+    const api: CommentsApi = {
+      list: async () => ({ threads }), create: vi.fn(), reply, resolve: vi.fn(),
+      reopen: vi.fn(), del: vi.fn(), edit: vi.fn(),
+    };
+    const dispose = mountCommentsOverlay({ container: doc, artifactId: "artifact", me: { email: "test@example.com", is_admin: false }, allowPin: true, api, dictation });
+    await new Promise((r) => setTimeout(r, 0));
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click();
+    return dispose;
+  };
+  const card = (id: string) => document.querySelector<HTMLElement>(`[data-tid='${id}']`)!;
+  const openCard = (id: string) => card(id).querySelector<HTMLElement>(".ac-text")!.click();
+
+  it("keeps an empty reply box's button row up while its mic is recording", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    const ta = card("a").querySelector<HTMLTextAreaElement>("[data-reply]")!;
+    ta.focus();
+    const mic = card("a").querySelector<HTMLButtonElement>(".ac-mic")!;
+    // The press must not take focus from the box: that blur is what hides the row.
+    const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    mic.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    // A real click lands on the glyph, which the press replaces mid-dispatch.
+    mic.querySelector("svg")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(d.start).toHaveBeenCalledTimes(1);
+    expect(card("a").classList.contains("ac-active")).toBe(true);
+    // Even when the box does lose focus, a live clip keeps the row and the mic.
+    ta.blur();
+    expect(card("a").classList.contains("ac-composing")).toBe(true);
+    expect(mic.dataset.state).toBe("recording");
+
+    mic.click();
+    expect(d.stop).toHaveBeenCalledTimes(1);
+    d.h!.onState("working");
+    d.h!.onText("ship it");
+    d.h!.onState("idle");
+    expect(ta.value).toBe("ship it");
+    expect(card("a").querySelector<HTMLButtonElement>("[data-send]")!.disabled).toBe(false);
+    dispose();
+  });
+
+  it("delivers a clip recorded across a re-render into the rebuilt reply box", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, [
+      thread({ type: "text", quote: "First quote" }, "a"),
+      thread({ type: "text", quote: "Second quote" }, "b"),
+    ]);
+    openCard("a");
+    const before = card("a").querySelector<HTMLTextAreaElement>("[data-reply]")!;
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    // Minimizing another thread re-renders the whole layer with innerHTML.
+    card("b").querySelector<HTMLElement>("[data-min]")!.click();
+    const after = card("a").querySelector<HTMLTextAreaElement>("[data-reply]")!;
+    expect(after).not.toBe(before);
+    expect(card("a").querySelector<HTMLButtonElement>(".ac-mic")!.dataset.state).toBe("recording");
+    expect(card("a").classList.contains("ac-composing")).toBe(true);
+    expect(d.cancel).not.toHaveBeenCalled();
+
+    d.h!.onText("rebased");
+    expect(after.value).toBe("rebased");
+    dispose();
+  });
+
+  it("discards the clip on Escape and leaves the card open", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    const ta = card("a").querySelector<HTMLTextAreaElement>("[data-reply]")!;
+    ta.focus();
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(d.cancel).toHaveBeenCalledTimes(1);
+    expect(card("a").classList.contains("ac-active")).toBe(true);
+    expect(card("a").querySelector<HTMLButtonElement>(".ac-mic")!.dataset.state).toBe("idle");
+    dispose();
+  });
+
+  it("shows the mic as starting until capture begins, and a second press withdraws it", async () => {
+    const d = { start: vi.fn(), stop: vi.fn(), cancel: vi.fn() };
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    const mic = () => card("a").querySelector<HTMLButtonElement>(".ac-mic")!;
+    mic().click();
+    expect(mic().dataset.state).toBe("starting");
+    mic().click();
+    expect(d.stop).not.toHaveBeenCalled();
+    expect(d.cancel).toHaveBeenCalledTimes(1);
+    expect(mic().dataset.state).toBe("idle");
+    dispose();
+  });
+
+  it("spends Escape on a clip still transcribing, and nothing behind it", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    const ta = card("a").querySelector<HTMLTextAreaElement>("[data-reply]")!;
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    d.h!.onState("working");
+    const pinFab = () => document.querySelector<HTMLElement>("[data-fab='pin']")!;
+    pinFab().click();
+    expect(pinFab().getAttribute("aria-pressed")).toBe("true");
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(d.cancel).toHaveBeenCalledTimes(1);
+    expect(pinFab().getAttribute("aria-pressed")).toBe("true");
+    dispose();
+  });
+
+  it("shows the recording clock, and warns in the last twenty seconds", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    const mic = () => card("a").querySelector<HTMLButtonElement>(".ac-mic")!;
+    mic().click();
+    d.h!.onSeconds!(42);
+    expect(mic().querySelector(".ac-rectime")!.textContent).toBe("0:42");
+    expect(mic().hasAttribute("data-warn")).toBe(false);
+    d.h!.onSeconds!(MAX_SECONDS - 14);
+    expect(mic().querySelector(".ac-rectime")!.textContent).toBe("4:46 · 14s left");
+    expect(mic().hasAttribute("data-warn")).toBe(true);
+    dispose();
+  });
+
+  it("Reply mid-clip stops, transcribes, then sends the box with the transcript", async () => {
+    const d = fakeDictation();
+    const reply = vi.fn(async () => ({ id: "n", author: "test@example.com", author_name: "Test", body: "", created_at: "2026-01-01T00:00:00Z" }));
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")], reply);
+    openCard("a");
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    const send = card("a").querySelector<HTMLButtonElement>("[data-send]")!;
+    expect(send.disabled, "an empty box can still send what is being said").toBe(false);
+    send.click();
+    expect(d.stop).toHaveBeenCalledTimes(1);
+    expect(reply).not.toHaveBeenCalled();
+    d.h!.onState("working");
+    d.h!.onText("ship it");
+    expect(reply).not.toHaveBeenCalled();
+    d.h!.onState("idle");
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(reply.mock.calls[0])).toContain("ship it");
+    dispose();
+  });
+
+  it("Enter mid-clip does the same, and a failed transcript sends nothing", async () => {
+    const d = fakeDictation();
+    const reply = vi.fn();
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")], reply);
+    openCard("a");
+    const ta = card("a").querySelector<HTMLTextAreaElement>("[data-reply]")!;
+    ta.value = "draft so far";
+    ta.dispatchEvent(new Event("input"));
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    expect(d.stop).toHaveBeenCalledTimes(1);
+    d.h!.onState("working");
+    d.h!.onError("Could not transcribe");
+    d.h!.onState("idle");
+    expect(reply).not.toHaveBeenCalled();
+    expect(ta.value).toBe("draft so far");
+    dispose();
+  });
+
+  it("stops the mic when the composer it belongs to goes away", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    document.querySelector<HTMLElement>("[data-fab='comments']")!.click(); // hide comments
+    expect(d.cancel).toHaveBeenCalledTimes(1);
+    dispose();
+  });
+
+  const selectText = (text: string) => {
+    // jsdom lays nothing out, so a Range has no geometry of its own.
+    Range.prototype.getBoundingClientRect = () => new DOMRect(10, 10, 80, 16);
+    const node = [...document.querySelectorAll("[data-arti-doc] p")].find((p) => p.textContent === text)!.firstChild!;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    return new Promise((r) => setTimeout(r, 0));
+  };
+  const floatMic = () => document.querySelector<HTMLButtonElement>(".ac-float [data-float='voice']")!;
+
+  it("opens the comment draft already recording from the selection's mic", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, []);
+    await selectText("First quote");
+    expect(floatMic().hidden).toBe(false);
+    floatMic().click();
+    const draft = document.querySelector<HTMLElement>("[data-draft]")!;
+    expect(draft.querySelector(".ac-q")!.textContent).toContain("First quote");
+    expect(d.start).toHaveBeenCalledTimes(1);
+    expect(draft.querySelector<HTMLButtonElement>(".ac-mic")!.dataset.state).toBe("recording");
+
+    d.h!.onText("needs a source");
+    d.h!.onState("idle");
+    const ta = document.querySelector<HTMLTextAreaElement>("[data-draftinput]")!;
+    expect(ta.value).toBe("needs a source");
+    expect(document.querySelector<HTMLButtonElement>("[data-draftsend]")!.disabled).toBe(false);
+    dispose();
+  });
+
+  it("opens the comment draft without recording from the selection's Comment button", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, []);
+    await selectText("First quote");
+    document.querySelector<HTMLButtonElement>(".ac-float [data-float='comment']")!.click();
+    expect(document.querySelector("[data-draft]")).not.toBeNull();
+    expect(d.start).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it("re-clamps a showing float when the mic appears late", async () => {
+    let ready!: (d: Dictation) => void;
+    const dispose = await mount(new Promise<Dictation>((r) => (ready = r)) as unknown as Dictation, []);
+    await selectText("First quote");
+    const float = document.querySelector<HTMLElement>(".ac-float")!;
+    expect(float.style.left).toBe("90px");
+    Object.defineProperty(float, "offsetWidth", { configurable: true, value: 128 });
+    ready(fakeDictation());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(floatMic().hidden).toBe(false);
+    expect(float.style.left).toBe("140px");
+    dispose();
+  });
+
+  it("hides the selection's mic without a dictation", async () => {
+    const dispose = await mount(undefined as unknown as Dictation, []);
+    await selectText("First quote");
+    expect(floatMic().hidden).toBe(true);
+    dispose();
+  });
+
+  it("renders no mic without a dictation", async () => {
+    const dispose = await mount(undefined as unknown as Dictation, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    expect(document.querySelector(".ac-mic")).toBeNull();
     dispose();
   });
 });

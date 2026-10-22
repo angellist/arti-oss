@@ -1,7 +1,7 @@
 ---
 title: Using the web UI
 order: 1
-summary: Browse and filter the catalog, upload artifacts, view TEXT/HTML/PACKAGE artifacts, switch versions, go full-page, and comment.
+summary: Browse and filter the catalog, run apps, upload or write artifacts, view, edit and compare versions, go full-page, comment, and manage settings.
 ---
 
 # Using the web UI
@@ -12,7 +12,13 @@ things, a main table of artifacts, and a viewer for each one. Everything the
 
 ## The left rail
 
-The rail on the left is where you search and filter. It runs in two modes.
+The rail on the left is where you search and filter. At the top it holds four
+entries — **Search**, **Apps** (the [apps portal](#apps)), **New** (write or
+upload an artifact) and **Settings** (see [Settings](#settings)). Your account
+sits at the foot of the rail, with **Log Out** in its menu. Drag the rail's
+right edge to resize it, or collapse it to a narrow strip of icons; both are
+remembered per browser. On a phone the rail becomes a drawer behind a menu
+button. The rail runs in two modes.
 
 ### Search and filter (catalog mode)
 
@@ -20,26 +26,29 @@ Search lives in a **reveal-on-demand bar** at the top of the listing, not in the
 rail. Open it with the **⌕ Search** item in the rail, press `/` anywhere on the
 catalog, or just start typing while it's open. The full-width box takes free text
 or `field:value` syntax; press **Enter** to run it, and **✕ close** to collapse
-it. Two toggles ride alongside — **latest version only** and **show archived**.
-See [Searching the catalog](search.md) for the full operator reference and
+it. Two toggles ride alongside — **latest version only** and **show archived** —
+and beside the box sit **Browse All** (see [Browse all](#browse-all)) and a `?`
+link to the search syntax. See [Searching the catalog](search.md) for the full operator reference and
 examples.
 
 The rail itself holds the filter groups:
 
 - **Filters** — two families in one row. The uppercase chips (`TEXT`, `PACKAGE`,
-  `APP`, `ATTACHMENT`) are artifact types; the lowercase ones (`markdown`,
+  `APP`, `ATTACHMENT`, `MAP`) are artifact types; the lowercase ones (`markdown`,
   `diagram`, `html`, `json`, `image`) filter by *body* type, and are
   exactly the families the viewer renders differently. `all` clears it. When
   you're logged in, a `👤 Owned by Me` chip filters to artifacts you created,
   and `🔖 Bookmarked` to the documents you bookmarked (the `bookmarked:me` token).
   These lowercase names also work as `type:` search tokens (`type:diagram`) and
   in the REST/MCP/CLI list filters.
+- **Popular labels** — the top labels by count. Each is a tri-state toggle:
+  click once to filter to it, again to *exclude* it, again to clear.
 - **Content types** — the exact content-type values that exist, with live counts,
-  when you want a specific one rather than a family.
-- **Scopes** — the most common [scopes](../overview/concepts.md#scope) by count.
-  Each is a tri-state toggle: click once to filter to it, again to *exclude* it,
-  again to clear.
-- **Popular labels** — the same tri-state toggle over the top labels.
+  when you want a specific one rather than a family. Same tri-state toggle.
+- **Scopes** — the most common [scopes](../overview/concepts.md#scope) by count,
+  with the same tri-state toggle.
+
+Each of the last three groups collapses from its heading.
 
 Filters and search compose, and the URL updates so a filtered view is shareable.
 A `× reset` link appears whenever any filter is on.
@@ -52,12 +61,25 @@ the selected file is highlighted. `◂ back to catalog` returns to the list.
 
 ## Browse all
 
-The **Browse All** link in the left rail opens `/browse` — a faceted index of the
-*whole* catalog rather than a filtered list. It shows every distinct **type**,
-**label**, **scope**, and **content type**, each with a count. Pick a facet at the
-top, sort by count or name, and click any value to jump straight into the catalog
-filtered to it. It's the fastest way to discover what labels and content types
-actually exist across all artifacts before you start filtering.
+The **Browse All** button in the search bar (or the `/browse` URL directly) opens
+a faceted index of the *whole* catalog rather than a filtered list. It shows every
+distinct **type**, **label**, **scope**, **content type**, **owner** and
+**creator**, each with a count. **Owner** counts the documents each person or
+service owns; **creator** counts the ones they wrote. Pick a facet at the top,
+choose whether to count only the latest version of each document or every
+version, narrow the values with the search box, sort by count or name, and click
+any value to jump straight into the catalog filtered to it. It's the fastest way
+to discover what labels and content types actually exist across all artifacts
+before you start filtering.
+
+## Apps
+
+**Apps** in the rail opens `/apps`, a card grid of every APP artifact (latest
+version per slug). Click a card to run the app; **ⓘ info** opens its artifact
+page. Above the grid, filter by name, slug, label or owner, toggle
+**👤 Owned by me** and **🔖 Bookmarked**, and sort by recently updated (the
+default), most views in the last 30 days, or most versions. Each card carries a
+bookmark toggle, the same bookmark as on the artifact page.
 
 ## The catalog table: columns
 
@@ -75,7 +97,8 @@ different browser starts fresh.
   entry resets columns, order, and widths in one go.
 
 Shown by default: **title**, **slug**, **v**, **creator**, **scope · labels**,
-**type**, **created**. Available to switch on:
+**type**, **views**, **created**. **views** counts page views across every
+version of the slug (hover for the last 30 days). Available to switch on:
 
 | Column | What it shows |
 | --- | --- |
@@ -99,6 +122,8 @@ Sorting is unchanged: click a header to sort by it. **archived** sorts like the
 default columns do; the rest of the opt-in columns have no server-side sort
 order behind them, so their headers are plain labels rather than buttons.
 
+On a phone the table is replaced by one card per artifact.
+
 **The header stays put.** The rows scroll inside the catalog rather than
 scrolling the whole page, so the header row is always on screen — as are the
 search bar above it and the paging bar below it, and the horizontal scrollbar
@@ -107,8 +132,10 @@ the list to the top.
 
 ## Uploading
 
-Click **Upload** in the rail to open the **Upload artifact** modal. (To write
-something instead of uploading a file, **New** sits right below — see
+Open **New › Upload a file** in the rail to open the **Upload artifact** modal.
+(In a PACKAGE's file view, an **Upload** button sits at the top of the rail
+instead. To write something rather than upload a file, pick one of the other
+**New** items — see
 [Creating artifacts in the browser](#creating-artifacts-in-the-browser).)
 
 1. **Drop or choose a file.** The drop zone reads *"Drag & drop a file here / or
@@ -120,10 +147,10 @@ something instead of uploading a file, **New** sits right below — see
 3. **Slug (optional)** is the stable handle. As you type, the modal tells you
    whether it's a new slug (uploads as v1) or an existing one (uploads as the
    next version).
-4. **Type** chips — `TEXT`, `PACKAGE`, `APP`, `ATTACHMENT` — with a one-line hint
-   each. It's auto-detected from the file; you rarely change it. (An APP is a zip
-   containing `arti-app.json`; an ATTACHMENT is a download-only binary with no
-   slug.)
+4. **Type** chips, with a one-line hint each. The file decides the type: a
+   text file is `TEXT`, any other single file is `ATTACHMENT`, and only a zip
+   offers a real choice, between `PACKAGE` and `APP` (an APP is a zip containing
+   `arti-app.json`). A MAP is never uploaded; it is created by writing keys.
 5. **Content type** is auto-detected (read-only).
 6. **Scopes** and **Labels** are chip inputs with typeahead from existing values.
 
@@ -133,7 +160,7 @@ closes the modal.
 ## Creating artifacts in the browser
 
 Upload brings a file in from outside. **New** writes one here. Hover (or click)
-**New** in the rail and pick a kind:
+**New** in the rail and pick a kind (each opens `/new/<kind>`):
 
 - **Text (Markdown)** — a markdown editor with a formatting toolbar and a
   **Write / Split / Preview** switch. The preview is rendered by the same
@@ -179,22 +206,25 @@ slug while you're typing.
 Click a row to open the viewer. A sticky header carries the metadata and
 controls; the body below renders the content.
 
-The header shows the title (click to rename if you're the creator or an admin),
-a bookmark button with its count, a type badge and content type, and a **slug chip** (`s/<slug> · v<version>`) that links to
-every version of that slug. Scopes (purple) and labels (gray) are shown as
-chips; creators and admins can add or remove them inline. Each chip is also a
-link that filters the catalog.
+The header shows the title (click to rename if you're the version's creator,
+the document's owner, or an admin), a bookmark button with its count, a type
+badge and content type, a **slug chip** (`s/<slug> · v<version>`) that links to
+every version of that slug, and on the right who wrote the version, its size and
+when it changed. Labels and scopes are shown as chips; the same people can add
+or remove them inline. Each chip is also a link that filters the catalog.
 
-The toolbar on the right gives you:
+The toolbar row below gives you:
 
 - **Width** — `Wide` / `Medium` / `Narrow` for the rendered content column. Hidden for rendered HTML, diagrams and maps, which always use `Wide`.
 - **Text size** — small / medium / large. Applies to HTML too, by zooming the page.
 - **Full Page** — opens the content edge-to-edge, via a stable, slug/version-friendly `?v=full` URL. Works for any renderable artifact and for a selected file inside a PACKAGE (any directory). **APP** artifacts show **Visit app ↗** in this slot instead — the running app is already the chrome-less view.
+- **Views** — how many times the document has been viewed, across every version
+  of the slug (hover for the last 30 days).
 - **Raw Source** — toggle between rendered and raw text.
-- **↓ Download** — the file (or `↓ zip` for a whole PACKAGE).
 - **Access** / **Edit Access** — a colored dot shows the access tier (public,
-  domain-restricted, or restricted). Clicking opens a modal that lists every
-  principal with access and its exact level. For creators/admins each row has a
+  domain-restricted, or restricted). Clicking opens a modal that names the
+  document's **owner** and lists every principal with access and its exact
+  level. For the owner and admins each row has a
   **Read** / **Read & write** control, and you can add an email, a `*@domain`,
   `*` for anyone who can sign in, a **group**, or an **SSO group** (`idp:` — the
   IdP groups your login carries, badged *SSO*). Read-only viewers see the same
@@ -206,8 +236,22 @@ The toolbar on the right gives you:
   changes stay local until you press **Confirm** (lit only when something
   actually changed) — **Cancel** or Esc throws them away. The dialog is a fixed
   size and the group typeahead is an overlay, so it never resizes or jumps as
-  you add entries.
-- **Archive** / **Unarchive** — soft-delete, for creators and admins.
+  you add entries. The owner (or an admin) also gets **Transfer…** beside the
+  owner's name: pick the new owner, and choose whether the outgoing owner keeps
+  read and write access. The new owner then controls access, comments and share
+  links.
+- **⋯** — the rest of the actions, shown only where they apply:
+  - **Share** — copy the page link, or create an external link; see
+    [Sharing a document](sharing.md).
+  - **Edit** — edit the source and save it as a new version; see
+    [Editing in the browser](#editing-in-the-browser).
+  - **Upload new version…** — see [Publishing one from the viewer](#publishing-one-from-the-viewer).
+  - **Compare versions** — see [Comparing versions](#comparing-versions).
+  - **Snapshot head** — on a MAP you can write to, freeze the live keys as a new version.
+  - **Download** — the file (or **Download zip** for a whole PACKAGE).
+  - **Copy UUID** / **Get UUID link** — see [Versions](#versions).
+  - **Comments** — the owner's switch to allow or turn off comments on the document.
+  - **Archive** / **Unarchive** — soft-delete, for the creator, the owner and admins.
 
 ### How each type renders
 
@@ -216,9 +260,12 @@ The toolbar on the right gives you:
 | **TEXT, markdown** | Rendered prose (sanitized). Frontmatter is shown separately; code blocks are highlighted and fenced `mermaid` blocks render as diagrams. |
 | **TEXT, HTML** | A **sandboxed `<iframe>`** with scripts allowed but *not* same-origin access — the page can't touch your session. |
 | **TEXT, code/JSON/YAML** | Monospace, as-is. |
+| **TEXT, diagram** | The rendered diagram; see [Drawing diagrams](diagrams.md). |
 | **PDF / image** | Native browser viewer / inline image. |
+| **Video / audio** | An inline player. |
 | **PACKAGE** | Pick a file from the rail's tree; it renders in the main area with a path strip on top. |
-| **ATTACHMENT** | A download card (no inline render). |
+| **ATTACHMENT** | Inline when the browser can show it (PDF, image, video, audio); otherwise a download card. |
+| **MAP** | A table of the live keys and values. Long values are clamped to three lines; click one to see its full JSON. |
 | **APP** | A live app — use **Visit app ↗** to open it. See the [app developer recipe](../recipes/app-developer.md). |
 
 ## Versions
@@ -269,6 +316,21 @@ full-page (`?v=full`), and inside a running APP at `/app/<slug>/<version>`. It's
 dismissible with the `×`. Embedded apps don't get it: the embedding surface pins
 its version deliberately and owns its own chrome.
 
+### Editing in the browser
+
+On a slugged TEXT document you can write to, **⋯ › Edit** replaces the body with
+the stored source. Markdown gets the same toolbar and **Write / Split / Preview**
+switch as [New › Text](#creating-artifacts-in-the-browser); JSON, YAML, code and
+plain text get a plain text box; a diagram opens its canvas. Saving publishes the
+edit as the next version of the slug — the version you were viewing is never
+changed — and keeps the document's labels, scopes and access.
+
+### Comparing versions
+
+**⋯ › Compare versions** (slugged TEXT and MAP documents) replaces the body with
+two version pickers over a side-by-side line diff, with the changed words
+highlighted inside each changed line. It only reads; nothing is written.
+
 ## Full-page view
 
 The **Full Page** button (and a direct `?v=full` on the URL) renders the content
@@ -287,6 +349,9 @@ specific file inside a PACKAGE). Omit the version to always open the latest.
   the in-viewer view.
 - **Images and PDFs** render inline (image / native PDF frame).
 
+A small **✕** in the top-right corner returns to the normal view. Beside it, a
+dot shows the access tier and opens the same access dialog as the viewer.
+
 ## Comments
 
 On rendered TEXT (markdown/code) and on HTML pages, you can comment directly on
@@ -298,24 +363,59 @@ the content:
   (copy a deep link) actions. Highlights are yellow when active, dimmed when
   resolved.
 
+The document's owner (or an admin) can turn comments off for the whole document
+from the **⋯** menu; the menu row shows the current state to everyone.
+
 Comments live alongside the artifact, not inside it — see
 [Comments](../architecture/comments.md) for how anchoring and resolution work.
-Note that comments are suppressed on individual files *inside* a PACKAGE (all
-files share one artifact id), and on non-text content.
+Inside a PACKAGE, HTML files get the in-page overlay, but other files (markdown,
+for example) get no comments, since all files share one artifact id. Non-text
+content gets no comments either.
 
 ## Settings
 
-The user menu (bottom of the left rail) links to **Settings**, a small admin/account
-area with its own sub-nav:
+**Settings** in the left rail opens a small account and admin area. Its sub-nav
+has two sections.
 
-- **API Keys** — mint, list, and revoke your own self-serve **upload-only** API keys
-  for programmatic access. Keys are shown once at creation; a yellow badge warns on the
-  user menu when one is within 7 days of expiring. See
+**General** — every signed-in user:
+
+- **API Keys** — generate, list, and revoke your own self-serve API keys for
+  programmatic access. A key has **Read + Upload** access as you: it can read
+  what you can read, create documents and publish new versions, but not edit
+  metadata, archive, or change access. A key is shown once, in the dialog that
+  generates it. A yellow **!** on the rail's Settings entry warns when one of
+  your keys is within 7 days of expiring. Holders of `MANAGE_API_KEYS` also get
+  an **All keys** tab beside **My keys**, with search, owner and status filters. See
   [Using the API](api.md#api-keys-self-serve) for the how-to.
 - **User Groups** — create and manage the named member sets used in access rules
   (everyone can manage their own; role-bearing groups need `MANAGE_USER_GROUPS`).
-- **Roles and Permissions** — visible only to holders of `MANAGE_ROLES`; assign roles
-  to users and groups.
+- **Notifications** — your own settings for the Slack messages arti sends you.
+- **Appearance** — **System**, **Light** or **Dark**. System follows your OS.
+  It applies to this browser only; HTML pages, apps and PDFs keep the styling
+  their author gave them.
+- **Archived** — soft-archived artifacts. You can unarchive your own; admins can
+  unarchive or permanently delete anyone's.
+- **Help & Docs** — these docs.
+
+**Admin** — each entry appears only to holders of its permission, and the
+heading only when at least one does:
+
+- **Users** (`MANAGE_ROLES`) — everyone arti knows about, with filters by text,
+  role, group and status, sortable columns and paging. From a row you can edit
+  the user's groups and **Deactivate** them, which refuses every sign-in,
+  session, API key and token for that email until they are reactivated; nothing
+  is deleted. Click an email to audit the user: their effective permissions and
+  every credential they hold (API keys, upload tokens, app connections, external
+  share links), each of which you can revoke. **+ Add user** records a principal
+  arti cannot derive from a sign-in, such as a service account.
+- **Roles and Permissions** (`MANAGE_ROLES`) — assign roles to users and groups.
+- **Blocked Documents** (`MANAGE_ARTIFACTS`) — the block list. A block takes a
+  document away from everyone, admins included, and refuses writes to its slug,
+  without changing the document; lifting the block restores it as it was.
+  Patterns match a slug, or the id of a slugless document, with `*` as a
+  wildcard.
+- **App Connectors** (`MANAGE_CONNECTORS`) — the MCP servers an APP may call
+  through arti.
 
 ## See also
 

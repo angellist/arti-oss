@@ -18,9 +18,9 @@ You hand content to `arti-server`. It writes the metadata row (and small TEXT bo
 
 1. Open your arti server (e.g. `https://arti.example.com/`) and sign in with
    your organization's identity provider.
-2. Use the upload control to add a file — markdown, HTML, plaintext, or a zip bundle.
+2. In the left rail, open **New › Upload a file** and add a file — markdown, HTML, plaintext, or a zip bundle. (To write markdown in the browser instead, pick **New › Text (Markdown)**.)
 3. Optionally set a **slug** (a stable name), a **title**, a **scope** (e.g. `topic:funds`), and **labels** (e.g. `report`).
-4. Submit. You land on the viewer at the artifact's URL — `/s/<slug>` if you gave a slug, otherwise `/a/<uuid>`. Copy that URL to share.
+4. Submit. You land on the viewer at the artifact's URL — `/s/<slug>/<version>` if you gave a slug, otherwise `/a/<uuid>`. Copy that URL to share, or drop the `/<version>` to link whatever is latest.
 
 See the [Web UI guide](../guides/web-ui.md) for the catalog, filtering, and the viewer in depth.
 
@@ -31,7 +31,7 @@ Install the binary and authenticate once (full detail in [Command line](../guide
 ```sh
 make build-cli                       # from a checkout of the repo
 cp bin/arti ~/.local/bin/arti        # any dir on your $PATH
-arti login                           # opens a browser, Google OAuth
+arti login                           # opens a browser to sign in
 ```
 
 ### 1. Upload
@@ -41,12 +41,12 @@ arti login                           # opens a browser, Google OAuth
 arti add notes.md --slug daily-notes --title "Daily notes"
 ```
 
-`arti add` prints the canonical URL to **stdout** (metadata goes to stderr), so it's pipe-friendly:
+`arti add` prints the canonical URL of the version it created to **stdout** (metadata goes to stderr), so it's pipe-friendly:
 
 ```sh
 URL=$(arti add notes.md --slug daily-notes --title "Daily notes")
 echo "$URL"
-# → https://arti.example.com/s/daily-notes
+# → https://arti.example.com/s/daily-notes/1
 ```
 
 You can also pipe from stdin or upload a whole directory (auto-zipped into a PACKAGE):
@@ -68,7 +68,7 @@ arti versions daily-notes                # lists v1, v2, …
 ### 3. Share and fetch
 
 ```sh
-arti url daily-notes                      # canonical link (latest)
+arti url daily-notes                      # canonical link to the latest version, pinned
 # → https://arti.example.com/s/daily-notes/2
 
 arti get daily-notes -q > out.md          # body only (latest), to a file

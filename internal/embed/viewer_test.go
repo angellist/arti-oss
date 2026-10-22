@@ -378,6 +378,9 @@ type versionSpyMinter struct{ onResolve func(*int32) }
 func (m *versionSpyMinter) EmbedUserApp(_ context.Context, _, _ string) (string, string, error) {
 	return "", "", nil
 }
+func (m *versionSpyMinter) MintEmbedHostToken(_ context.Context, _, _ string) (string, string, int32, error) {
+	return "", "", 0, nil
+}
 func (m *versionSpyMinter) MintEmbedUserToken(_ context.Context, _, _ string) (string, error) {
 	return "t", nil
 }
@@ -474,5 +477,100 @@ func TestGatePage_PollsEvenWhenWindowOpenReturnsNull(t *testing.T) {
 	}
 	if strings.Contains(js, "Allow pop-ups and try again") {
 		t.Fatal("gate page still tells Electron users to allow pop-ups, which is not their problem")
+	}
+}
+
+// sessionTok adds the viewer-session cookie to viewerTok; the "signed" value is
+// just surface/slug/email so the test can see what was pinned.
+type sessionTok struct{ viewerTok }
+
+func (sessionTok) MintEmbedViewerSession(email, surface, slug string) (string, error) {
+	return surface + "|" + slug + "|" + email, nil
+}
+
+func (sessionTok) VerifyEmbedViewerSession(tok, surface, slug string) (string, error) {
+	parts := strings.Split(tok, "|")
+	if len(parts) != 3 || parts[0] != surface || parts[1] != slug {
+		return "", errors.New("wrong slug")
+	}
+	return parts[2], nil
+}
+
+func getWithCookie(r chi.Router, target string, ck *http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.AddCookie(ck)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestViewerSession_TokenServeSetsPartitionedCookie(t *testing.T) {
+	tok := sessionTok{viewerTok{vEmail: "reader@x.com", vAID: "aid-1"}}
+	rec := get(viewerRouter(&fakeArt{serveOK: true}, tok), "/embed/v?slug=doc&t=TOKEN")
+
+	cks := rec.Result().Cookies()
+	if len(cks) != 1 {
+		t.Fatalf("want one cookie, got %d", len(cks))
+	}
+	ck := cks[0]
+	if !ck.Partitioned || !ck.Secure || !ck.HttpOnly || ck.SameSite != http.SameSiteNoneMode {
+		t.Fatalf("cookie must be Partitioned+Secure+HttpOnly+SameSite=None to survive in a Notion iframe and nowhere else: %+v", ck)
+	}
+	if ck.Path != "/embed/v" || ck.Value != "v|doc|reader@x.com" {
+		t.Fatalf("cookie not pinned to this surface + slug + viewer: path=%q value=%q", ck.Path, ck.Value)
+	}
+}
+
+func TestViewerSession_NoCookieWhenTokenDoesNotMatchSlug(t *testing.T) {
+	tok := sessionTok{viewerTok{vEmail: "reader@x.com", vAID: "aid-1"}}
+	rec := get(viewerRouter(&fakeArt{serveOK: true, pinMismatch: true}, tok), "/embed/v?slug=other&t=TOKEN")
+	if len(rec.Result().Cookies()) != 0 {
+		t.Fatal("a token consented for artifact A must not plant a cookie for slug B")
+	}
+}
+
+func TestViewerSession_NoCookieWhenAccessDenied(t *testing.T) {
+	tok := sessionTok{viewerTok{vEmail: "reader@x.com", vAID: "aid-1"}}
+	rec := get(viewerRouter(&fakeArt{serveOK: false}, tok), "/embed/v?slug=doc&t=TOKEN")
+	if len(rec.Result().Cookies()) != 0 {
+		t.Fatal("a denied serve must not set a cookie")
+	}
+}
+
+func TestViewerSession_CookieServesWithoutGate(t *testing.T) {
+	art := &fakeArt{serveOK: true}
+	ck := &http.Cookie{Name: viewerCookieName("doc"), Value: "v|doc|reader@x.com"}
+	rec := getWithCookie(viewerRouter(art, sessionTok{}), "/embed/v?slug=doc", ck)
+
+	if body := rec.Body.String(); body != "SERVED-VIEWER-COOKIE:doc:reader@x.com" {
+		t.Fatalf("want the doc served as the cookie's viewer, got %q", body)
+	}
+}
+
+func TestViewerSession_CookieForOtherSlugShowsGate(t *testing.T) {
+	art := &fakeArt{serveOK: true}
+	ck := &http.Cookie{Name: viewerCookieName("doc"), Value: "v|other|reader@x.com"}
+	rec := getWithCookie(viewerRouter(art, sessionTok{}), "/embed/v?slug=doc", ck)
+
+	if !strings.Contains(rec.Body.String(), "Sign in to view") || art.gotIdent != "" {
+		t.Fatal("a cookie minted for another slug must fall back to the gate without touching the artifact")
+	}
+}
+
+func TestViewerSession_DeniedCookieServeShowsGate(t *testing.T) {
+	ck := &http.Cookie{Name: viewerCookieName("doc"), Value: "v|doc|reader@x.com"}
+	rec := getWithCookie(viewerRouter(&fakeArt{serveOK: false}, sessionTok{}), "/embed/v?slug=doc", ck)
+
+	if !strings.Contains(rec.Body.String(), "Sign in to view") {
+		t.Fatal("a cookie whose viewer lost access must offer sign-in again, or the viewer is stuck until it expires")
+	}
+}
+
+func TestViewerSession_AppStillNeedsConsent(t *testing.T) {
+	ck := &http.Cookie{Name: viewerCookieName("app"), Value: "v|app|reader@x.com"}
+	rec := getWithCookie(viewerRouter(&fakeArt{serveOK: true, isApp: true}, sessionTok{}), "/embed/v?slug=app", ck)
+
+	if !strings.Contains(rec.Body.String(), "Sign in to view") {
+		t.Fatal("an APP runs tools as the viewer, so the cookie must not skip its consent")
 	}
 }

@@ -12,7 +12,7 @@ import (
 )
 
 const getAPIKeyByHash = `-- name: GetAPIKeyByHash :one
-SELECT id, key_hash, key_prefix, owner_email, name, scopes, created_at, expires_at, last_used_at, revoked_at FROM api_keys
+SELECT id, key_hash, key_prefix, owner_email, name, scopes, created_at, expires_at, last_used_at, revoked_at, minted_by FROM api_keys
 WHERE key_hash = $1 AND revoked_at IS NULL AND expires_at > now()
 `
 
@@ -31,14 +31,15 @@ func (q *Queries) GetAPIKeyByHash(ctx context.Context, keyHash []byte) (ApiKey, 
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.RevokedAt,
+		&i.MintedBy,
 	)
 	return i, err
 }
 
 const insertAPIKey = `-- name: InsertAPIKey :one
-INSERT INTO api_keys (key_hash, key_prefix, owner_email, name, scopes, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, key_hash, key_prefix, owner_email, name, scopes, created_at, expires_at, last_used_at, revoked_at
+INSERT INTO api_keys (key_hash, key_prefix, owner_email, name, scopes, expires_at, minted_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, key_hash, key_prefix, owner_email, name, scopes, created_at, expires_at, last_used_at, revoked_at, minted_by
 `
 
 type InsertAPIKeyParams struct {
@@ -48,8 +49,10 @@ type InsertAPIKeyParams struct {
 	Name       string
 	Scopes     []string
 	ExpiresAt  pgtype.Timestamptz
+	MintedBy   *string
 }
 
+// minted_by is NULL for a self-serve key (minted by its owner).
 func (q *Queries) InsertAPIKey(ctx context.Context, arg InsertAPIKeyParams) (ApiKey, error) {
 	row := q.db.QueryRow(ctx, insertAPIKey,
 		arg.KeyHash,
@@ -58,6 +61,7 @@ func (q *Queries) InsertAPIKey(ctx context.Context, arg InsertAPIKeyParams) (Api
 		arg.Name,
 		arg.Scopes,
 		arg.ExpiresAt,
+		arg.MintedBy,
 	)
 	var i ApiKey
 	err := row.Scan(
@@ -71,12 +75,13 @@ func (q *Queries) InsertAPIKey(ctx context.Context, arg InsertAPIKeyParams) (Api
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.RevokedAt,
+		&i.MintedBy,
 	)
 	return i, err
 }
 
 const listAPIKeysByOwner = `-- name: ListAPIKeysByOwner :many
-SELECT id, key_hash, key_prefix, owner_email, name, scopes, created_at, expires_at, last_used_at, revoked_at FROM api_keys WHERE LOWER(owner_email) = LOWER($1) ORDER BY created_at DESC
+SELECT id, key_hash, key_prefix, owner_email, name, scopes, created_at, expires_at, last_used_at, revoked_at, minted_by FROM api_keys WHERE LOWER(owner_email) = LOWER($1) ORDER BY created_at DESC
 `
 
 // Includes revoked (shown marked in the UI).
@@ -100,6 +105,7 @@ func (q *Queries) ListAPIKeysByOwner(ctx context.Context, lower string) ([]ApiKe
 			&i.ExpiresAt,
 			&i.LastUsedAt,
 			&i.RevokedAt,
+			&i.MintedBy,
 		); err != nil {
 			return nil, err
 		}
@@ -112,7 +118,7 @@ func (q *Queries) ListAPIKeysByOwner(ctx context.Context, lower string) ([]ApiKe
 }
 
 const listAllAPIKeys = `-- name: ListAllAPIKeys :many
-SELECT id, key_hash, key_prefix, owner_email, name, scopes, created_at, expires_at, last_used_at, revoked_at FROM api_keys ORDER BY created_at DESC
+SELECT id, key_hash, key_prefix, owner_email, name, scopes, created_at, expires_at, last_used_at, revoked_at, minted_by FROM api_keys ORDER BY created_at DESC
 `
 
 // Admin view. Pagination is a later follow-up.
@@ -136,6 +142,7 @@ func (q *Queries) ListAllAPIKeys(ctx context.Context) ([]ApiKey, error) {
 			&i.ExpiresAt,
 			&i.LastUsedAt,
 			&i.RevokedAt,
+			&i.MintedBy,
 		); err != nil {
 			return nil, err
 		}

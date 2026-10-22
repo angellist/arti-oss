@@ -79,8 +79,14 @@ Each call to the apps proxy runs through these checks:
    in its `tools` allowlist or the call is rejected.
 6. If the server is arti itself, run the tool in-process and stop here (see
    below). Otherwise resolve the named server to a server config (URL + auth
-   policy live server-side — the app names a server, it can't supply a URL),
-   then dispatch by that server's auth mode.
+   policy live server-side — the app names a server, it can't supply a URL).
+   An unknown or disabled server is refused, and so is a tool outside that
+   server's own tool allowlist when the admin set one. Then dispatch by the
+   server's auth mode.
+
+Every remote call names the calling app to the upstream as
+`params._meta.consumer` (`arti:<slug>`, or `arti:<uuid>` for a slugless app), so
+an upstream can attribute the work.
 
 One tool-call body is capped at 200 MiB, the same ceiling `POST /api/artifacts`
 has. An app writing an artifact through the proxy therefore has no tighter limit
@@ -90,8 +96,11 @@ survive that upstream's own limits.
 ## arti's own tools run in-process
 
 A call to the `arti` or `arti-self` server naming one of arti's own tools —
-every read, plus `add_artifact`, `append_artifact`, `update_artifact` and
-`archive_artifact` — is dispatched in-process instead of being forwarded. It
+every read, `add_artifact`, `append_artifact`, `update_artifact` and
+`archive_artifact`, the comment tools (`list_comments`, `add_comment`,
+`reply_to_comment`, `resolve_comment`) and the MAP tools (`map_get`, `map_put`,
+`map_delete`, `map_snapshot`) — is dispatched in-process instead of being
+forwarded. It
 runs as the viewer, so the handlers re-resolve their groups and access and the
 app reaches exactly what that person already can. There is no consent popup and
 no dependence on an `arti` connector: the branch sits
@@ -106,22 +115,57 @@ is a 409 here too; a target the viewer cannot see arrives as a 404, never a 403.
 
 ## Server auth modes
 
-Each configured server declares how arti authenticates the upstream call:
+Two servers are built in: `arti-self` and `llm`. Every other server is a
+**connector**: a row in the `app_mcp_servers` table that an admin with
+`MANAGE_CONNECTORS` adds, edits, disables or deletes at Settings → App
+Connectors. A connector names an `https` URL on a host the deployment allows
+(`ARTI_APP_MCP_ALLOWED_HOSTS`), its auth mode, and optionally a tool allowlist.
+`ARTI_APP_MCP_SERVERS` only seeds the table while it is empty. See
+[Connect your own MCP servers](../guides/self-hosting.md#mcp-servers).
 
-- **OBO (on-behalf-of)** — the tool runs as the viewer, with their upstream
-  permissions and audit trail. The viewer's per-user upstream token comes from
-  the OBO broker. No token yet → the proxy returns an `authorize_url`; the page
-  opens the consent popup and retries. Most built-in servers (notion, flowdash,
-  slack, linear, …) route here. arti's own tools do not — see above.
+Each server declares how arti authenticates the upstream call:
+
+- **OBO (on-behalf-of, `oauth`)** — the tool runs as the viewer, with their
+  upstream permissions and audit trail. The viewer's per-user upstream token
+  comes from the OBO broker. No token yet → the proxy returns an `authorize_url`;
+  the page opens the consent popup and retries. Connectors for per-user services
+  route here. arti's own tools do not — see above.
 - **Service** — the built-in `llm` server. Dispatched in-process to the Anthropic
   Messages API with arti's service key; no OBO. The viewer email is used only for
-  budgets and usage attribution. Serves exactly one tool, `complete`.
-- **None** — forwards no bearer. Resolves only under `ARTI_AUTH_DISABLED` (local
-  dev); not a real-deployment path.
+  budgets and usage attribution. Serves exactly one tool, `complete`. Budgets are
+  checked before each call: requests per minute and tokens per hour per viewer,
+  tokens per hour per app, tokens per day for the whole deployment, and an
+  optional dollar cap per viewer over a rolling day
+  (`ARTI_LLM_USD_PER_VIEWER_DAY`, off unless set). They count usage already
+  recorded, so the call that crosses a limit still runs and the next one is
+  refused.
+- **None** — forwards no bearer. The built-in `arti-self` uses it for its
+  non-in-process tools, which only succeed when auth is disabled (local dev);
+  an admin may also register a `none` connector for an upstream that needs no
+  per-user credential.
 
 For OBO and none, a minimal outbound MCP client runs one `initialize` +
 `tools/call` upstream. A 401 maps to a re-consent only for OBO servers; a none
 401 is a genuine upstream rejection.
+
+## Limits and errors
+
+- **Deadline.** Each call waits `timeout_ms` from the app (default 60 s), capped
+  at `ARTI_APP_CALL_TIMEOUT_MAX` (default 90 s). The clock starts at the tool
+  call, not at arti's own lookups. The cap stays below the edge proxies' read
+  timeouts, so the app gets arti's JSON error, not an edge error page.
+- **Concurrency.** One pod relays at most `ARTI_APP_CALL_MAX_INFLIGHT` remote
+  calls at once (default 16); past that a call gets `503 proxy_busy` with
+  `Retry-After: 1`.
+- **Response size.** An upstream answer over 16 MiB is refused.
+- **Error codes.** A refusal or upstream failure carries a stable `error` code
+  plus the `server` and `tool`, among them `not_allowlisted`, `unknown_server`,
+  `server_lookup_failed`, `upstream_timeout`, `upstream_response_too_large`,
+  `tool_error` and `upstream_error`. Every upstream-side failure is `503`, never
+  `502` or `504`, because an edge proxy that replaces those with its own HTML
+  page strips the CORS headers and the sandboxed page sees only
+  "Failed to fetch". A viewer who closes the page mid-call gets `499` and no
+  error log.
 
 ## OBO broker
 

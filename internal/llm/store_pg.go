@@ -9,10 +9,11 @@ import (
 // Budgets are the cost/abuse caps enforced from the shared ledger (so they hold
 // across all pods). A zero value means "no cap" for that dimension.
 type Budgets struct {
-	RPMPerViewer int   // requests / minute per viewer
-	TPHPerViewer int64 // tokens / hour per viewer
-	TPHPerApp    int64 // tokens / hour per app
-	TPDPerOrg    int64 // tokens / day, org-wide
+	RPMPerViewer    int   // requests / minute per viewer
+	TPHPerViewer    int64 // tokens / hour per viewer
+	TPHPerApp       int64 // tokens / hour per app
+	TPDPerOrg       int64 // tokens / day, org-wide
+	USDPerViewerDay int64 // whole dollars / rolling day per viewer, priced from cost_micros
 }
 
 // PGStore is the Postgres-backed usage ledger + budget gate. It is the source of
@@ -52,6 +53,13 @@ func (s *PGStore) OverBudget(ctx context.Context, viewer, appID string) (bool, i
 			`SELECT coalesce(sum(input_tokens+output_tokens),0) FROM llm_usage WHERE viewer_email=$1 AND created_at > now() - interval '1 hour'`,
 			s.b.TPHPerViewer, viewer); err != nil || over {
 			return over, 600, err
+		}
+	}
+	if s.b.USDPerViewerDay > 0 {
+		if over, err := s.tokensOver(ctx,
+			`SELECT coalesce(sum(cost_micros),0)::bigint FROM llm_usage WHERE viewer_email=$1 AND created_at > now() - interval '1 day'`,
+			s.b.USDPerViewerDay*1_000_000, viewer); err != nil || over {
+			return over, 3600, err
 		}
 	}
 	if s.b.TPHPerApp > 0 {

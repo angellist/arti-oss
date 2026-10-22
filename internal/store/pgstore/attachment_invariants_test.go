@@ -4,19 +4,26 @@ import "testing"
 
 func slugPtr(s string) *string { return &s }
 
-// The chat-upload case: couch posts a file with no slug, and it must come out
-// slugless and creator-only however the caller filled in the rest.
+// The chat-upload case: couch posts a file with no slug and no ACL, and it
+// comes out slugless and creator-only. A list inherited from a named slug is
+// clamped the same way; only a list the caller itself passed is kept.
 func TestAttachmentInvariants_ClampASluglessUpload(t *testing.T) {
-	got := applyAttachmentInvariants(PutInput{
-		ArtifactType:  TypeAttachment,
-		AllowedAccess: []string{"*"},
-		AllowedWrite:  nil,
-	})
-	if got.NamedSlug != nil {
-		t.Fatalf("want no slug, got %q", *got.NamedSlug)
-	}
-	if len(got.AllowedAccess) != 0 || got.AllowedWrite == nil || len(got.AllowedWrite) != 0 {
-		t.Fatalf("want creator-only access and write, got access=%v write=%v", got.AllowedAccess, got.AllowedWrite)
+	for _, tc := range []struct {
+		name string
+		in   PutInput
+		want []string
+	}{
+		{"omitted", PutInput{ArtifactType: TypeAttachment}, []string{}},
+		{"inherited", PutInput{ArtifactType: TypeAttachment, AllowedAccess: []string{"*"}, InheritAccess: true, InheritWrite: true}, []string{}},
+		{"explicit", PutInput{ArtifactType: TypeAttachment, AllowedAccess: []string{"alice@example.com", "couch@sa.arti.invalid"}}, []string{"alice@example.com", "couch@sa.arti.invalid"}},
+	} {
+		got := applyAttachmentInvariants(tc.in)
+		if got.NamedSlug != nil {
+			t.Fatalf("%s: want no slug, got %q", tc.name, *got.NamedSlug)
+		}
+		if len(got.AllowedAccess) != len(tc.want) || got.AllowedWrite == nil || len(got.AllowedWrite) != 0 {
+			t.Fatalf("%s: access=%v write=%v, want access=%v and creator-only writes", tc.name, got.AllowedAccess, got.AllowedWrite, tc.want)
+		}
 	}
 }
 
@@ -59,6 +66,7 @@ func TestAttachmentInvariants_KeepFlagWithoutASlugStillClamps(t *testing.T) {
 		ArtifactType:       TypeAttachment,
 		KeepAttachmentSlug: true,
 		AllowedAccess:      []string{"*"},
+		InheritAccess:      true,
 	})
 	if got.NamedSlug != nil || len(got.AllowedAccess) != 0 {
 		t.Fatalf("want the clamp, got slug=%v access=%v", got.NamedSlug, got.AllowedAccess)

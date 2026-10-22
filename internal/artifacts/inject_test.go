@@ -2,6 +2,7 @@ package artifacts
 
 import (
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -105,10 +106,38 @@ func TestWriteServedContentInjectsExternalLinkHandler(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s := NewService(nil, "http://x", nil, nil)
 
-	s.writeServedContent(rec, io.NopCloser(strings.NewReader("<html><body>links</body></html>")), "text/html", row, "", "", "", true)
+	s.writeServedContent(rec, httptest.NewRequest(http.MethodGet, "/", nil), io.NopCloser(strings.NewReader("<html><body>links</body></html>")), "text/html", row, "", "", "", true)
 
 	if !strings.Contains(rec.Body.String(), `source:"arti-open-external"`) {
 		t.Fatalf("served standalone HTML should carry external link handler, got %q", rec.Body.String())
+	}
+}
+
+func TestMediaAnswersRangeRequests(t *testing.T) {
+	s := NewService(nil, "http://x", nil, nil)
+	row := sqlc.Artifact{ArtifactID: pgtype.UUID{Valid: true}, ArtifactType: pgstore.TypeAttachment}
+	serve := map[string]func(http.ResponseWriter, *http.Request, string){
+		"artifact": func(w http.ResponseWriter, r *http.Request, ct string) {
+			s.writeServedContent(w, r, strings.NewReader("0123456789"), ct, row, "", "", "", false)
+		},
+		"package file": func(w http.ResponseWriter, r *http.Request, ct string) {
+			setContentSecurity(w, ct)
+			writePackageFileBody(w, r, ct, []byte("0123456789"))
+		},
+	}
+	for name, fn := range serve {
+		for ct, want := range map[string]int{"video/mp4": http.StatusPartialContent, "audio/mpeg": http.StatusPartialContent, "application/zip": http.StatusOK} {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Range", "bytes=0-1")
+			rec := httptest.NewRecorder()
+			fn(rec, req, ct)
+			if rec.Code != want {
+				t.Errorf("%s %s: status %d, want %d", name, ct, rec.Code, want)
+			}
+			if want == http.StatusPartialContent && (rec.Body.String() != "01" || rec.Header().Get("Content-Type") != ct) {
+				t.Errorf("%s %s: body %q content-type %q", name, ct, rec.Body.String(), rec.Header().Get("Content-Type"))
+			}
+		}
 	}
 }
 

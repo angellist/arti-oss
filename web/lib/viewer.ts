@@ -101,7 +101,7 @@ export function prettyPrintJSON(body: string): string {
 // dropping them in a <pre> is exactly the bug this split fixes (an image
 // attachment rendered as a wall of PNG noise). Mirrors NonTextBody's split in
 // the in-viewer body so the two render decisions can't drift.
-export type FullPageKind = "html" | "markdown" | "image" | "pdf" | "diagram" | "text" | "binary";
+export type FullPageKind = "html" | "markdown" | "image" | "video" | "audio" | "pdf" | "diagram" | "text" | "binary";
 
 export function fullPageKind(ct: string): FullPageKind {
   const base = ct.split(";")[0].trim().toLowerCase();
@@ -111,6 +111,8 @@ export function fullPageKind(ct: string): FullPageKind {
   // render the canvas, not the source.
   if (isDiagramContentType(base)) return "diagram";
   if (base.startsWith("image/")) return "image";
+  if (base.startsWith("video/")) return "video";
+  if (base.startsWith("audio/")) return "audio";
   if (base === "application/pdf") return "pdf";
   // Remaining textual types (plain text, json, yaml, js) render as text;
   // everything else is opaque bytes shown as a download.

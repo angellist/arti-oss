@@ -6,7 +6,7 @@ export default defineConfig({
   // its test does too.
   test: {
     environment: "node",
-    include: ["lib/**/*.test.{ts,tsx}", "components/**/*.test.{ts,tsx}", "*.test.{ts,tsx}"],
+    include: ["app/**/*.test.{ts,tsx}", "lib/**/*.test.{ts,tsx}", "components/**/*.test.{ts,tsx}", "*.test.{ts,tsx}"],
   },
   resolve: { alias: { "@": resolve(__dirname, ".") } },
 });

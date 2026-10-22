@@ -12,7 +12,8 @@ of its own. This page lists every variable and its default.
 
 Structured, non-secret settings can also come from an optional YAML file named
 by `ARTI_CONFIG_FILE`. Precedence is: built-in defaults → YAML file →
-environment variables. Secret-bearing settings (credentials, keys, tokens —
+environment variables. The YAML keys are the `yaml:` tags in `internal/config/config.go`;
+`config.example.yaml` in the repo root is a starting point. Secret-bearing settings (credentials, keys, tokens —
 including `ARTI_DATABASE_URL`) are environment-only; putting one in the YAML
 file fails startup as an unknown key, as does any typo'd key.
 
@@ -30,6 +31,7 @@ variable name and fix. `--config-only` skips network checks;
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `ARTI_CONFIG_FILE` | `""` | Path to the optional YAML configuration file (see above). Empty → environment and defaults only. |
 | `ARTI_ADDR` | `:8090` | TCP address the Go binary listens on. |
 | `ARTI_BASE_URL` | `http://localhost:8090` | Canonical hostname stamped into every emitted artifact URL and used to build OAuth/metadata absolute URLs. |
 | `ARTI_WEB_URL` | `""` | Upstream Next.js URL to reverse-proxy all non-API routes to. Empty → no FE proxy (the binary serves API/MCP only). |
@@ -58,6 +60,8 @@ tokens. See the [auth architecture](../architecture/auth.md).
 | `AUTH_ALLOWED_EMAILS` | `""` | Comma-separated email allowlist; applied on every auth path (OIDC, proxy, test-mode, device, OBO re-check). Each entry is either a **bare domain** (`example.com`, admitting everyone there) or a **full address** (`you@gmail.com`, admitting exactly that person) — mix freely. **Empty admits nobody** (fail closed; the server still starts, but no interactive login can succeed — `doctor` says so). Against a consumer IdP, always list addresses: a bare `gmail.com` admits every Google account on the internet. **Renamed from `AUTH_ALLOWED_DOMAINS`** when the list stopped being domain-only; the old name is refused at startup with a pointer to this one, rather than being ignored into an empty (admit-nobody) allowlist. |
 | `ARTI_ADMIN_EMAILS` | `""` | Comma-separated; the lockout-proof `ADMIN` floor (re-asserted on boot). Gates hard-delete and cross-creator archive. Empty → no administrators until configured. |
 | `ARTI_SERVICE_SECRET` | `""` | Optional service-to-service shared secret (sent as `X-Arti-Service-Secret`). Empty → s2s auth off. |
+| `ARTI_SERVICE_EMAIL` | `service@arti.invalid` | The identity attributed to callers that authenticate with `ARTI_SERVICE_SECRET`. |
+| `ARTI_LOGOUT_URL` | `""` | Where `/auth/logout` redirects after it clears the session, for example an SSO proxy's sign-out endpoint. Empty → `ARTI_BASE_URL`. |
 | `JWT_SIGNING_KEY` | `dev-key-not-for-prod` | HS256 key for CLI-pair, test-mode, device, and MCP-OAuth tokens. **The server refuses to boot** (unless `ARTI_AUTH_DISABLED=true`) if this is empty, the in-repo dev default, or shorter than 32 bytes — provision a strong secret in prod. |
 | `ARTI_TEST_MODE` | `false` | Enable `POST /auth/test` to mint HS256 tokens without Dex. **Dev only.** |
 | `ARTI_AUTH_DISABLED` | `false` | Skip auth entirely; every request is attributed to `ARTI_LOCAL_EMAIL`. **Never enable in prod.** |
@@ -99,9 +103,22 @@ Real S3 in prod, RustFS in dev. An empty `S3_ENDPOINT` targets AWS.
 | `S3_BUCKET` | *(required)* | Blob bucket name. |
 | `S3_ENDPOINT` | `""` | S3-compatible endpoint (scheme is stripped). Empty → AWS. |
 | `S3_REGION` | `us-east-1` | |
-| `S3_USE_SSL` | `false` | Use TLS to reach the endpoint. |
-| `AWS_ACCESS_KEY_ID` | `""` | Access key (RustFS: `admin` in dev). |
+| `S3_USE_SSL` | `true` | Use TLS to reach the endpoint. Set `false` only for a local plaintext store such as dev RustFS. |
+| `AWS_ACCESS_KEY_ID` | `""` | Access key (RustFS: `admin` in dev). Empty → the AWS SDK's ambient credential chain (instance or pod role, shared credentials file). |
 | `AWS_SECRET_ACCESS_KEY` | `""` | Secret key. |
+
+## Search (OpenSearch)
+
+Optional. With `OPENSEARCH_ENDPOINT` empty, search uses the Postgres fallback.
+See [OpenSearch](../operations/opensearch.md).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OPENSEARCH_ENDPOINT` | `""` | Full URL of the OpenSearch endpoint. Empty → OpenSearch off. |
+| `OPENSEARCH_USERNAME` | `""` | Basic-auth username. |
+| `OPENSEARCH_PASSWORD` | `""` | Basic-auth password. Environment-only. |
+| `REINDEX_BATCH_SIZE` | `100` | Page size of `arti-server reindex`. |
+| `OPENSEARCH_REGION` | `""` | AWS region. When it is set and `OPENSEARCH_USERNAME` is empty, requests are signed with AWS SigV4 from the ambient credential chain. |
 
 ## Apps & MCP
 
@@ -143,6 +160,19 @@ budget gate fails **closed** if the ledger is unreadable. See
 | `ARTI_LLM_TPH_PER_VIEWER` | `300000` | Tokens-per-hour cap per viewer. |
 | `ARTI_LLM_TPH_PER_APP` | `1000000` | Tokens-per-hour cap per app. |
 | `ARTI_LLM_TPD_PER_ORG` | `0` | Tokens-per-day cap per org (0 = no cap). |
+| `ARTI_LLM_USD_PER_VIEWER_DAY` | `0` | Spend cap per viewer over a rolling 24h, in whole US dollars, priced from the ledger's `cost_micros` (0 = no cap). |
+
+## Dictation (comment voice input) {#dictation}
+
+The mic in the comment box posts each clip to `POST /api/dictate`, which forwards it to
+OpenAI's transcription API. Empty `OPENAI_API_KEY` → the endpoint returns `501` and no mic
+renders. A recording stops itself at 5 minutes (`MAX_SECONDS` in `web/lib/dictation.ts`).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OPENAI_API_KEY` | `""` | Service key for OpenAI transcription. Empty → dictation disabled. |
+| `ARTI_DICTATION_LANGUAGE` | `""` | ISO-639-1 code sent with every clip (e.g. `en`). Empty → the model detects the language per clip. |
+| `ARTI_DICTATION_RPM_PER_VIEWER` | `20` | Clips per minute per viewer (0 = no cap). |
 
 ## Embed surfaces
 
@@ -152,7 +182,19 @@ shared secrets. Empty disables the `/embed/*` routes. See
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ARTI_EMBED_SURFACES` | `""` | JSON map `name → surface` (`{ secret, origin, identity, email, slug_allow, shell, shell_slug }`). `origin` is a string or a list of ancestor origins. `identity` is `"service"` (default; `email` required), `"user"` (tool calls run as the real viewer via a consent handshake; `email` must be omitted) or `"viewer"` (the document render itself is gated on the real viewer's ACL; `email` must be omitted, `shell` is rejected, and `secret` is optional because the URL is not a credential). A malformed surface fails startup. See [Embed surfaces](../architecture/front-embed.md). |
+| `ARTI_EMBED_SURFACES` | `""` | JSON map `name → surface` (`{ secret, origin, identity, email, slug_allow, shell, shell_slug, host_key }`). `origin` is a string or a list of ancestor origins. `identity` is `"service"` (default; `email` required), `"user"` (tool calls run as the real viewer via a consent handshake; `email` must be omitted) or `"viewer"` (the document render itself is gated on the real viewer's ACL; `email` must be omitted, `shell` is rejected, and `secret` is optional because the URL is not a credential). `host_key` (user mode only, ≥32 bytes, never client-visible) lets the embedding host's server mint a viewer's app token with `POST /embed/{surface}/host-token` and no consent click; the host vouches for the email. A malformed surface fails startup. See [Embed surfaces](../architecture/front-embed.md). |
+
+## Share links, MAP artifacts, and comments
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ARTI_SHARE_ENABLED` | `false` | Turn on external timed share links (`/share/…`), which let a person with no arti account read one document. Off → the routes are not mounted. |
+| `ARTI_SHARE_MAX_TTL` | `720h` | Longest lifetime a share link may be minted with (30 days). |
+| `ARTI_SHARE_OPEN_RPM` | `120` | Per-IP rate limit (requests/min) on opening share links. `0` disables. |
+| `ARTI_SHARE_MINT_RPM` | `30` | Per-IP rate limit (requests/min) on the share-link mint routes. `0` disables. |
+| `ARTI_MAP_ARTIFACTS` | `false` | Turn on the MAP artifact type (a keyed key/value store per slug). Off → the map routes refuse; stored entries are kept. |
+| `ARTI_COMMENTS_GLOBAL_RPM` | `30` | Comment writes per minute for one caller, across all artifacts. Keyed by principal, not IP. `0` disables. |
+| `ARTI_COMMENTS_ARTIFACT_RPM` | `10` | Comment writes per minute for one caller on one artifact. `0` disables. |
 
 ## Notifications
 
@@ -177,6 +219,9 @@ Read by the Next.js app, not `arti-server`.
 | Variable | Default | Meaning |
 |---|---|---|
 | `ARTI_DATABASE_URL` | *(required)* | Postgres connection string. |
+
+`arti-server reindex` needs `ARTI_DATABASE_URL`, `S3_BUCKET`, and
+`OPENSEARCH_ENDPOINT`, and refuses to start if any is missing.
 
 ## See also
 

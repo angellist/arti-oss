@@ -155,3 +155,14 @@ func TestMergeFilters_ContentType(t *testing.T) {
 		t.Errorf("NotContentType = %#v", in.NotContentType)
 	}
 }
+
+// `owner:` filters on the document owner, apart from `creator:`, and never
+// reaches the search index, which has no owner field.
+func TestMergeFilters_Owner(t *testing.T) {
+	filters, negated, rest := parseQuery("owner:couch@sa.arti.invalid memory")
+	var in pgstore.ListInput
+	mergeFilters(&in, filters, negated)
+	if in.Owner == nil || *in.Owner != "couch@sa.arti.invalid" || in.Creator != nil || rest != "memory" {
+		t.Fatalf("owner=%v creator=%v rest=%q", in.Owner, in.Creator, rest)
+	}
+}

@@ -8,6 +8,40 @@ and PATCH otherwise.
 Sections are generated from the commit subjects of the changes in each snapshot;
 entries describe only what ships in this repository.
 
+## 0.2.1 — 2026-10-22
+
+### Features
+
+- artifacts: a skill with no write list is owner-only
+- artifacts: protect skills through their write list, not a role
+- artifacts: service principals write on a person's behalf (DB migrate 0041)
+- auth: service principals with admin-minted keys (DB migrate 0040)
+- browse: owner facet counts document owners; creator facet and all-versions count
+- comments: dictation in the comment box, on every surface
+- comments: mic beside the selection's Comment button
+- comments: recording bar with a clock, 5-minute cap, and Reply that stops and sends
+- embed: remember a viewer-mode embed sign-in with a partitioned cookie
+- embed: trusted host mint for user-mode embed surfaces
+- llm: per-viewer daily dollar cap for llm.complete (`ARTI_LLM_USD_PER_VIEWER_DAY`, off by default)
+- rbac: READ_ORG_SHARED lets a service principal read org-wide docs (DB migrate 0042)
+- users: audit one user's credentials and revoke them from Settings → Users
+- web: access-mode dot beside the full-page exit button
+- web: API keys — My keys / All keys tabs, filters, sorting, clearer access label
+- web: generate API keys in a dialog and confirm before closing
+- web: play video and audio attachments inline
+- web: role, group and status filters on the Users page
+- web: roles page labels every permission, user typeahead
+- web: split Audit access and Deactivate into separate button columns
+- web: user permission window, sorting and pagination on the Users list
+
+### Fixes
+
+- web: roomier comment spacing; edit box matches display
+
+### Documentation and performance
+
+- bring the help docs up to date with main
+
 ## 0.2.0 — 2026-10-04
 
 ### Breaking changes

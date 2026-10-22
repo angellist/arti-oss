@@ -56,7 +56,7 @@ type AddCmd struct {
 	// WriteAccess is the subset of readers allowed to write (push new versions
 	// / append / edit). nil (flag absent) → writers follow readers (today's
 	// behavior). Server unions these into allowed_access. Repeat for multiple.
-	WriteAccess []string `name:"write-access" help:"write-access pattern (repeatable; subset of --access). Absent = writers follow readers"`
+	WriteAccess []string `name:"write-access" help:"write-access pattern (repeatable; subset of --access). Absent = writers follow readers (a skill: owner only)"`
 	// WritePrivate sends an explicit empty allowed_write ([]) = creator-only
 	// writes, while reads stay as --access/--private. Mutually exclusive with
 	// --write-access (which can't express the empty list).

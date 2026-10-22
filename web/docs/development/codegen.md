@@ -26,8 +26,11 @@ db/migrations/*.sql ─┘
 
 `sqlc.yaml` drives it:
 
-- `queries: db/queries` — the hand-written SQL (`artifacts.sql`, `comments.sql`,
-  `device_auth.sql`, `idempotency.sql`, `mcp_oauth.sql`).
+- `queries: db/queries` — the hand-written SQL (`api_keys.sql`, `app_settings.sql`,
+  `artifacts.sql`, `comments.sql`, `credential_usage.sql`, `device_auth.sql`,
+  `idempotency.sql`, `map_entries.sql`, `mcp_oauth.sql`, `share_links.sql`).
+  Not every query goes through sqlc: much of `internal/store/pgstore` runs
+  hand-written SQL through `pgx` directly.
 - `schema: db/migrations` — sqlc reads the goose migrations to know the table
   shapes. The migrations are the schema source of truth.
 - `out: gen/sqlc`, `package: sqlc`, `sql_package: pgx/v5`.

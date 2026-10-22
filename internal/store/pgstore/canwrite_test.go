@@ -22,6 +22,22 @@ func TestCanWrite_NullMirrorsRead(t *testing.T) {
 	}
 }
 
+func TestCanWrite_SkillWithNoWriteListIsOwnerOnly(t *testing.T) {
+	for _, label := range SkillLabels {
+		row := sqlc.Artifact{Creator: owner, Labels: []string{label}, AllowedAccess: []string{"*"}, AllowedWrite: nil}
+		if CanWrite(row, "alice@example.com", nil, owner) {
+			t.Errorf("%s: a reader of a skill with no write list must not write", label)
+		}
+		if !CanWrite(row, owner, nil, owner) {
+			t.Errorf("%s: the owner always writes", label)
+		}
+		row.AllowedWrite = []string{"alice@example.com"}
+		if !CanWrite(row, "alice@example.com", nil, owner) {
+			t.Errorf("%s: a writer the owner named must write", label)
+		}
+	}
+}
+
 func TestCanWrite_EmptyIsOwnerOnly(t *testing.T) {
 	// Non-nil empty slice → owner-only writes even though alice can read.
 	row := sqlc.Artifact{Creator: owner, AllowedAccess: []string{"alice@example.com"}, AllowedWrite: []string{}}

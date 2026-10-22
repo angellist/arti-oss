@@ -1,6 +1,7 @@
 -- name: InsertAPIKey :one
-INSERT INTO api_keys (key_hash, key_prefix, owner_email, name, scopes, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6)
+-- minted_by is NULL for a self-serve key (minted by its owner).
+INSERT INTO api_keys (key_hash, key_prefix, owner_email, name, scopes, expires_at, minted_by)
+VALUES ($1, $2, $3, $4, $5, $6, sqlc.narg('minted_by'))
 RETURNING *;
 
 -- name: GetAPIKeyByHash :one

@@ -102,3 +102,34 @@ func TestEmbedViewerToken_ScopeSeparation(t *testing.T) {
 		}
 	})
 }
+
+func TestEmbedViewerSession_PinnedToSurfaceAndSlug(t *testing.T) {
+	s := &Service{signer: auth.NewJWTSigner([]byte("test-signing-key-at-least-32-bytes!"))}
+	tok, err := s.MintEmbedViewerSession("reader@example.com", "notion-viewer", "doc-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if email, err := s.VerifyEmbedViewerSession(tok, "notion-viewer", "doc-a"); err != nil || email != "reader@example.com" {
+		t.Fatalf("want reader@example.com, got %q, %v", email, err)
+	}
+	if _, err := s.VerifyEmbedViewerSession(tok, "notion-viewer", "doc-b"); err == nil {
+		t.Fatal("a cookie for doc-a must not open doc-b")
+	}
+	if _, err := s.VerifyEmbedViewerSession(tok, "front-viewer", "doc-a"); err == nil {
+		t.Fatal("a cookie for one surface must not work on another")
+	}
+	if _, err := s.signer.Verify(tok); err == nil {
+		t.Fatal("the cookie value must never verify as a JWT, or it could be replayed as a bearer")
+	}
+}
+
+func TestEmbedViewerSession_EndsWhenViewerDeactivated(t *testing.T) {
+	s := &Service{signer: auth.NewJWTSigner([]byte("test-signing-key-at-least-32-bytes!"))}
+	tok, _ := s.MintEmbedViewerSession("gone@example.com", "notion-viewer", "doc-a")
+	auth.SetDeactivationCheck(func(email string) bool { return email == "gone@example.com" })
+	t.Cleanup(func() { auth.SetDeactivationCheck(nil) })
+
+	if _, err := s.VerifyEmbedViewerSession(tok, "notion-viewer", "doc-a"); err == nil {
+		t.Fatal("an offboarded viewer must lose the embed at once, not when the 7-day cookie expires")
+	}
+}

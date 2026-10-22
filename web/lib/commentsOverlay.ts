@@ -33,6 +33,7 @@ import {
 } from "./commentsGeometry";
 import { createMentionMenu, mentionHTML, MENTION_CSS, type MentionResult } from "./mentionMenu";
 import { linkify } from "./linkify";
+import { formatElapsed, MAX_SECONDS, spliceAtCaret, WARN_SECONDS, type Dictation, type DictationState } from "./dictation";
 
 // The overlay talks to the server through this small interface so it can be
 // driven by either the cookie-based client (in-app viewer) or a token-based
@@ -73,6 +74,9 @@ export interface OverlayOpts {
   me: { email: string; name?: string; picture?: string; is_admin: boolean } | null;
   allowPin?: boolean; // point/pin comments are HTML-only
   api?: CommentsApi; // defaults to the cookie-based client
+  // Absent → no mic. A promise when readiness is only known later (the served
+  // page waits on its parent's handshake).
+  dictation?: Dictation | Promise<Dictation>;
 }
 
 const AV = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
@@ -94,6 +98,8 @@ const ICON_PATHS = {
   link: `<path d="M10.3 13.7a3.75 3.75 0 0 0 5.3 0l2.4-2.4a3.75 3.75 0 0 0-5.3-5.3l-1.2 1.2"/><path d="M13.7 10.3a3.75 3.75 0 0 0-5.3 0L6 12.7a3.75 3.75 0 0 0 5.3 5.3l1.2-1.2"/>`,
   min: `<path d="M5.6 12h12.8"/>`,
   ok: `<path d="M5.4 12.6l4.3 4.3 8.9-9.5"/>`,
+  mic: `<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/>`,
+  spin: `<path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/>`,
   // Shared by the rail's comments toggle, the minimized-thread marker and the
   // selection's floating Comment button — one bubble, drawn once. Its y values
   // are the drawn shape's, lifted 0.75 units from the obvious ones (12.5 /
@@ -161,9 +167,9 @@ const CSS = `
 .ac-cmt-acts:has(.ac-copied),.ac-grp:has(.ac-copied){opacity:1}
 .ac-cmt.ac-flash{border-radius:6px;animation:ac-flash 1.7s ease-out}
 @keyframes ac-flash{0%,25%{background:rgba(250,204,21,.45)}100%{background:transparent}}
-.ac-edit-input{font:inherit;font-size:12.5px;width:100%;border:1px solid #2563eb;border-radius:6px;padding:5px 8px;background:#fff;resize:none;min-height:32px}
+.ac-edit-input{display:block;font:inherit;font-size:12.5px;line-height:1.5;color:#33332e;width:100%;border:1px solid #2563eb;border-radius:6px;padding:6px 8px;margin-top:6px;background:#fff;resize:none;min-height:32px}
 .ac-edit-input:focus{outline:none}
-.ac-edit-acts{display:flex;gap:4px;margin-top:4px}
+.ac-edit-acts{display:flex;gap:4px;margin-top:6px}
 .ac-panel{position:fixed;width:${CARD_WIDTH}px;max-height:70vh;overflow:auto;pointer-events:auto;background:rgba(255,255,255,.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(230,229,225,.8);border-radius:13px;box-shadow:0 10px 34px -12px rgba(40,40,30,.34);padding:6px}
 .ac-panel h4{margin:8px 8px 4px;font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:#9b9b95;font-weight:600}
 .ac-prow{display:flex;align-items:flex-start;gap:8px;padding:8px;border-radius:9px;cursor:pointer}
@@ -193,7 +199,7 @@ const CSS = `
 /* overflow-wrap:anywhere, not break-word: only the former shrinks the
    element's min-content width, so a pasted URL wraps instead of widening the
    flex row past the card. Both break the line; only one stops the overflow. */
-.ac-text{font-size:12.5px;line-height:1.5;color:#33332e;margin-top:3px;white-space:pre-wrap;overflow-wrap:anywhere}
+.ac-text{font-size:12.5px;line-height:1.5;color:#33332e;margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere}
 .ac-text .ac-url{color:#2563eb;text-decoration:underline;text-underline-offset:2px}
 .ac-text .ac-url:hover{text-decoration-thickness:2px}
 /* The composer is a separate object from the discussion above it, so it sits
@@ -213,6 +219,28 @@ const CSS = `
 .ac-mini:disabled{cursor:not-allowed}
 .ac-mini.ac-primary:disabled{background:#e8e7e3;border-color:#e2e1dd;color:#a9a8a3;box-shadow:none}
 .ac-empty{font-size:12px;color:#9b9b95;font-style:italic}
+.ac-mic{margin-left:auto;width:28px;height:28px;padding:0;border-radius:50%;border:1px solid #e6e5e1;background:#fff;color:#6b6b66;display:grid;place-items:center;cursor:pointer;transition:color .12s,border-color .12s,background-color .12s}
+.ac-mic svg{width:15px;height:15px}
+.ac-mic:hover:not(:disabled){border-color:#2563eb;color:#1d4ed8}
+/* Recording, the mic widens into a bar up to the send button: clock, wave, stop.
+   Cancel steps aside for it; Esc still discards the clip. */
+.ac-mic[data-state="recording"]{flex:1 1 auto;min-width:0;width:auto;border-radius:999px;display:flex;align-items:center;gap:8px;padding:0 4px 0 10px;border-color:#2563eb;color:#1d4ed8;background:rgba(37,99,235,.10)}
+.ac-mic[data-state="recording"]:hover{background:rgba(37,99,235,.18)}
+.ac-mic[data-warn]{border-color:#dc2626;color:#dc2626;background:rgba(220,38,38,.10)}
+.ac-mic[data-warn]:hover:not(:disabled){border-color:#dc2626;color:#dc2626;background:rgba(220,38,38,.16)}
+.ac-acts:has(>.ac-mic[data-state="recording"])>.ac-mini:not(.ac-primary){display:none}
+.ac-rectime{flex:0 0 auto;font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ac-rectime small{font-size:10.5px;font-weight:500;opacity:.85}
+.ac-mic .ac-wave{flex:1 1 auto;min-width:0;justify-content:flex-end;overflow:hidden;gap:2px}
+.ac-mic .ac-wave i{flex:0 0 2.5px}
+.ac-recstop{flex:0 0 18px;height:18px;border-radius:50%;background:currentColor;display:grid;place-items:center}
+.ac-recstop::after{content:"";width:6px;height:6px;border-radius:1.5px;background:#fff}
+.ac-mic[data-state="working"]{border-color:#2563eb;background:#2563eb;color:#fff;cursor:default}
+.ac-mic[data-state="working"] svg{animation:ac-spin 1s linear infinite}
+@keyframes ac-spin{to{transform:rotate(360deg)}}
+.ac-wave{display:inline-flex;align-items:center;gap:2.5px;height:16px}
+.ac-wave i{width:2.5px;height:3px;border-radius:2px;background:currentColor;transform-origin:center;transition:transform .06s linear}
+@media (prefers-reduced-motion:reduce){.ac-mic[data-state="working"] svg{animation:none}.ac-wave i{transition:none}}
 /* The comment rail: one 26px-wide segmented capsule pinned to the right edge,
    vertically centered. It replaces the old stack of 46px circles — same
    controls at a third of the mass, and it never collides with the card column
@@ -241,13 +269,17 @@ const CSS = `
 .ac-badge{display:none;height:22px;font-size:9.5px;font-weight:700;font-style:normal;color:#9b9b95;background:#f6f5f2;border-top:1px solid #efeeea;place-items:center}
 .ac-fabs.ac-has .ac-badge{display:grid}
 .ac-float{position:fixed;z-index:80;transform:translateX(-100%);display:none;font-family:Inter,system-ui,sans-serif}
-.ac-float.ac-show{display:block}
-.ac-float button{font:inherit;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px;color:#fff;background:rgba(37,99,235,.86);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:none;border-radius:8px;padding:7px 12px;cursor:pointer;box-shadow:0 4px 14px -4px rgba(37,99,235,.5)}
+.ac-float.ac-show{display:flex;height:28px;border-radius:8px;overflow:hidden;background:rgba(37,99,235,.86);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);box-shadow:0 4px 14px -4px rgba(37,99,235,.5)}
+.ac-float button{font:inherit;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px;color:#fff;background:transparent;border:none;padding:0 11px;cursor:pointer}
+.ac-float button:hover{background:#1d4ed8}
+.ac-float button:focus-visible{outline:2px solid rgba(255,255,255,.9);outline-offset:-3px}
 /* Size the bubble like every other icon site — an inline \`icon()\` SVG carries
    no intrinsic width, so without this it collapses (Chromium) or renders at the
    300x150 replaced-element default (Firefox). 13px matches .ac-min, the other
    bubble-beside-text control. */
 .ac-float svg{display:block;width:13px;height:13px}
+.ac-float .ac-float-mic{padding:0 9px;border-left:1px solid rgba(255,255,255,.28)}
+.ac-float .ac-float-mic[hidden]{display:none}
 .ac-zoomable{cursor:zoom-in}
 .ac-zoomable:hover{outline:2px solid rgba(37,99,235,.45);outline-offset:2px}
 .ac-lb{position:fixed;inset:0;z-index:90;background:rgba(22,22,20,.74);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:grid;place-items:center;pointer-events:auto;font-family:Inter,system-ui,sans-serif}
@@ -356,6 +388,11 @@ html.ac-dark .ac-edit-input{border-color:#3b82f6}
 html.ac-dark .ac-mini{color:#dcdbd6;background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.14)}
 html.ac-dark .ac-mini.ac-primary{background:#2563eb;border-color:#2563eb;color:#fff}
 html.ac-dark .ac-mini.ac-primary:disabled{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.12);color:#75746f}
+html.ac-dark .ac-mic{color:#dcdbd6;background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.14)}
+html.ac-dark .ac-mic[data-state="recording"]{color:#93b4fb;border-color:#2563eb;background:rgba(37,99,235,.22)}
+html.ac-dark .ac-mic[data-warn]{color:#fca5a5;border-color:#dc2626;background:rgba(220,38,38,.22)}
+html.ac-dark .ac-recstop::after{background:#1c1c1a}
+html.ac-dark .ac-mic[data-state="working"]{color:#fff;border-color:#2563eb;background:#2563eb}
 html.ac-dark .ac-ico{color:#8b8a85}
 html.ac-dark .ac-ico:hover{color:#f2f1ee;background:rgba(255,255,255,.12)}
 html.ac-dark .ac-ico:focus-visible{outline-color:rgba(255,255,255,.3)}
@@ -507,7 +544,10 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   const layer = el("div", "ac-layer");
   const fabs = el("div", "ac-fabs");
   const floatEl = el("div", "ac-float");
-  floatEl.innerHTML = `<button>${icon("bubble")}<span>Comment</span></button>`;
+  floatEl.innerHTML =
+    `<button type="button" data-float="comment">${icon("bubble")}<span>Comment</span></button>` +
+    `<button type="button" class="ac-float-mic" data-float="voice" title="Comment by voice" aria-label="Comment by voice" hidden>${icon("mic")}</button>`;
+  const floatMic = floatEl.querySelector<HTMLButtonElement>('[data-float="voice"]')!;
   fabs.innerHTML =
     `<button class="ac-grip" data-rail-grip type="button" title="Drag to move · double-click to recenter" aria-label="Move comment controls: drag, or focus and use the arrow keys; Enter recenters">${icon("grip")}</button>` +
     `<button class="ac-fab" data-fab="comments" aria-pressed="false" title="Show / hide comments" aria-label="Show or hide comments">${icon("bubble")}</button>` +
@@ -541,6 +581,146 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   // the key shield (see shieldKey) short-circuits, so the shield re-delivers to
   // it through this handle. null whenever no lightbox is open.
   let lightboxKeydown: ((e: KeyboardEvent) => void) | null = null;
+
+  // ── dictation ───────────────────────────────────────────────────────
+  // One clip at a time, keyed by the composer it belongs to ("r:<tid>",
+  // "draft", "lr:<tid>", "ld"). Held here, not in the DOM: render() rebuilds
+  // the cards mid-recording, so the button's look and the box the text lands
+  // in are both found again by key.
+  let dictation: Dictation | null = null;
+  // "starting" until the recorder reports "recording": the mic or the parent's record prompt may still be pending.
+  let clip: {
+    key: string;
+    state: Exclude<DictationState, "idle"> | "starting";
+    levels: number[];
+    seconds: number;
+    sendAfter?: () => void; // Reply/Enter pressed mid-clip: send once the transcript lands
+  } | null = null;
+  const composerSync = new WeakMap<HTMLTextAreaElement, () => void>();
+  if (opts.dictation) {
+    void Promise.resolve(opts.dictation).then((d) => {
+      if (dead) return;
+      dictation = d;
+      floatMic.hidden = !d;
+      positionFloat(); // the pair just got wider; re-clamp a float already showing
+      render();
+    });
+  }
+  const MIC_LABEL: Record<DictationState | "starting", string> = { idle: "Dictate", starting: "Cancel dictation", recording: "Stop and transcribe", working: "Transcribing" };
+  const WAVE_BARS = 48; // more than a card row fits; the wave clips from the left
+  const micHTML = (key: string) =>
+    dictation ? `<button type="button" class="ac-mic" data-mic="${AV(key)}" data-state="idle" title="Dictate" aria-label="Dictate">${icon("mic")}</button>` : "";
+  const micFor = (key: string) => document.querySelector<HTMLButtonElement>(`.ac-mic[data-mic="${key}"]`);
+  const composerFor = (key: string) =>
+    micFor(key)?.closest(".ac-card,.ac-lb-card")?.querySelector<HTMLTextAreaElement>(".ac-reply textarea") ?? null;
+  // Looked up at send time: a render() mid-clip replaces the button the user pressed.
+  const sendFor = (key: string) => micFor(key)?.closest(".ac-acts")?.querySelector<HTMLButtonElement>(".ac-primary") ?? null;
+  function paintMic(b: HTMLButtonElement) {
+    const st = clip && clip.key === b.dataset.mic ? clip.state : "idle";
+    if (b.dataset.state !== st || !b.firstElementChild) {
+      b.dataset.state = st;
+      b.disabled = st === "working";
+      b.title = MIC_LABEL[st];
+      b.setAttribute("aria-label", MIC_LABEL[st]);
+      b.innerHTML =
+        st === "recording"
+          ? `<span class="ac-rectime"></span><span class="ac-wave" aria-hidden="true">${"<i></i>".repeat(WAVE_BARS)}</span><span class="ac-recstop" aria-hidden="true"></span>`
+          : icon(st === "idle" ? "mic" : "spin");
+    }
+    if (st !== "recording") return b.removeAttribute("data-warn");
+    const { levels, seconds } = clip!;
+    const left = MAX_SECONDS - seconds;
+    const warn = left <= WARN_SECONDS;
+    b.toggleAttribute("data-warn", warn);
+    const time = b.querySelector<HTMLElement>(".ac-rectime")!;
+    const text = formatElapsed(seconds) + (warn ? ` <small>· ${left}s left</small>` : "");
+    if (time.innerHTML !== text) time.innerHTML = text;
+    const off = WAVE_BARS - levels.length;
+    b.querySelectorAll<HTMLElement>(".ac-wave i").forEach((i, n) => (i.style.transform = `scaleY(${1 + (levels[n - off] ?? 0) * 5})`));
+  }
+  const paintMics = () => document.querySelectorAll<HTMLButtonElement>(".ac-mic").forEach(paintMic);
+  const resyncComposer = (key: string) => {
+    const ta = composerFor(key);
+    if (ta) composerSync.get(ta)?.();
+  };
+  function cancelDictation() {
+    if (!clip) return;
+    const key = clip.key;
+    clip = null;
+    dictation?.cancel();
+    paintMics();
+    resyncComposer(key);
+  }
+  // The composer a clip belongs to can go away under it (card closed, draft
+  // cancelled, lightbox card dismissed); its mic must not stay open.
+  const dropOrphanClip = () => {
+    if (clip && !composerFor(clip.key)) cancelDictation();
+  };
+  function insertDictated(key: string, text: string) {
+    const ta = composerFor(key);
+    if (!ta) return;
+    // A box rebuilt by render() reports a caret at 0; append there instead.
+    const focused = document.activeElement === ta;
+    const start = focused ? ta.selectionStart : ta.value.length;
+    const { value, caret } = spliceAtCaret(ta.value, start, focused ? ta.selectionEnd : start, text);
+    ta.value = value;
+    ta.focus();
+    ta.setSelectionRange(caret, caret);
+    ta.dispatchEvent(new Event("input")); // autosize, send-enabled, and the draft's saved text
+  }
+  // Reply or Enter while a clip is live: finish the clip, then send what the box holds.
+  function stopAndSend(key: string, send: () => void) {
+    if (!clip || clip.key !== key) return send();
+    if (clip.state === "starting") {
+      cancelDictation(); // nothing recorded yet
+      return send();
+    }
+    clip.sendAfter = send;
+    if (clip.state === "recording") dictation?.stop();
+  }
+  function toggleDictation(key: string) {
+    if (!dictation) return;
+    if (clip?.key === key) {
+      if (clip.state === "recording") dictation.stop();
+      else if (clip.state === "starting") cancelDictation();
+      return;
+    }
+    cancelDictation();
+    clip = { key, state: "starting", levels: [], seconds: 0 };
+    paintMics();
+    const mine = clip;
+    const live = () => clip === mine;
+    dictation.start({
+      onState: (st) => {
+        if (!live()) return;
+        if (st === "idle") clip = null;
+        else mine.state = st;
+        paintMics();
+        resyncComposer(key);
+        if (st === "idle") mine.sendAfter?.();
+      },
+      onLevel: (v) => {
+        if (!live()) return;
+        mine.levels = [...mine.levels.slice(1 - WAVE_BARS), v];
+        const b = micFor(key);
+        if (b) paintMic(b);
+      },
+      onSeconds: (s) => {
+        if (!live()) return;
+        mine.seconds = s;
+        const b = micFor(key);
+        if (b) paintMic(b);
+      },
+      onText: (text) => {
+        if (live()) insertDictated(key, text);
+      },
+      onError: (m) => {
+        if (!live()) return;
+        mine.sendAfter = undefined; // a failed transcript sends nothing
+        toast(m);
+      },
+    });
+  }
 
   // ── per-thread "minimize" ───────────────────────────────────────────
   // A text thread can be tucked from its full margin card down to a tiny
@@ -907,7 +1087,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     const acts =
       t.status === "resolved"
         ? `<div class="ac-acts"><button class="ac-mini" data-reopen="${t.id}">↩ Reopen</button></div>`
-        : `<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-reply="${t.id}"></textarea></div><div class="ac-acts ac-onfocus"><button class="ac-mini ac-primary" data-send="${t.id}" disabled>Reply</button></div>`;
+        : `<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-reply="${t.id}"></textarea></div><div class="ac-acts ac-onfocus"><button class="ac-mini ac-primary" data-send="${t.id}" disabled>Reply</button>${micHTML(`r:${t.id}`)}</div>`;
     return `<div class="ac-card ac-active${resolvedCls}" data-tid="${t.id}">${header}${cmts}${acts}${strip}</div>`;
   }
   // Minimized text thread: a compact pill in the column; click restores the card.
@@ -931,7 +1111,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // The draft card is born focused, so its buttons show from the start — but
     // Comment stays disabled until there's something to post (wireComposer).
     const empty = !(draft!.text || "").trim();
-    return `<div class="ac-card ac-draft ac-composing" data-draft="1">${chip}<div class="ac-reply"><textarea rows="1" placeholder="Write a comment…" data-draftinput autofocus>${AV(draft!.text || "")}</textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-draftsend${empty ? " disabled" : ""}>Comment</button><button class="ac-mini" data-draftcancel>Cancel</button></div></div>`;
+    return `<div class="ac-card ac-draft ac-composing" data-draft="1">${chip}<div class="ac-reply"><textarea rows="1" placeholder="Write a comment…" data-draftinput autofocus>${AV(draft!.text || "")}</textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-draftsend${empty ? " disabled" : ""}>Comment</button><button class="ac-mini" data-draftcancel>Cancel</button>${micHTML("draft")}</div></div>`;
   }
   function render() {
     // Recompute the left-bias on every render — INCLUDING the comments-hidden
@@ -948,6 +1128,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       layer.innerHTML = "";
       setScrollPad(0); // no cards shown → drop the extra scroll area
       wireMarks(); // keep existing highlights clickable; clicking one turns comments on
+      dropOrphanClip();
       return;
     }
     if (panelOpen) {
@@ -974,6 +1155,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     wireMarks();
     wireAvatars(layer);
     place();
+    dropOrphanClip();
   }
 
   // All-comments panel — the only place resolved threads remain visible.
@@ -1165,7 +1347,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // bottom-right; the popup stays open.
     let card: HTMLElement | null = null;
     let cardAnchor: HTMLElement | null = null; // the pin element the open card tracks
-    const clearCard = () => { if (card) { card.remove(); card = null; } cardAnchor = null; };
+    const clearCard = () => { if (card) { card.remove(); card = null; } cardAnchor = null; dropOrphanClip(); };
     function repositionCard() { if (card && cardAnchor) positionCard(cardAnchor); }
     function onResize() { if (isVector) fitVector(); repositionCard(); }
     function positionCard(anchorEl: HTMLElement) {
@@ -1186,7 +1368,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       const cmts = t.comments.map((c) => `<div class="ac-cmt">${avatar(c.author, c.author_name, c.author_picture)}<div style="flex:1;min-width:0"><div><span class="ac-who">${AV(displayName(c.author, c.author_name))}</span></div><div class="ac-text">${BODY(c.body)}</div></div></div>`).join("");
       // Same control language as the margin card: resolve is a ✓ in the corner,
       // and Reply only appears (enabled) once the composer holds text.
-      card.innerHTML = `<span class="ac-chip">${icon("pin")} pin ${num}</span>${cmts}<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-r></textarea></div><div class="ac-acts ac-onfocus"><button class="ac-mini ac-primary" data-rs disabled>Reply</button></div><div class="ac-card-acts"><button class="ac-ico ac-resolve" data-rv title="Resolve thread" aria-label="Resolve thread">${icon("ok")}</button></div>`;
+      card.innerHTML = `<span class="ac-chip">${icon("pin")} pin ${num}</span>${cmts}<div class="ac-reply"><textarea rows="1" placeholder="Reply…" data-r></textarea></div><div class="ac-acts ac-onfocus"><button class="ac-mini ac-primary" data-rs disabled>Reply</button>${micHTML(`lr:${t.id}`)}</div><div class="ac-card-acts"><button class="ac-ico ac-resolve" data-rv title="Resolve thread" aria-label="Resolve thread">${icon("ok")}</button></div>`;
       const inp = card.querySelector<HTMLTextAreaElement>("[data-r]")!;
       autosize(inp); inp.addEventListener("input", () => { if (autosize(inp)) repositionCard(); });
       // This card is clamped to its pin, not stacked in the margin — so the
@@ -1209,7 +1391,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     function showDraftCard(rx: number, ry: number, dp: HTMLElement) {
       clearCard();
       card = el("div", "ac-lb-card");
-      card.innerHTML = `<span class="ac-chip">${icon("pin")} new pin</span><div class="ac-reply"><textarea rows="1" placeholder="Write a comment…" data-i></textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-c disabled>Comment</button><button class="ac-mini" data-x>Cancel</button></div>`;
+      card.innerHTML = `<span class="ac-chip">${icon("pin")} new pin</span><div class="ac-reply"><textarea rows="1" placeholder="Write a comment…" data-i></textarea></div><div class="ac-acts"><button class="ac-mini ac-primary" data-c disabled>Comment</button><button class="ac-mini" data-x>Cancel</button>${micHTML("ld")}</div>`;
       const inp = card.querySelector<HTMLTextAreaElement>("[data-i]")!;
       let committing = false;
       const commit = async () => {
@@ -1643,10 +1825,14 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     send: HTMLButtonElement | null,
     reflow: () => void = placeRevealing,
   ) {
+    const mic = ta.closest(".ac-card,.ac-lb-card")?.querySelector<HTMLButtonElement>(".ac-mic") ?? null;
+    const live = () => !!clip && clip.key === mic?.dataset.mic;
     const sync = () => {
       const has = ta.value.trim().length > 0;
-      if (send) send.disabled = !has;
-      const shown = has || document.activeElement === ta;
+      if (send) send.disabled = !has && !live();
+      // A live clip keeps the row up: with an empty box, the blur the mic's own
+      // click would cause otherwise hides the button being clicked.
+      const shown = has || document.activeElement === ta || live();
       if (card && card.classList.contains("ac-composing") !== shown) {
         card.classList.toggle("ac-composing", shown);
         reflow(); // the row appearing/vanishing changes the card's height
@@ -1655,6 +1841,21 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     ta.addEventListener("input", sync);
     ta.addEventListener("focus", sync);
     ta.addEventListener("blur", sync);
+    composerSync.set(ta, sync);
+    if (mic) {
+      mic.onmousedown = (e) => e.preventDefault(); // keep the caret in the box
+      // stopPropagation: the press repaints the button, detaching the glyph that
+      // was clicked, and the card/document handlers would read that as a click
+      // off the controls and collapse the card.
+      mic.onclick = (e) => { e.stopPropagation(); toggleDictation(mic.dataset.mic!); };
+      paintMic(mic);
+      // Capture phase, ahead of each composer's own send handlers.
+      send?.addEventListener("click", (e) => {
+        if (!live()) return;
+        e.stopImmediatePropagation();
+        stopAndSend(mic.dataset.mic!, () => sendFor(mic.dataset.mic!)?.click());
+      }, true);
+    }
     sync();
     // Every composer goes through here — margin reply, draft card, and both
     // lightbox pin composers — so this is the one place the @-menu has to be
@@ -1939,7 +2140,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // Google-Docs-style: a compact Comment button at the BOTTOM-RIGHT of the
     // selection (right edge at the selection end via CSS translateX(-100%)).
     // Clamp the left so it stays on-screen for selections near the left edge.
-    floatEl.style.left = Math.min(Math.max(rect.right, 128), window.innerWidth - 12) + "px";
+    floatEl.style.left = Math.min(Math.max(rect.right, floatEl.offsetWidth + 12), window.innerWidth - 12) + "px";
     floatEl.style.top = (rect.bottom + 8) + "px";
   }
 
@@ -1957,7 +2158,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       positionFloat();
     }, 0);
   }
-  (floatEl.firstChild as HTMLButtonElement).onclick = () => {
+  function openTextDraft(voice: boolean) {
     if (!pendingRange || !container) return;
     const quote = pendingRange.toString().trim().slice(0, 160);
     const start = offsetOf(pendingRange.startContainer, pendingRange.startOffset);
@@ -1971,7 +2172,10 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     panelOpen = false;
     revealPending = true; // a selection near the bottom edge opens its composer below the fold
     render();
-  };
+    if (voice) toggleDictation("draft");
+  }
+  floatEl.querySelector<HTMLButtonElement>('[data-float="comment"]')!.onclick = () => openTextDraft(false);
+  floatMic.onclick = () => openTextDraft(true);
 
   // Arm/disarm pin mode in one place: keeps the FAB state, the crosshair
   // cursor, and the float button in sync.
@@ -2127,6 +2331,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
   // pin mode (the crosshair) so a stray click won't drop a pin.
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key !== "Escape") return;
+    if (clip) { cancelDictation(); return; } // Esc discards the clip, and only the clip
     if (draft) { cancelDraft(); return; }
     if (mode === "pin") setPinMode(false);
   };
@@ -2279,6 +2484,16 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     // or, in the lightbox, never reached the menu at all because the Escape
     // branch below claims the key first and closes the card.
     if (e.type === "keydown" && mentions?.key(e)) return;
+    if (e.type === "keydown" && e.key === "Escape" && clip) {
+      cancelDictation();
+      return;
+    }
+    if (e.type === "keydown" && e.key === "Enter" && !e.shiftKey && clip && e.target === composerFor(clip.key)) {
+      e.preventDefault();
+      const key = clip.key;
+      stopAndSend(key, () => sendFor(key)?.click());
+      return;
+    }
     if (e.type === "keydown" && lightboxKeydown && e.key === "Escape") {
       lightboxKeydown(e); // closes the open card / lightbox, and consumes the key
       return;
@@ -2315,6 +2530,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
 
   return () => {
     dead = true;
+    cancelDictation();
     cancelCollapse();
     mentions?.destroy(); // the menu lives on document.body, outside the layer
     dragAbort?.abort(); // drop a rail drag still holding window listeners

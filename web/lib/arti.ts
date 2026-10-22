@@ -1,4 +1,4 @@
-import { ArtifactInfo, ArtifactListResponse, McpServer, McpServerApp, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Block, BlockedDoc, BlockedDocDetail, Group, IdpGroup, Me, Role, RoleAssignment, RosterResponse, RosterUser, UserAccess, ApiKey, CreatedApiKey, CredentialUsage, NotificationSettings, DeploymentNotificationSwitch, ShareLink, MintedShare, ShareOpen, DenialInfo } from "./types";
+import { ArtifactInfo, ArtifactListResponse, McpServer, McpServerApp, AggregatesResponse, BrowseAggregatesResponse, BrowseFacet, PackageManifest, ArtifactType, Block, BlockedDoc, BlockedDocDetail, Group, IdpGroup, Me, Role, RoleAssignment, RosterResponse, RosterUser, UserAccess, CredentialAudit, AuditCredentialKind, ApiKey, CreatedApiKey, CredentialUsage, NotificationSettings, DeploymentNotificationSwitch, ShareLink, MintedShare, ShareOpen, DenialInfo } from "./types";
 
 // hasPerm reports whether `me` holds an RBAC permission key. Prefer this over
 // the bare is_admin flag for capability gating so a non-ADMIN role carrying a
@@ -42,7 +42,7 @@ export class ArtiError extends Error {
 // One helper for every call site, rather than the parse being inlined in the
 // few that bothered: sharing it is the only thing that keeps the 17 throw sites
 // from drifting apart again.
-async function errorFrom(resp: Response): Promise<ArtiError> {
+export async function errorFrom(resp: Response): Promise<ArtiError> {
   let detail = "";
   let code = "";
   try {
@@ -320,6 +320,7 @@ export interface BrowseAggregatesParams {
   dir?: SortDir;
   page?: number;
   page_size?: number;
+  versions?: "latest" | "all";
 }
 
 export async function getBrowseAggregates(
@@ -332,6 +333,7 @@ export async function getBrowseAggregates(
   if (params.dir) qs.set("dir", params.dir);
   if (params.page) qs.set("page", String(params.page));
   if (params.page_size) qs.set("page_size", String(params.page_size));
+  if (params.versions === "all") qs.set("versions", "all");
   return http<BrowseAggregatesResponse>(`/api/artifacts/aggregates/browse?${qs}`, undefined, cookie);
 }
 
@@ -1034,6 +1036,22 @@ export async function setUserActive(email: string, active: boolean): Promise<Ros
     throw await errorFrom(resp);
   }
   return resp.json();
+}
+
+export async function getCredentialAudit(email: string): Promise<CredentialAudit> {
+  return http<CredentialAudit>(`/api/users/access?email=${encodeURIComponent(email)}`);
+}
+
+export async function revokeUserCredential(email: string, kind: AuditCredentialKind, id: string): Promise<void> {
+  const resp = await fetch(`/api/users/access/revoke`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, kind, id }),
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
 }
 
 export async function lookupUserAccess(email: string): Promise<UserAccess> {

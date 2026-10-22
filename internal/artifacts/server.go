@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -96,10 +97,17 @@ type Service struct {
 	// deploy carrying the code exposes nothing until the flag flips; turning
 	// it off is this feature's backout and leaves stored entries untouched.
 	mapEnabled bool
+	// dictation mirrors whether POST /api/dictate has a provider key, so the
+	// comment box can leave its mic out when it would only 501.
+	dictation bool
 }
 
 // SetMapEnabled turns the MAP artifact type on. Off by default.
 func (s *Service) SetMapEnabled(on bool) { s.mapEnabled = on }
+
+// SetDictationEnabled tells /api/me and the served-HTML comment overlay that
+// POST /api/dictate is live.
+func (s *Service) SetDictationEnabled(on bool) { s.dictation = on }
 
 // SetNotifier wires the Slack notifier used to tell a new owner they have been
 // given a document. Optional: nil leaves transfers silent.
@@ -195,6 +203,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 	}
 	if req.Title == "" || req.ContentType == "" {
 		return ArtifactInfo{}, errBadRequest("title and content_type are required")
+	}
+	author, err := s.actingFor(ctx, creator, req.NamedSlug)
+	if err != nil {
+		return ArtifactInfo{}, err
 	}
 
 	at := req.ArtifactType
@@ -308,7 +320,6 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 		scopes = parseLegacyScope(*req.Scope)
 	}
 	labels := req.Labels
-	var prevLabels []string
 	var access []string
 	if req.AllowedAccess != nil {
 		access = *req.AllowedAccess
@@ -331,7 +342,6 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 			if err := s.checkWriteAccess(ctx, prev, creator); err != nil {
 				return ArtifactInfo{}, err
 			}
-			prevLabels = prev.Labels
 			if req.EnsureNew {
 				var v int32
 				if prev.Version != nil {
@@ -375,14 +385,6 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 		// labels to empty and access to ['*'].
 	}
 
-	// Skill artifacts (kind:skill) are write-guarded — create or version only by
-	// MANAGE_SKILLS / MANAGE_ARTIFACTS holders. Check the final labels AND the
-	// prior version's labels, so versioning a skill while dropping the tag from
-	// the request still trips the guard.
-	if err := s.requireSkillWrite(ctx, creator, labels, prevLabels); err != nil {
-		return ArtifactInfo{}, err
-	}
-
 	// Set inside the CheckAccess hook when this publish carries an ACL that
 	// differs from the slug's fresh prior version — i.e. Put will fan the new
 	// pair out to the siblings (DD-0055 D3) — so the sync below knows to
@@ -407,7 +409,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 		Description:        req.Description,
 		ContentType:        req.ContentType,
 		Content:            content,
-		Creator:            creator,
+		Creator:            author.creator(creator),
+		Owner:              author.owner(creator),
+		AssertedBy:         author.owner(creator),
 		WrittenVia:         auth.CredentialFromContext(ctx).Ref(),
 		WrittenViaName:     auth.CredentialFromContext(ctx).Label,
 		Scopes:             scopes,
@@ -489,6 +493,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 // (slug, version) unique constraint forces a retry loop; persistent
 // contention surfaces as ErrConflict (mapped to HTTP 409).
 func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, creator string) (info ArtifactInfo, cached bool, err error) {
+	author, err := s.actingFor(ctx, creator, &slug)
+	if err != nil {
+		return ArtifactInfo{}, false, err
+	}
 	if creator == "" {
 		return ArtifactInfo{}, false, errBadRequest("missing creator (auth required)")
 	}
@@ -539,13 +547,8 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 		}
 	}
 
-	// Skill write-guard — placed AFTER the idempotency replay so a retry of an
-	// already-cached append replays verbatim instead of being rejected (the
-	// first, successful append already passed this check). Versioning OR
-	// auto-creating a kind:skill artifact requires MANAGE_SKILLS /
-	// MANAGE_ARTIFACTS; check the request's labels and the existing slug's
-	// labels (if any).
-	var prevLabels []string
+	// Placed AFTER the idempotency replay so a retry of an already-cached append
+	// replays verbatim instead of being rejected.
 	if prev, perr := s.store.GetBySlug(ctx, slug, nil); perr == nil {
 		// Appending to an existing slug requires WRITE access to it — see the
 		// matching check in Create.
@@ -554,10 +557,6 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 		}
 		// ACL-change authority is enforced race-safely in the Append
 		// CheckAccess hook below (re-run against fresh prev each retry).
-		prevLabels = prev.Labels
-	}
-	if err := s.requireSkillWrite(ctx, creator, req.Labels, prevLabels); err != nil {
-		return ArtifactInfo{}, false, err
 	}
 
 	var sep []byte
@@ -576,7 +575,9 @@ func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, cr
 		NamedSlug:      slug,
 		Separator:      sep,
 		Content:        []byte(req.Content),
-		Creator:        creator,
+		Creator:        author.creator(creator),
+		Owner:          author.owner(creator),
+		AssertedBy:     author.owner(creator),
 		WrittenVia:     auth.CredentialFromContext(ctx).Ref(),
 		WrittenViaName: auth.CredentialFromContext(ctx).Label,
 		ContentType:    req.ContentType,
@@ -708,7 +709,7 @@ func errIdempotencyStale(key string, artifactID uuid.UUID, cause error) error {
 // Also used to gate versioning an existing slug (Create/Append): read and
 // write access are the same thing — anyone who can see a version can push
 // the next one. Metadata edits (title/labels/scopes/allowed_access) and
-// archive/unarchive stay creator-or-admin only; this does not touch those.
+// archive/unarchive have their own rules (UpdateMetadata, CanArchiveID).
 //
 // Archive policy: non-admins can't see soft-deleted artifacts EVEN IF
 // they would otherwise have access — only the creator (and admins) get
@@ -724,9 +725,17 @@ func (s *Service) checkAccess(ctx context.Context, row sqlc.Artifact, caller str
 		return nil
 	}
 	if row.DeletedAt.Valid && !strings.EqualFold(row.Creator, caller) {
-		return pgstore.ErrNotFound
+		// The document's owner also sees its archived versions, so it can restore
+		// what it archived.
+		isOwner, err := s.store.IsDocOwner(ctx, row, caller)
+		if err != nil {
+			return err
+		}
+		if !isOwner {
+			return pgstore.ErrNotFound
+		}
 	}
-	groups, err := s.store.CallerGroups(ctx, caller)
+	groups, err := s.store.ReadTokens(ctx, caller)
 	if err != nil {
 		// A real lookup failure must not silently deny (which a non-admin
 		// would see as 404); surface it so the handler returns 500.
@@ -884,12 +893,15 @@ func checkWriteAccessWith(row sqlc.Artifact, caller string, auth writeAuthority)
 	if auth.admin {
 		return nil
 	}
-	if row.DeletedAt.Valid && !strings.EqualFold(row.Creator, caller) {
-		return pgstore.ErrNotFound
-	}
 	owner := auth.owner
 	if owner == "" {
 		owner = row.Creator
+		if row.AssertedBy != nil {
+			owner = *row.AssertedBy
+		}
+	}
+	if row.DeletedAt.Valid && !strings.EqualFold(row.Creator, caller) && !strings.EqualFold(owner, caller) {
+		return pgstore.ErrNotFound
 	}
 	if pgstore.CanWrite(row, caller, auth.groups, owner) {
 		return nil
@@ -917,14 +929,6 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID, caller string) (Artifac
 func (s *Service) infoWithWrite(ctx context.Context, row sqlc.Artifact, caller string) ArtifactInfo {
 	info := ToInfo(row, s.baseURL)
 	cw := s.checkWriteAccess(ctx, row, caller) == nil
-	// Versioning a kind:skill artifact additionally requires the skill
-	// write-guard (MANAGE_SKILLS / MANAGE_ARTIFACTS); reflect that here so the
-	// viewer doesn't offer Edit to a plain writer whose Create would 403.
-	if cw {
-		if err := s.requireSkillWrite(ctx, caller, row.Labels); err != nil {
-			cw = false
-		}
-	}
 	info.CanWrite = &cw
 	if owner, err := s.store.DocOwner(ctx, row); err == nil && owner != "" {
 		info.Owner = &owner
@@ -937,16 +941,12 @@ func (s *Service) infoWithWrite(ctx context.Context, row sqlc.Artifact, caller s
 	// The predicate UpdateMetadata enforces, published so the viewer stops
 	// re-deriving edit rights from `creator` — which names whoever pushed this
 	// version and, on a transferred document, answers for the wrong person in
-	// both directions. isDocOwner already covers admin, and the kind:skill
-	// write-guard applies to title/labels/scopes there too, so reduce on it
-	// exactly as CanWrite does above.
-	cem := isOwner || strings.EqualFold(row.Creator, caller)
-	if cem {
-		if err := s.requireSkillWrite(ctx, caller, row.Labels); err != nil {
-			cem = false
-		}
-	}
+	// both directions. isDocOwner already covers admin.
+	cem := isOwner || holdsCreatorAuthority(row, caller)
 	info.CanEditMetadata = &cem
+	if ca, err := s.canArchiveRow(ctx, caller, row); err == nil {
+		info.CanArchive = &ca
+	}
 	// can_share must agree with what MintShare will actually allow, so it runs
 	// the same gate rather than re-deriving from ownership alone: minting adds
 	// an ambiguous-lineage refusal that the comment switch does not have.
@@ -1073,6 +1073,7 @@ func (s *Service) Search(ctx context.Context, q string, in pgstore.ListInput) (L
 	// archive-inclusive candidate set, which is the correct composition.
 	//
 	// `bookmarked:` stays on Postgres too: bookmarks live only in artifact_bookmarks.
+	// So does `owner:`: ownership lives in artifact_owners, not in the index.
 	//
 	// A `via:` filter stays on Postgres for a different reason: the index has
 	// no written_via field, and EnsureIndex never revises the mapping of an
@@ -1081,7 +1082,7 @@ func (s *Service) Search(ctx context.Context, q string, in pgstore.ListInput) (L
 	// with other credentials' documents. `via:` is an audit filter, where
 	// missing a document costs more than losing relevance ranking.
 	if q != "" && in.OrderBy == "" && s.osClient.Enabled() &&
-		!(in.LatestPerSlug && in.IncludeArchived) && in.WrittenVia == nil && in.BookmarkedBy == nil {
+		(!in.LatestPerSlug || !in.IncludeArchived) && in.WrittenVia == nil && in.BookmarkedBy == nil && in.Owner == nil {
 		osResult, err := s.osSearch(ctx, q, in)
 		if err == nil {
 			return osResult, nil
@@ -1519,7 +1520,7 @@ func (s *Service) callerForList(ctx context.Context) (string, error) {
 // from this list/search caller. Admins (MANAGE_ARTIFACTS → empty caller via
 // callerForList) already see everything. MANAGE_SKILLS holders are also exempt
 // so an app's service identity (e.g. couch's service@) can build its skill
-// catalog from List(kind:skill). Everyone else is hidden.
+// catalog from List(skill). Everyone else is hidden.
 func (s *Service) appCouchHidden(ctx context.Context, caller string) (bool, error) {
 	if caller == "" {
 		return false, nil
@@ -1547,17 +1548,18 @@ func (s *Service) HasPermission(ctx context.Context, caller string, p rbac.Permi
 	return s.store.HasPermission(ctx, caller, p)
 }
 
-// CallerGroups proxies the store's group-token resolution so the MCP list/
-// search surface can populate ListInput.CallerGroups (group-granted artifacts
-// must show in the catalog there too).
-func (s *Service) CallerGroups(ctx context.Context, caller string) ([]string, error) {
-	return s.store.CallerGroups(ctx, caller)
+// ReadTokens proxies the store's read-token resolution for the MCP list/search.
+// Read only: never pass it to CanWrite.
+func (s *Service) ReadTokens(ctx context.Context, caller string) ([]string, error) {
+	return s.store.ReadTokens(ctx, caller)
 }
 
 // CanArchiveSlug decides whether `caller` may archive the WHOLE slug. exists is
-// false when the slug has no live version (→ 404). allowed requires either
-// MANAGE_ARTIFACTS or that the caller created every live version (since
-// slug-archive soft-deletes them all). Shared by the REST + MCP archive paths.
+// false when the slug has no live version (→ 404). allowed requires
+// MANAGE_ARTIFACTS, the slug's owner, or that the caller created every live
+// version (since slug-archive soft-deletes them all). A skill also needs current
+// write access: archiving its latest version rolls the skill back. Shared by the
+// REST + MCP archive paths.
 func (s *Service) CanArchiveSlug(ctx context.Context, caller, slug string) (allowed, exists bool, err error) {
 	admin, err := s.canManageArtifacts(ctx, caller)
 	if err != nil {
@@ -1570,7 +1572,55 @@ func (s *Service) CanArchiveSlug(ctx context.Context, caller, slug string) (allo
 	if total == 0 {
 		return false, false, nil
 	}
-	return admin || foreign == 0, true, nil
+	if admin {
+		return true, true, nil
+	}
+	latest, err := s.store.GetBySlug(ctx, slug, nil)
+	if err != nil {
+		return false, true, err
+	}
+	allowed, err = s.archiveAuthority(ctx, latest, caller, foreign == 0)
+	return allowed, true, err
+}
+
+// CanArchiveID decides whether `caller` may archive or unarchive one version: an
+// admin, its creator, or its document's owner; a skill also needs current write
+// access. Shared by the REST + MCP archive and unarchive paths.
+func (s *Service) CanArchiveID(ctx context.Context, caller string, id uuid.UUID) (bool, error) {
+	row, err := s.store.GetByID(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return s.canArchiveRow(ctx, caller, row)
+}
+
+func (s *Service) canArchiveRow(ctx context.Context, caller string, row sqlc.Artifact) (bool, error) {
+	admin, err := s.canManageArtifacts(ctx, caller)
+	if err != nil || admin {
+		return admin, err
+	}
+	return s.archiveAuthority(ctx, row, caller, holdsCreatorAuthority(row, caller))
+}
+
+// archiveAuthority is the non-admin rule both archive deciders share. byCreator
+// says the caller authored what is being archived.
+func (s *Service) archiveAuthority(ctx context.Context, row sqlc.Artifact, caller string, byCreator bool) (bool, error) {
+	isOwner, err := s.store.IsDocOwner(ctx, row, caller)
+	if err != nil {
+		return false, err
+	}
+	if !byCreator && !isOwner {
+		return false, nil
+	}
+	if pgstore.IsSkill(row.Labels) {
+		if err := s.checkWriteAccess(ctx, row, caller); err != nil {
+			if errors.Is(err, pgstore.ErrNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // fillCallerGroups populates in.CallerGroups so the access filter includes
@@ -1581,7 +1631,7 @@ func (s *Service) fillCallerGroups(ctx context.Context, in *pgstore.ListInput) e
 	if in.CallerEmail == "" {
 		return nil
 	}
-	groups, err := s.store.CallerGroups(ctx, in.CallerEmail)
+	groups, err := s.store.ReadTokens(ctx, in.CallerEmail)
 	if err != nil {
 		return err
 	}
@@ -1592,12 +1642,25 @@ func (s *Service) fillCallerGroups(ctx context.Context, in *pgstore.ListInput) e
 // CreatorOf returns the creator email for the given artifact, or "" if
 // the artifact doesn't exist. Includes archived rows so archive-related
 // permission checks can use it.
+// CreatorOf returns the person holding creator authority over a version: its
+// creator, or "" when a service principal wrote it on that person's behalf.
+// Callers use it to authorize archive and unarchive.
 func (s *Service) CreatorOf(ctx context.Context, id uuid.UUID) (string, error) {
 	row, err := s.store.GetByID(ctx, id)
 	if err != nil {
 		return "", err
 	}
+	if row.AssertedBy != nil {
+		return "", nil
+	}
 	return row.Creator, nil
+}
+
+// holdsCreatorAuthority reports whether caller holds the creator's authority
+// over row: they created it themselves. A person credited on a version a
+// service principal wrote for them can read it, but not edit or archive it.
+func holdsCreatorAuthority(row sqlc.Artifact, caller string) bool {
+	return row.AssertedBy == nil && strings.EqualFold(row.Creator, caller)
 }
 
 // ─── HTTP handler set ────────────────────────────────────────────────
@@ -1998,7 +2061,7 @@ func (s *Service) httpGetContent(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 	setContentDisposition(w, r, row.Title, ct, row.ArtifactType)
-	s.writeServedContent(w, rc, ct, row, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()), fullPageContext(r))
+	s.writeServedContent(w, r, rc, ct, row, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()), fullPageContext(r))
 }
 
 func (s *Service) httpArchive(w http.ResponseWriter, r *http.Request) {
@@ -2012,16 +2075,16 @@ func (s *Service) httpArchive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	// MANAGE_ARTIFACTS-or-creator gate. We fetch the row first so that a
-	// non-admin trying to archive someone else's artifact gets 403, not
-	// silent success on a 404 (which would leak existence).
-	creator, err := s.CreatorOf(r.Context(), id)
+	// We decide on the row first so that a non-admin trying to archive someone
+	// else's artifact gets 403, not silent success on a 404 (which would leak
+	// existence).
+	allowed, err := s.CanArchiveID(r.Context(), caller, id)
 	if err != nil {
 		writeMaybeNotFound(w, err)
 		return
 	}
-	if !admin && !strings.EqualFold(creator, caller) {
-		writeError(w, http.StatusForbidden, "forbidden", "only the creator or an admin may archive")
+	if !allowed {
+		writeError(w, http.StatusForbidden, "forbidden", "only the creator, the document's owner, or an admin may archive")
 		return
 	}
 	// Hard delete requires MANAGE_ARTIFACTS and is selected by `?hard=true`.
@@ -2070,7 +2133,7 @@ func (s *Service) httpGetBySlugRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 	setContentDisposition(w, r, row.Title, ct, row.ArtifactType)
-	s.writeServedContent(w, rc, ct, row, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()), false)
+	s.writeServedContent(w, r, rc, ct, row, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()), false)
 }
 
 func (s *Service) httpVersions(w http.ResponseWriter, r *http.Request) {
@@ -2097,7 +2160,7 @@ func (s *Service) httpArchiveBySlug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		writeError(w, http.StatusForbidden, "forbidden", "only the creator of every version or an admin may archive this slug")
+		writeError(w, http.StatusForbidden, "forbidden", "only the document's owner, the creator of every version, or an admin may archive this slug")
 		return
 	}
 	n, err := s.ArchiveBySlug(r.Context(), slug)
@@ -2108,8 +2171,8 @@ func (s *Service) httpArchiveBySlug(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int64{"archived_count": n})
 }
 
-// httpUnarchive restores a previously archived artifact. The creator
-// may unarchive their own work; admins may unarchive anything.
+// httpUnarchive restores a previously archived artifact. Its creator or its
+// document's owner may unarchive it; admins may unarchive anything.
 // Hard-deleted artifacts cannot be restored (the row is gone).
 func (s *Service) httpUnarchive(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseUUIDParam(w, r, "id")
@@ -2117,18 +2180,13 @@ func (s *Service) httpUnarchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caller := auth.EmailFromContext(r.Context())
-	admin, err := s.canManageArtifacts(r.Context(), caller)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	creator, err := s.CreatorOf(r.Context(), id)
+	allowed, err := s.CanArchiveID(r.Context(), caller, id)
 	if err != nil {
 		writeMaybeNotFound(w, err)
 		return
 	}
-	if !admin && !strings.EqualFold(creator, caller) {
-		writeError(w, http.StatusForbidden, "forbidden", "only the creator or an admin may unarchive")
+	if !allowed {
+		writeError(w, http.StatusForbidden, "forbidden", "only the creator, the document's owner, or an admin may unarchive")
 		return
 	}
 	n, err := s.UnarchiveByID(r.Context(), id)
@@ -2182,6 +2240,7 @@ func (s *Service) httpMe(w http.ResponseWriter, r *http.Request) {
 		// dialog when ARTI_SHARE_ENABLED is off, instead of offering a control
 		// whose endpoint 404s.
 		"share_links_enabled": s.share.Enabled,
+		"dictation_enabled":   s.dictation,
 	})
 }
 
@@ -2267,9 +2326,7 @@ func cleanStringSlice(in []string) []string {
 // allowed_write are PER-DOCUMENT (DD-0055): an owner/admin edit writes every
 // version of the slug — the comments_enabled asymmetry, extended to access.
 //
-// Enforces creator-or-MANAGE_ARTIFACTS, plus the kind:skill write-guard
-// (editing — or relabeling into/out of — a skill artifact needs MANAGE_SKILLS,
-// so the Create/Append guard can't be sidestepped via PATCH). Best-effort
+// Enforces creator-or-owner-or-MANAGE_ARTIFACTS. Best-effort
 // re-indexes to OpenSearch, then returns the refreshed DTO. Shared by the REST
 // PATCH handler and the MCP update_artifact tool. Errors: pgstore.ErrNotFound
 // (→404), forbidden (→403), badRequest (→400).
@@ -2292,13 +2349,10 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 	// lands on must not 403 — while a delegated writer who became a version's
 	// creator must not gain doc-level authority (isDocOwner resolves it to
 	// the earliest version's creator).
-	commentsOnly := req.CommentsEnabled != nil && req.Title == nil && req.Description == nil &&
-		req.Scopes == nil && req.Labels == nil && req.AllowedAccess == nil && req.AllowedWrite == nil &&
-		req.GrantAccess == nil
 	docSettingsOnly := (req.CommentsEnabled != nil || req.AllowedAccess != nil || req.AllowedWrite != nil ||
 		req.GrantAccess != nil) &&
 		req.Title == nil && req.Description == nil && req.Scopes == nil && req.Labels == nil
-	if !admin && !docSettingsOnly && !strings.EqualFold(existing.Creator, caller) {
+	if !admin && !docSettingsOnly && !holdsCreatorAuthority(existing, caller) {
 		// The document's OWNER edits its metadata too. Without this a
 		// transferred document has an owner who controls its access, its
 		// comment switch and its share links but cannot retitle it. The added
@@ -2312,16 +2366,10 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 			return ArtifactInfo{}, errForbidden("only the creator, the document's owner, or an admin may edit")
 		}
 	}
-	// The kind:skill write-guard protects a skill's content and metadata. A
-	// comments-only PATCH changes neither — it is a document setting, gated by
-	// ownership — so it doesn't additionally require MANAGE_SKILLS.
-	if !commentsOnly {
-		guardSets := [][]string{existing.Labels}
-		if req.Labels != nil {
-			guardSets = append(guardSets, *req.Labels)
-		}
-		if err := s.requireSkillWrite(ctx, caller, guardSets...); err != nil {
-			return ArtifactInfo{}, err
+	// Dropping the skill label lifts the skill's owner-only write rule, so it needs write access.
+	if req.Labels != nil && !admin && pgstore.IsSkill(existing.Labels) && !pgstore.IsSkill(*req.Labels) {
+		if err := s.checkWriteAccess(ctx, existing, caller); err != nil {
+			return ArtifactInfo{}, errForbidden("only a writer of this skill may remove its skill label")
 		}
 	}
 	if req.Title != nil {
@@ -2406,7 +2454,7 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, req UpdateMe
 				// version's creator proceeds — otherwise even a byte-identical
 				// resend (which the authority helper waves through as a no-op)
 				// would hand strangers a per-version write.
-				if !strings.EqualFold(existing.Creator, caller) {
+				if !holdsCreatorAuthority(existing, caller) {
 					return ArtifactInfo{}, errForbidden("changing access requires being the artifact's owner or an admin")
 				}
 				// An identical resend is a legal no-op (the authority
@@ -2713,7 +2761,7 @@ func (s *Service) httpFileByID(w http.ResponseWriter, r *http.Request) {
 		body = injectExternalLinkHandler(body, ct, filesRoot)
 		s.setContentSecurityMaybeFullPage(w, ct, fullPageContext(r))
 	}
-	_, _ = w.Write(body)
+	writePackageFileBody(w, r, ct, body)
 }
 
 func (s *Service) httpFilesBySlug(w http.ResponseWriter, r *http.Request) {
@@ -2972,10 +3020,25 @@ func (s *Service) httpFileBySlug(w http.ResponseWriter, r *http.Request) {
 		body = injectExternalLinkHandler(body, ct, filesRoot)
 		s.setContentSecurityMaybeFullPage(w, ct, fullPageContext(r))
 	}
-	_, _ = w.Write(body)
+	writePackageFileBody(w, r, ct, body)
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
+
+// isMediaContentType reports audio/video, which browsers fetch with Range
+// requests; Safari will not play a <video> whose server answers them with 200.
+func isMediaContentType(ct string) bool {
+	ct = strings.ToLower(ct)
+	return strings.HasPrefix(ct, "video/") || strings.HasPrefix(ct, "audio/")
+}
+
+func writePackageFileBody(w http.ResponseWriter, r *http.Request, ct string, body []byte) {
+	if isMediaContentType(ct) {
+		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))
+		return
+	}
+	_, _ = w.Write(body)
+}
 
 // setContentSecurity sets the Content-Type header and, when the body
 // is HTML, attaches a Content-Security-Policy: sandbox directive. The
@@ -3074,6 +3137,7 @@ func (s *Service) injectComments(body []byte, ct, artifactID string, commentsEna
 	tokJSON, _ := json.Marshal(tok)
 	snippet := []byte("<script>window.__ARTI_COMMENTS__={\"artifactId\":" + string(idJSON) +
 		",\"token\":" + string(tokJSON) + ",\"me\":" + string(meJSON) +
+		",\"dictation\":" + strconv.FormatBool(s.dictation) +
 		"};</script><script src=\"/comments-embed.js\" defer></script>")
 	if i := bytes.LastIndex(bytes.ToLower(body), []byte("</body>")); i >= 0 {
 		out := make([]byte, 0, len(body)+len(snippet))
@@ -3692,7 +3756,7 @@ func (s *Service) setContentSecurityAppFA(w http.ResponseWriter, ct, fa string) 
 // non-HTML — including the multi-MB zip of a PACKAGE download — it streams
 // straight through without buffering. injectComments no-ops on non-HTML, but we
 // gate on the content type here too so we never read a large zip into memory.
-func (s *Service) writeServedContent(w http.ResponseWriter, rc io.Reader, ct string, row sqlc.Artifact, caller, callerName, callerPicture string, fullPage bool) {
+func (s *Service) writeServedContent(w http.ResponseWriter, r *http.Request, rc io.Reader, ct string, row sqlc.Artifact, caller, callerName, callerPicture string, fullPage bool) {
 	if strings.HasPrefix(strings.ToLower(ct), "text/html") {
 		body, err := io.ReadAll(rc)
 		if err != nil {
@@ -3715,6 +3779,10 @@ func (s *Service) writeServedContent(w http.ResponseWriter, rc io.Reader, ct str
 		return
 	}
 	setContentSecurity(w, ct)
+	if rs, ok := rc.(io.ReadSeeker); ok && isMediaContentType(ct) {
+		http.ServeContent(w, r, "", time.Time{}, rs)
+		return
+	}
 	// Advertise the body length up front so HTTP clients (and agents) can size
 	// the artifact before consuming the stream. Safe here: the non-HTML path
 	// streams the stored bytes verbatim (no injection), so size_bytes is exact.
@@ -4087,48 +4155,6 @@ type forbidden struct{ msg string }
 func (f forbidden) Error() string   { return f.msg }
 func errForbidden(msg string) error { return forbidden{msg: msg} }
 
-// skillLabel marks an artifact as a managed skill (couch's skill catalog).
-const skillLabel = "kind:skill"
-
-func containsLabel(labels []string, want string) bool {
-	for _, l := range labels {
-		if l == want {
-			return true
-		}
-	}
-	return false
-}
-
-// requireSkillWrite gates writes to `kind:skill` artifacts: only callers with
-// MANAGE_SKILLS (or the broader MANAGE_ARTIFACTS) may create/version/relabel
-// them. Pass EVERY relevant label set — the incoming labels AND the existing
-// artifact's labels — and the guard fires if ANY of them carries the skill
-// tag. That way a caller can neither sneak the tag onto a new/non-skill
-// artifact nor strip it off (or otherwise edit) a protected skill without the
-// permission. No-op when no set carries the tag.
-func (s *Service) requireSkillWrite(ctx context.Context, caller string, labelSets ...[]string) error {
-	isSkill := false
-	for _, ls := range labelSets {
-		if containsLabel(ls, skillLabel) {
-			isSkill = true
-			break
-		}
-	}
-	if !isSkill {
-		return nil
-	}
-	for _, p := range []rbac.Permission{rbac.ManageSkills, rbac.ManageArtifacts} {
-		ok, err := s.store.HasPermission(ctx, caller, p)
-		if err != nil {
-			return err
-		}
-		if ok {
-			return nil
-		}
-	}
-	return errForbidden("writing skill artifacts (kind:skill) requires the MANAGE_SKILLS permission")
-}
-
 // DiagramContentType is the body type of a diagram artifact. A diagram is an
 // ordinary TEXT artifact — this is the only thing that distinguishes it — which
 // is how it inherits slugs, versioning, compare, comments and access control.
@@ -4302,7 +4328,7 @@ func interactiveCaller(ctx context.Context) bool {
 // `scope:user:tian@al.com`. The first colon splits key from value; the
 // value is taken verbatim so it may itself contain colons.
 var fieldKeys = map[string]bool{
-	"slug": true, "creator": true, "scope": true, "type": true, "label": true,
+	"slug": true, "creator": true, "owner": true, "scope": true, "type": true, "label": true,
 	"content_type": true, "via": true, "bookmarked": true,
 }
 
@@ -4378,6 +4404,11 @@ func mergeFilters(in *pgstore.ListInput, filters, negated map[string][]string) {
 			in.Creator = v
 		}
 	}
+	if in.Owner == nil {
+		if v := first("owner"); v != nil {
+			in.Owner = v
+		}
+	}
 	if in.Scope == nil {
 		if v := first("scope"); v != nil {
 			in.Scope = v
@@ -4428,6 +4459,9 @@ func parseList(r *http.Request) pgstore.ListInput {
 	}
 	if v := q.Get("creator"); v != "" {
 		in.Creator = &v
+	}
+	if v := q.Get("owner"); v != "" {
+		in.Owner = &v
 	}
 	if v := q.Get("scope"); v != "" {
 		in.Scope = &v
@@ -4562,4 +4596,74 @@ func mergeMeta(existing json.RawMessage, add map[string]any) json.RawMessage {
 	}
 	raw, _ := json.Marshal(m)
 	return raw
+}
+
+// actingPerson is the person an X-Arti-Acting-For write credits, or "" for a
+// direct write.
+type actingPerson string
+
+// creator is the version's creator: the person written for, else the caller.
+func (a actingPerson) creator(caller string) string {
+	if a != "" {
+		return string(a)
+	}
+	return caller
+}
+
+// owner is the asserting principal on an acting-for write, else "" (the store
+// then uses the creator, as for every direct write).
+func (a actingPerson) owner(caller string) string {
+	if a != "" {
+		return caller
+	}
+	return ""
+}
+
+// actingFor validates the caller's X-Arti-Acting-For claim. The caller must be
+// an active service principal holding ASSERT_ACTOR; the person must be an
+// allowed, active user and not a service principal. Authorization stays the
+// caller's alone: the person's roles are never consulted. A slug with no live
+// version but archived ones is reopened only by its owner, since an acting-for
+// write would otherwise land a version in someone else's archived document.
+func (s *Service) actingFor(ctx context.Context, principal string, slug *string) (actingPerson, error) {
+	person := auth.ActingForFromContext(ctx)
+	if person == "" {
+		return "", nil
+	}
+	if !s.store.IsActiveServicePrincipal(ctx, principal) {
+		return "", errForbidden("only a service principal may write on a person's behalf")
+	}
+	ok, err := s.store.HasPermission(ctx, principal, rbac.AssertActor)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errForbidden("writing on a person's behalf requires ASSERT_ACTOR")
+	}
+	if !auth.IsAllowed(person) {
+		return "", errForbidden("the person named in " + auth.ActingForHeader + " is not an allowed, active user")
+	}
+	if svc, err := s.store.IsServicePrincipal(ctx, person); err != nil {
+		return "", err
+	} else if svc {
+		return "", errForbidden(auth.ActingForHeader + " must name a person, not a service principal")
+	}
+	if slug != nil && *slug != "" {
+		if _, err := s.store.GetBySlug(ctx, *slug, nil); errors.Is(err, pgstore.ErrNotFound) {
+			row, aerr := s.store.LatestBySlugAnyState(ctx, *slug)
+			switch {
+			case aerr == nil:
+				if own, oerr := s.store.IsDocOwner(ctx, row, principal); oerr != nil {
+					return "", oerr
+				} else if !own {
+					return "", errForbidden("only the document's owner may reopen an archived slug on a person's behalf")
+				}
+			case !errors.Is(aerr, pgstore.ErrNotFound):
+				return "", aerr
+			}
+		} else if err != nil {
+			return "", err
+		}
+	}
+	return actingPerson(person), nil
 }

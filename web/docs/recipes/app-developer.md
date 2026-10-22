@@ -27,7 +27,7 @@ your HTML  ──window.arti.callTool──▶  /api/apps/mcp  ──▶  MCP se
        (no cookie, no API access)
 ```
 
-Three facts shape everything you write:
+Four facts shape everything you write:
 
 1. **The page is credential-less.** arti serves it with a `sandbox` CSP and
    *no* `allow-same-origin`, so it runs in a unique opaque origin. It can't read
@@ -113,11 +113,19 @@ arti injects `window.__ARTI_APP__` (config + token) and a small shim that
 defines `window.arti` (`appBridgeJS` in `internal/artifacts/server.go`). You
 write against `window.arti` — never construct the token or endpoint yourself.
 
-### window.arti.callTool(server, tool, args)
+Both are inserted just before the page's last `</body>`, so an inline script
+higher up runs before `window.arti` exists. Start from a `DOMContentLoaded`
+listener, a `defer` script, or an event handler (as in the
+[example below](#a-minimal-complete-app)); never call `window.arti` at the top
+level of an inline `<script>`.
+
+### window.arti.callTool(server, tool, args, opts?)
 
 POSTs to `/api/apps/mcp` with the injected bearer token and returns a Promise of
 the MCP tool result (the raw result body). On a `401 authorization_required` it
-transparently opens the OBO consent popup and retries once.
+transparently opens the OBO consent popup and retries once. `opts.timeout_ms`
+sets how long the proxy waits on the upstream: 60s by default, capped by the
+server (90s unless the operator changes it).
 
 ```js
 const result = await window.arti.callTool("linear", "list_issues", {
@@ -128,9 +136,13 @@ const result = await window.arti.callTool("linear", "list_issues", {
 ```
 
 On failure it throws an `Error` whose message is the proxy's `detail`. Wrap calls
-in `try/catch`.
+in `try/catch`, and branch on `err.code` (`upstream_timeout`, `not_allowlisted`,
+`proxy_busy`, …), never on the message; the
+[SDK reference](../reference/app-sdk.md#calltool) lists every
+code. Upstream failures arrive as `503`. A tool that ran but failed usually
+*resolves* with `isError: true` in the result, so check that too.
 
-### window.arti.params
+### window.arti.params {#url-params}
 
 A typed object of the URL params you declared in `arti-app.json`, coerced
 server-side. `{}` when you declare none. A `_errors` array records any coercion
@@ -187,7 +199,9 @@ already read in arti, nothing more.
 ### Calling the built-in LLM
 
 The `llm` server's one tool, `complete`, is an in-process Claude call (arti's
-service key, budgeted per viewer/app/org — no OBO, no popup). Allowlist
+service key, no OBO, no popup). Usage is metered against operator-configurable caps per
+viewer (requests per minute, tokens per hour, dollars per rolling day), per app
+and for the whole deployment. Allowlist
 `{ "server": "llm", "tool": "complete" }`, then:
 
 ```js
@@ -207,7 +221,7 @@ const text = r.content?.[0]?.text ?? "";
 | `prompt` | Shorthand for a single user message. |
 | `system` | System prompt (optional). |
 | `model` | Alias (`opus`/`sonnet`/`haiku`) or canonical id (`claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`). Empty → the server default. |
-| `max_tokens` | Output cap. |
+| `max_tokens` | Output cap. Default 2048; values above 10000 are clamped. |
 | `response_format` | `"json"` to force raw JSON output. |
 
 The result shape mirrors the Anthropic Messages API: `{ "content": [{ "type":
@@ -230,7 +244,7 @@ as described in [Connect your own MCP servers](../guides/self-hosting.md#mcp-ser
 | Server | Auth | What it is |
 |---|---|---|
 | `llm` | service | Built-in Claude completion (`complete`). |
-| `arti-self` | none | Local credential-free arti MCP; resolves only under `ARTI_AUTH_DISABLED` (local dev). |
+| `arti-self` | none | Another name for `arti`: arti's own tools run in-process. Anything else goes to arti's loopback `/mcp` with no credential, which answers only under `ARTI_AUTH_DISABLED` (local dev). |
 | `arti` | in-process | arti's own MCP — let an app persist its own state (e.g. `add_artifact`/`read_artifact` under a fixed slug). Reads and writes both run in-process as the viewer; needs no server entry. |
 | *your servers* | none / oauth | Whatever upstream MCP servers the deployment configures (Notion, Slack, Linear, an internal gateway, …). |
 
@@ -313,6 +327,10 @@ Or via the REST API, send the zip bytes with `"artifact_type": "APP"` (see
 launch page.
 
 View it full-screen at `/app/<slug>` (or `/app/<uuid>`, or `/app/<slug>/<version>`).
+Every APP you can read is also listed on the **Apps** page (`/apps` in the side
+rail): latest version per slug, an instant filter on name, slug, label and owner,
+sorting by recent update, views in the last 30 days or version count, and a
+bookmark toggle on each card with a **Bookmarked** filter for the apps you use.
 
 When that URL pins an older version than the slug's latest, arti overlays a thin
 dismissible amber strip at the top linking to the latest — the same notice the
@@ -342,13 +360,16 @@ APP's declared params as query string on the iframe `src`:
 - **Allowlist every tool.** A `(server, tool)` not in `arti-app.json` is `403`.
   Add `llm.complete` explicitly if you use the LLM or any host shim.
 - **Don't expect a cookie or same-origin.** The page is opaque-origin by design.
-  Persist state through the `arti` server (`add_artifact`) or your params, not
+  Persist state through the `arti` server (`add_artifact`, or `map_put` for
+  keyed entries in a MAP) or your params, not
   `document.cookie` or arti's normal APIs.
 - **Handle the consent popup path.** First call to an `oauth` server pops a
   window; `callTool` handles the retry, but your UI should tolerate the delay.
 - **A new version needs consent again.** Adding a tool to `arti-app.json`, or
-  publishing under a different credential, re-prompts even viewers who chose to
+  a version published by a different person, re-prompts even viewers who chose to
   trust the slug. Batch such changes rather than drip-feeding them.
+- **Wait for the bridge.** `window.arti` is injected at the end of `<body>`;
+  code that runs while the page is still parsing sees `undefined`.
 - **The injected token is per-viewer and short-lived (~12h).** It's not part of
   your uploaded bytes; reloading mints a fresh one. Never read, copy, or persist
   `window.__ARTI_APP__.token`.

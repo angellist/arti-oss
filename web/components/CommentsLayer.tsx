@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { mountCommentsOverlay } from "@/lib/commentsOverlay";
+import { canRecord, createLocalDictation } from "@/lib/dictation";
 import type { Me } from "@/lib/types";
 
 // Mounts the comments overlay over arti-rendered content (markdown / text /
@@ -44,6 +45,7 @@ export default function CommentsLayer({
       artifactId,
       me: me ? { email: me.email, name: me.name, picture: me.picture, is_admin: me.is_admin } : null,
       allowPin: false, // pins are for served HTML pages (injected overlay); arti-rendered docs use text-select
+      dictation: me?.dictation_enabled && canRecord() ? createLocalDictation() : undefined,
     });
     return dispose;
   }, [artifactId, me, contentType, suppressed]);

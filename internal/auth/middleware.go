@@ -104,6 +104,7 @@ const (
 	ctxPicture
 	ctxPeerAddr
 	ctxCredential
+	ctxActingFor
 )
 
 // EmailFromContext returns the authenticated caller's email, or "".
@@ -160,6 +161,11 @@ func IsAllowed(email string) bool {
 	if at < 0 {
 		return false
 	}
+	// Service principals use addresses under the reserved .invalid TLD so no
+	// IdP can issue a login for one; no allowlist entry may admit them either.
+	if strings.HasSuffix(strings.ToLower(email[at+1:]), ".invalid") {
+		return false
+	}
 	if !matchesAllowlist(email, email[at+1:]) {
 		return false
 	}
@@ -207,6 +213,12 @@ type Config struct {
 
 	// APIKeys authenticates opaque "arti_" bearers against the registry; nil disables the rung.
 	APIKeys APIKeyAuthenticator
+
+	// ServicePrincipal reports whether email is an active, admin-created service
+	// principal. Its keys pass the API-key rung without the email allowlist,
+	// which never admits a service principal's non-routable address. nil
+	// disables service principals.
+	ServicePrincipal func(ctx context.Context, email string) bool
 }
 
 // NewConfig wires verifiers + secret with sensible empty defaults. The
@@ -251,6 +263,13 @@ func requireAuth(cfg Config, loginPath string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx, failure := authenticate(cfg, r)
 			if failure == nil {
+				if v := strings.TrimSpace(r.Header.Get(ActingForHeader)); v != "" {
+					if !actingForRoute(r) {
+						http.Error(w, `{"error":"forbidden","message":"`+ActingForHeader+` is accepted only when creating or appending a version"}`, http.StatusForbidden)
+						return
+					}
+					ctx = context.WithValue(ctx, ctxActingFor, strings.ToLower(v))
+				}
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -303,7 +322,8 @@ func authenticate(cfg Config, r *http.Request) (context.Context, *authFailure) {
 
 	// ── API-key rung: opaque "arti_" bearer, registry-backed ──
 	if cfg.APIKeys != nil && strings.HasPrefix(tok, APIKeyPrefix) {
-		if c, err := cfg.APIKeys.Authenticate(r.Context(), tok); err == nil && IsAllowed(c.Email) {
+		if c, err := cfg.APIKeys.Authenticate(r.Context(), tok); err == nil &&
+			(IsAllowed(c.Email) || (cfg.ServicePrincipal != nil && cfg.ServicePrincipal(r.Context(), c.Email))) {
 			return withCredential(withClaims(r.Context(), c), credentialFor(c, source)), nil
 		}
 		return nil, &authFailure{status: http.StatusUnauthorized, reason: "invalid api key"}
@@ -439,4 +459,30 @@ func forbidden(w http.ResponseWriter, reason string) {
 func jsonEsc(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return r.Replace(s)
+}
+
+// ActingForHeader carries the person a service principal writes a version for.
+// The artifacts service decides whether the caller may make that claim; here it
+// is only carried, and refused outright on any route that does not produce a
+// version.
+const ActingForHeader = "X-Arti-Acting-For"
+
+// ActingForFromContext returns the person the caller claims to write for, or "".
+func ActingForFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(ctxActingFor).(string)
+	return v
+}
+
+// WithTestActingFor sets the acting-for claim, for tests.
+func WithTestActingFor(ctx context.Context, email string) context.Context {
+	return context.WithValue(ctx, ctxActingFor, strings.ToLower(email))
+}
+
+func actingForRoute(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	p := r.URL.Path
+	return p == "/api/artifacts" ||
+		(strings.HasPrefix(p, "/api/artifacts/by-slug/") && strings.HasSuffix(p, "/append"))
 }

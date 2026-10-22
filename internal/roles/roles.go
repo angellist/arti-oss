@@ -7,6 +7,7 @@ package roles
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -37,6 +38,8 @@ func (s *Service) Mount(r chi.Router) {
 	r.Post("/api/users", s.addUser)
 	r.Post("/api/users/deactivate", s.deactivateUser)
 	r.Post("/api/users/reactivate", s.reactivateUser)
+	r.Get("/api/users/access", s.userAccess)
+	r.Post("/api/users/access/revoke", s.revokeUserCredential)
 }
 
 // ─── DTOs ────────────────────────────────────────────────────────────
@@ -538,4 +541,47 @@ func (s *Service) writeRosterUser(w http.ResponseWriter, r *http.Request, email 
 		return
 	}
 	writeJSON(w, http.StatusOK, toRosterDTO(u))
+}
+
+// ─── access audit ────────────────────────────────────────────────────
+//
+// Revoking one credential sits under MANAGE_ROLES because the same holder can
+// already deactivate the email, which refuses every credential at once.
+
+const accessUsageDays = 90
+
+func (s *Service) userAccess(w http.ResponseWriter, r *http.Request) {
+	if !s.requireManageRoles(w, r) {
+		return
+	}
+	out, err := s.store.UserAccess(r.Context(), r.URL.Query().Get("email"), accessUsageDays)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type revokeCredentialReq struct {
+	Email string `json:"email"`
+	Kind  string `json:"kind"`
+	ID    string `json:"id"`
+}
+
+func (s *Service) revokeUserCredential(w http.ResponseWriter, r *http.Request) {
+	if !s.requireManageRoles(w, r) {
+		return
+	}
+	var body revokeCredentialReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	caller := auth.EmailFromContext(r.Context())
+	if err := s.store.RevokeUserCredential(r.Context(), body.Email, body.Kind, body.ID, caller); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	slog.Info("credential revoked by admin", "revoker", caller, "owner", body.Email, "kind", body.Kind, "id", body.ID)
+	w.WriteHeader(http.StatusNoContent)
 }

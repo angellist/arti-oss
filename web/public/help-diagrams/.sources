@@ -1,7 +1,7 @@
-dfbf21342de6bcaaea8e307e49834a89d2261055  architecture/app-serving.mmd
+a62a704519daf295819f1ef980df10275b88ab91  architecture/app-serving.mmd
 295df7b8ea95e83937b89e699425c478a35dd73d  architecture/attachments.mmd
-41e34002c268081c5fb22af9d7d7daac829e00ad  architecture/auth.mmd
+4d57743b99639213667ebb22570cb4065d24dd0e  architecture/auth.mmd
 718d4886c937913c7d060a3fa24ed059e0223efa  architecture/front-embed.mmd
-0dc6a968f3ec6cc5b4d6498058be230c7f8336d7  architecture/system-overview.mmd
-dd9e74c886fd2965100e8dbd41c0be38e472dc28  operations/connections.mmd
+0821c37e48b0ca3a0f15fe399b3ee02135c9851d  architecture/system-overview.mmd
+76f0aa04f47b4a595d647575668bc31db66b8524  operations/connections.mmd
 c9ca1203b522cdf0865bf5f47f5b9eb960bd386d  overview/quickstart.mmd

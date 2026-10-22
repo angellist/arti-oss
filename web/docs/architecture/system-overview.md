@@ -7,7 +7,7 @@ summary: arti-server (Go) is the single front door — it owns auth, the REST + 
 # System overview
 
 arti is an artifact store: a place to upload a document, a zip, an interactive app,
-or a file, get back a stable URL, and version, search, share, and comment on it.
+a file, or (when enabled) a keyed map, get back a stable URL, and version, search, share, and comment on it.
 Everything is fronted by one Go binary, `arti-server`.
 
 ## Components
@@ -19,11 +19,13 @@ Everything is fronted by one Go binary, `arti-server`.
   on the same router, with no separate API gateway.
 - **Web sidecar** — a Next.js app: the catalog UI, the artifact viewer, the upload
   modal. It renders the browser experience; it is *not* the API.
-- **Postgres** — source of truth for artifact metadata, comments, OAuth/device
-  tokens, groups, RBAC, and the LLM usage ledger. Small TEXT artifacts also live
-  inline here.
-- **S3 / RustFS** — bytes. Every PACKAGE/APP/ATTACHMENT and any TEXT artifact over
-  the inline cap is stored as a blob, with the Postgres row holding a pointer to
+- **Postgres** — source of truth for artifact metadata and document owners,
+  comments, OAuth/device tokens and API keys, the users roster, groups, RBAC,
+  MAP entries, page views, bookmarks, the block list, APP connectors, and the
+  LLM usage ledger. Small TEXT artifacts also live inline here. See
+  [Data model](data-model.md).
+- **S3 / RustFS** — bytes. Every PACKAGE/APP/ATTACHMENT, every MAP snapshot, and
+  any TEXT artifact over the inline cap is stored as a blob, with the Postgres row holding a pointer to
   it. Real S3 in prod, RustFS in dev.
 - **CLI (`arti`)** — a Go binary for uploading/fetching from a terminal or a
   headless agent. Authenticates via browser login or the device flow.
@@ -39,13 +41,17 @@ worlds: the authed API group, and everything-else proxied to the web sidecar.
 
 - **ProtectedIngress** runs Google OAuth via oauth2-proxy → Dex. By the time a
   request reaches the pod it already carries trusted `X-Auth-Request-Email` /
-  `-Groups` headers (see [Authentication & access](auth.md)). This is the path for
-  humans in a browser and for normal API callers.
-- **PublicIngress** has no SSO. A deliberate allowlist of routes is mounted on it
-  — the device-flow endpoints, the comments embed API, the apps proxy, and embed
-  surfaces — each of which does its *own* token- or secret-based auth. These exist
-  precisely because their callers (sandboxed pages, headless agents, cross-site
-  iframes) cannot send the session cookie.
+  `-Groups` headers (see [Authentication & access](auth.md)). It carries only the
+  routes that need a signed-in person in a browser: the web UI, the login
+  handlers, `/oauth/authorize`, `/app/...`, and the user-mode embed consent at
+  `/auth/embed/...`.
+- **PublicIngress** has no SSO. Everything else is mounted on it — `/api/*` (the
+  REST API, the comments embed API, the apps proxy), `/mcp`, the CLI, device and
+  token endpoints, the OBO callback, `/embed/*`, and `/share/*` — and arti-server
+  authenticates each request itself, by session cookie, bearer, scoped token or
+  surface secret. Their callers (CLIs, headless agents, MCP gateways, sandboxed
+  pages, cross-site iframes) cannot complete an SSO redirect, and the proxy would
+  reject arti's own bearer tokens.
 
 ### Inside arti-server
 
@@ -53,12 +59,16 @@ The router registers routes in three tiers plus a fallback:
 
 1. **Public routes** — health, the OpenAPI spec, `/.well-known/*`, and the
    CLI/device/MCP-OAuth/OBO-callback endpoints.
-2. **Public-but-self-authed groups** — the comments embed API, the apps proxy, and
-   embed surfaces. Each verifies its own scoped token or shared secret and sets
+2. **Public-but-self-authed groups** — the comments embed API, the apps proxy,
+   the token-scoped sibling-file route for served packages, embed surfaces, and
+   (when enabled) share links. Each verifies its own scoped token or shared secret and sets
    CORS; none relies on the session cookie.
 3. **The authed group** — guarded by the auth middleware plus upload-scope
    enforcement. This is where the real API lives: the REST CRUD, the comments API,
-   admin/groups/roles, and the MCP server at `/mcp`.
+   admin/groups/roles/users, API keys, notification settings, and the MCP server
+   at `/mcp`. `/app/...` sits in a sibling group with the same checks, except
+   that a browser with no session is redirected to log in instead of getting a
+   `401`.
 4. **The FE reverse proxy** — anything unmatched is forwarded to the web sidecar.
    With no sidecar URL configured, there is no proxy (API-only).
 
@@ -87,7 +97,11 @@ All of these are arti-server, distinguished by mount point and auth model:
   the *viewer's* token to an upstream MCP server (Notion, Slack, Linear, or an
   MCP gateway in front of them), with per-user consent.
 - **Embed surfaces** — serve any artifact full-page into a cross-site iframe,
-  authenticated by a per-surface shared secret. See [Embed surfaces](front-embed.md).
+  authenticated by a per-surface shared secret, or in viewer mode by the viewer's
+  own sign-in. See [Embed surfaces](front-embed.md).
+- **Share links** — external, timed, token-in-URL links to one document at
+  `/share/<token>`. Off unless `ARTI_SHARE_ENABLED` is set. See
+  [Sharing](../guides/sharing.md).
 
 ## Where to go next
 

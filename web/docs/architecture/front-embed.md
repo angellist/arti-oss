@@ -55,7 +55,9 @@ A surface is a JSON object in the `ARTI_EMBED_SURFACES` map, validated at startu
 | `email` | service only | identity artifacts resolve as — the read-scope gate. **Required** in service mode; **rejected** in user and viewer mode (the real viewer decides, so a fixed identity would be a footgun) |
 | `slug_allow` | yes | patterns (exact or `*` glob) the requested slug must match; `["*"]` = any |
 | `shell` | no | client adapter: `""` or `"front"` |
-| `shell_slug` | with shell | how the shell builds a slug from the host id, e.g. `deployment-ctx-{id}` (must contain `{id}`) |
+| `shell_slug` | with shell | how the shell builds a slug from the host id, e.g. `deployment-ctx-{id}` (`shell_slug` or `shell_query` must contain `{id}`) |
+| `shell_query` | no | with a shell: an extra query fragment the shell appends to the doc URL, `{id}`-substituted (e.g. `ctx=deploy-ctx-{id}`), so `shell_slug` can be a fixed app slug while the host id rides in the query |
+| `host_key` | no | user mode only: a server-side key that lets the embedding host's server mint a viewer's app token directly — see [trusted host mint](#per-user-mode-trusted-host-mint-host_key). At least 32 bytes and different from `secret` |
 
 Routes registered when at least one surface is configured:
 
@@ -74,6 +76,8 @@ Routes registered when at least one surface is configured:
   handshake only (CORS-enabled): the consent page POSTs here to mint, the
   embedded app GETs here to poll for its token. No-ops for service surfaces. See
   [Per-user mode](#per-user-mode-identity-user).
+- `POST /embed/{surface}/host-token` — server-to-server mint for a user-mode
+  surface with `host_key` set; `404` otherwise.
 
 **One gate, two layers.** `slug_allow` is the only server-side gate; the URL
 always names the artifact via `?slug=`. `shell_slug` is *not* a gate — it only
@@ -179,6 +183,31 @@ the same trade OAuth makes. Defense-in-depth: the surface secret is required at
 every step, the completion re-checks read access + `slug_allow`, the token is
 marked (`embed-user` scope) and short-lived, and every mint is audit-logged.
 
+## Per-user mode — trusted host mint (`host_key`)
+
+When the embedding host has its own server and already knows who the viewer is (it signed them in itself), the
+consent popup is a second sign-in for the same person. Setting `host_key` on a user-mode surface lets that server
+mint the viewer's app token directly:
+
+```
+POST /embed/{surface}/host-token
+Authorization: Bearer <host_key>
+{"slug": "<app slug>", "email": "<viewer email>"}
+→ 200 {"token": "...", "app_id": "<uuid>", "version": <n>}
+```
+
+arti checks `slug_allow`, the email domain allowlist, and that the email can read the latest version of the APP,
+then mints an 8-hour app token marked `embed-host` (audit-logged with `via=host`). The host loads
+the surface with `&version=<n>` and hands the token in with `#arti_token=` — the token is scoped to that exact row.
+
+- **The host vouches for the email.** Anyone holding `host_key` can mint for any allowed viewer who can read the
+  app, and the token runs that viewer's connected MCP connectors. Keep it server-side only, and give it only to a
+  host you trust as much as arti's own sign-in.
+- Only a version the slug's owner published is minted. A newer version from any other writer answers 404, so the
+  host falls back to the consent popup rather than running unreviewed code as every viewer.
+- The route sends no CORS headers; a browser page cannot read its answer.
+- Leaving `host_key` unset removes the route (404) and the surface works exactly as before.
+
 ## Per-user mode — self-hosting / ingress requirement
 
 The handshake needs two routing facts, which a self-hoster must ensure (arti's
@@ -244,13 +273,25 @@ authorizes tool calls on that app, which is what lets an APP embedded in viewer
 mode keep working, and it grants exactly what the same viewer would get from a
 user-mode surface.
 
-**Not included yet.** The minted token lives only in the page's URL, so every
-iframe load re-prompts. Front avoids this with the
-[zero-click relay](#zero-click-reloads--the-embedding-host-token-relay), but
-that needs host-side code and a Notion embed is an opaque iframe running none of
-ours. A partitioned (CHIPS) cookie is the intended fix and is tracked
-separately; partitioned cookies were verified to persist in this exact
-top-level/embedded partition.
+**Reloads: the partitioned viewer-session cookie.** The minted token lives only
+in the page's URL, so on its own every iframe load would re-prompt. Front avoids
+this with the [zero-click relay](#zero-click-reloads-the-embedding-host-token-relay),
+but a Notion embed is an opaque iframe running none of our code. So when a
+`?t=` token serves its pinned artifact, the doc route also sets a 7-day
+`arti_ev_<hash(slug)>` cookie: `Partitioned` (CHIPS), `Secure`, `HttpOnly`,
+`SameSite=None`, `Path=/embed/<surface>`. The browser keys it to the top-level
+site, so it only returns inside the same embedder. Its value is a sealed blob
+(`SealBlob`), which never parses as a JWT and so can never act as a bearer on
+the API or MCP:
+
+- It re-serves only that surface + slug, as that viewer, with the ACL and
+  `IsAllowed` checked again on every load. A version published later is served
+  without a prompt. Any miss falls back to the sign-in gate.
+- It is never set when the token's artifact differs from the slug or the serve
+  is denied.
+- An APP still goes through consent, because an APP runs tools as the viewer.
+- Browsers that block third-party cookies outright still re-prompt on every
+  load. Chromium (including the Notion desktop app) and Firefox keep the cookie.
 
 ## Invariants / security
 

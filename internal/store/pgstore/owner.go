@@ -75,6 +75,11 @@ func derivedSlugOwner(ctx context.Context, q rowQuerier, slug string) (string, e
 // denial page and comment notifications all resolve ownership through it.
 func (s *Store) DocOwner(ctx context.Context, row sqlc.Artifact) (string, error) {
 	if row.NamedSlug == nil || *row.NamedSlug == "" {
+		// A slugless row a service principal wrote for a person belongs to the
+		// principal, as a slug it opened would.
+		if row.AssertedBy != nil && *row.AssertedBy != "" {
+			return *row.AssertedBy, nil
+		}
 		return row.Creator, nil
 	}
 	owner, err := slugOwner(ctx, s.pool, *row.NamedSlug)

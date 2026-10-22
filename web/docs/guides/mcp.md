@@ -12,7 +12,7 @@ write artifacts as tool calls instead of shelling out to the [CLI](command-line.
 
 ## The endpoint
 
-The MCP server is mounted at **`/mcp`** (`cmd/arti-server/cmd_serve.go:501`):
+The MCP server is mounted at **`/mcp`** (`cmd/arti-server/cmd_serve.go:656`):
 
 ```text
 https://arti.example.com/mcp
@@ -31,7 +31,7 @@ curl -sX POST https://arti.example.com/mcp \
 ```
 
 And a worked `tools/call` roundtrip — the argument names that trip up first
-attempts: `content_type` is a **MIME type** (required), the TEXT/PACKAGE/APP
+attempts: `content_type` is a **MIME type** (required), the TEXT/PACKAGE/APP/ATTACHMENT
 kind is `artifact_type`, and reads take `ident` (a UUID *or* slug — a wrong
 argument name reads as "not found", not a validation error). Full per-tool
 schemas: [MCP tools](../reference/mcp-tools.md).
@@ -97,10 +97,14 @@ URL and let it handle discovery — you don't drive these endpoints by hand.
 ### Headless / direct (bearer token)
 
 When you control the client directly — a local agent, a CI job — skip the OAuth
-dance and supply a token via the `ARTI_TOKEN` bearer, the same one the
-[CLI uses for headless auth](command-line.md#headless-arti_token). These come
-from arti's device-authorization flow (RFC 8628); see
-[Authentication](../architecture/auth.md) for issuing and refreshing them.
+dance and send a full-access bearer token: the access token from `arti login`, or a
+[service API key](../reference/rest-api.md#post-apiadminservice-keys) (`arti_service_…`)
+that an admin minted for a service principal. **Upload-scoped credentials do not
+work here:** a device-flow token and a self-serve `arti_upload_…` key are refused on
+`/mcp` with `403`, because the upload scope only allows artifact create, append, and
+read over REST (see [Using the API](api.md)). An agent that only holds one of those
+should call the [REST API](../reference/rest-api.md) instead. See
+[Authentication](../architecture/auth.md) for how each credential is issued.
 
 ## What the tools do
 
@@ -114,8 +118,8 @@ schemas live in the [MCP tools reference](../reference/mcp-tools.md); the shape:
 | `update_artifact` | Edit metadata (title/description/scopes/labels/access/comments) in place; no new version. |
 | `get_artifact` | Fetch metadata by UUID or slug (incl. `size_bytes` — a cheap size check). |
 | `read_artifact` | Fetch the content (base64 for binary); `max_bytes` peeks a prefix. |
-| `list_artifacts` | List/filter the catalog (type, creator, scope, labels). |
-| `search_artifacts` | Substring search over title, description, slug. |
+| `list_artifacts` | List/filter/sort the catalog (type, creator, scope, labels). |
+| `search_artifacts` | Substring search over title, description, slug; `q` is optional when filtering by labels or scope. |
 | `list_artifact_versions` | List every non-deleted version of a slug. |
 | `archive_artifact` | Soft-delete a version (UUID) or whole slug. |
 | `list_package_files` | List entries inside a PACKAGE. |
@@ -124,6 +128,10 @@ schemas live in the [MCP tools reference](../reference/mcp-tools.md); the shape:
 | `add_comment` | Start a document-level or quote-anchored comment thread. |
 | `reply_to_comment` | Reply to an existing comment thread. |
 | `resolve_comment` | Resolve or reopen a comment thread. |
+| `map_get` | Read one key of a MAP, or list a page of keys by prefix. |
+| `map_put` | Write up to 100 MAP entries, with optional `if_absent` / `if_rev` guards; creates the MAP if new. |
+| `map_delete` | Delete up to 100 keys from a MAP. |
+| `map_snapshot` | Freeze a MAP's keys as a new immutable NDJSON version. |
 
 These mirror the [CLI](command-line.md) and [REST API](../reference/rest-api.md),
 and respect the same access rules — a caller only reads what their token is

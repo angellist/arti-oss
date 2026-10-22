@@ -418,3 +418,48 @@ func TestUsers_LoginRecordsPermanentRow(t *testing.T) {
 		t.Errorf("a later login must not overwrite an admin's record: %+v", u)
 	}
 }
+
+// Only a service principal an admin added, and nobody deactivated, may hold a
+// key that skips the email allowlist.
+func TestUsers_IsActiveServicePrincipal(t *testing.T) {
+	ctx := context.Background()
+	st, pool := rosterStore(t, pgstore.Config{})
+	svc := strings.ToLower(unique("svc")) + "@sa.arti.invalid"
+	person := strings.ToLower(unique("person")) + "@example.com"
+	backfilled := strings.ToLower(unique("bf")) + "@sa.arti.invalid"
+	t.Cleanup(func() { _ = st.ReactivateUser(ctx, svc) })
+
+	if _, err := st.AddUser(ctx, svc, pgstore.UserKindService, "couch", "admin@example.com"); err != nil {
+		t.Fatalf("add service: %v", err)
+	}
+	if _, err := st.AddUser(ctx, person, pgstore.UserKindHuman, "", "admin@example.com"); err != nil {
+		t.Fatalf("add person: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO users (email, kind, source) VALUES ($1, 'service', 'backfill')`, backfilled); err != nil {
+		t.Fatalf("seed backfilled row: %v", err)
+	}
+
+	if !st.IsActiveServicePrincipal(ctx, strings.ToUpper(svc)) {
+		t.Fatal("an admin-added service principal must qualify")
+	}
+	if st.IsActiveServicePrincipal(ctx, person) {
+		t.Fatal("a person must not qualify")
+	}
+	if st.IsActiveServicePrincipal(ctx, backfilled) {
+		t.Fatal("a backfilled service row must not qualify")
+	}
+	// A real address relabelled as a service never qualifies.
+	relabelled := strings.ToLower(unique("relabel")) + "@example.com"
+	if _, err := st.AddUser(ctx, relabelled, pgstore.UserKindService, "", "admin@example.com"); err != nil {
+		t.Fatalf("add relabelled: %v", err)
+	}
+	if st.IsActiveServicePrincipal(ctx, relabelled) {
+		t.Fatal("a routable address marked as a service must not qualify")
+	}
+	if err := st.DeactivateUser(ctx, svc, "admin@example.com"); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	if st.IsActiveServicePrincipal(ctx, svc) {
+		t.Fatal("a deactivated service principal must not qualify")
+	}
+}

@@ -10,8 +10,9 @@ You have a report, a design doc, an analysis, or a rendered HTML page, and you
 want it at a stable link your team can read, review, and find later. This is the
 publish-and-share workflow.
 
-The two ways in are the [web UI](../guides/web-ui.md) (drag-drop, browse, edit
-metadata) and the [CLI](../guides/command-line.md) (`arti add`, scriptable). Use
+The two ways in are the [web UI](../guides/web-ui.md) (upload or write markdown
+in the browser, browse, edit metadata) and the [CLI](../guides/command-line.md)
+(`arti add`, scriptable). Use
 whichever fits; the model is identical.
 
 ## Pick a type
@@ -40,7 +41,7 @@ Two pieces of metadata do the work of making something discoverable months later
   a project label, and `auto-gen` when a tool produced it. **Always add at least
   one label** — an unlabeled artifact is hard to find in a busy catalog.
   Forgot on the way in? Labels *and* the description are editable in place
-  (`PATCH /api/artifacts/{id}`, or `arti label`) without minting a new version.
+  (`PATCH /api/artifacts/{id}`, or `arti edit <slug> --label …`) without minting a new version.
 
 ```sh
 arti add q2-cr-efficiency.md \
@@ -77,15 +78,17 @@ arti versions q2-cr-efficiency
 ```
 
 For an append-only document (a running log, a changelog) use `arti append
---slug …` instead of re-uploading the whole body — it adds to the current
-version's content and is safe to retry. Want to assert "this is brand new, don't
+--slug …` instead of re-uploading the whole body — it writes the current body
+plus your addition as the next version, and with `--auto-key` it is safe to
+retry. Want to assert "this is brand new, don't
 silently version onto an existing slug"? Add `--ensure-new` and you'll get an
 error instead if the slug is taken.
 
 From a browser, open the document and **drop the new file on the page** (or use
 **Upload new version…** in the ⋯ menu): the modal locks the slug, inherits the
-title, labels and scopes, and publishes the next version. See
-[Versions](../guides/web-ui.md#versions).
+title, labels and scopes, and publishes the next version. For a small change to
+a markdown or other text document, **⋯ › Edit** edits the source in place and
+saves it as the next version. See [Versions](../guides/web-ui.md#versions).
 
 A version keeps the document's kind. Publishing a zip onto a text document, or
 the same document as a different content type, is refused unless you say you mean
@@ -94,27 +97,31 @@ wrong is how an HTML page ends up rendered as its own source.
 
 ## Share
 
-`arti url <slug>` (or the **Copy link** action in the web UI) gives the canonical
-link:
+`arti url <slug>` gives the canonical link to the latest version, pinned to its
+number; in the web UI, **⋯ › Share › Copy link** gives the page's link:
 
 ```
-https://arti.example.com/s/q2-cr-efficiency
+https://arti.example.com/s/q2-cr-efficiency/3
 ```
 
-That link opens the **full-page view** — the document rendered on its own, the
-way a reader wants it (markdown formatted, HTML rendered, PDF inline). Append
-`/<N>` to link a specific version so a reference doesn't drift when you publish an
-update.
+The pinned link doesn't drift when you publish an update. Drop the `/<N>` to
+link whatever is latest. Either opens the viewer; add `?v=full` for the
+**full-page view** — the document rendered on its own, the way a reader wants it
+(markdown formatted, HTML rendered, PDF inline).
 
 Who can open it is controlled by access patterns. By default an artifact is
 readable by everyone authenticated; narrow it with `--access` (email-glob
-patterns) or lock it to yourself with `--private` at upload time.
+patterns) or lock it to yourself with `--private` at upload time, or later from
+the **Access** button in the viewer. A reader who is not on the list sees who
+owns the document and can ask them for access. To hand a document to someone
+outside who cannot sign in, see [Sharing a document](../guides/sharing.md).
 
 ## Review with comments
 
-The full-page view carries a **comments overlay** so reviewers can leave inline
-feedback on the rendered document without you wiring anything up — it's injected
-by arti when the page is served. Share the link, collect comments in place, and
+The viewer and the full-page view carry a **comments overlay** so reviewers can
+leave inline feedback on the rendered document without you wiring anything up —
+for HTML it's injected by arti when the page is served. As the owner you can
+turn comments off for a document from the ⋯ menu. Share the link, collect comments in place, and
 publish a new version when you've addressed them. The comment thread lives with
 the artifact, so the next reader sees the discussion alongside the doc.
 
@@ -125,7 +132,7 @@ the artifact, so the next reader sees the discussion alongside the doc.
 | Publish a doc | `arti add file.md --slug <slug> --title "…" --label <kind>` |
 | New version | re-run `arti add` with the same `--slug` |
 | Append to a log | `arti append --slug <slug> entry.md` |
-| Get the link | `arti url <slug>` |
+| Get the link | `arti url <slug>` (pinned to the latest version) |
 | Find it again | `arti search "<text>" --label <kind>` / `arti ls --label <kind>` |
 | See versions | `arti versions <slug>` |
 

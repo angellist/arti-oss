@@ -37,8 +37,10 @@ empty list = creator-only). Admins with `MANAGE_ARTIFACTS` bypass read filtering
 ## Create an artifact
 
 `POST /api/artifacts`. JSON for text or small payloads; multipart for binary.
-The four artifact types are `TEXT`, `PACKAGE`, `APP`, `ATTACHMENT`
-(`internal/store/pgstore/store.go`). Global upload cap: 200 MiB. Reusing a
+The artifact types you create here are `TEXT`, `PACKAGE`, `APP`, `ATTACHMENT`
+(`internal/store/pgstore/store.go`); a fifth, `MAP`, is a key/value store created
+through its own [MAP routes](../reference/rest-api.md#map-routes-under-apiartifactsby-slugslugmap).
+Global upload cap: 200 MiB. Reusing a
 `named_slug` publishes the next version — but only if you can *read* the existing slug;
 otherwise it's a `404`, so you can't fork or probe someone else's slug.
 
@@ -66,14 +68,17 @@ Key body fields (`internal/artifacts/dto.go`, `CreateRequest`):
 | `artifact_type` | `TEXT` (default), `PACKAGE`, `APP`, `ATTACHMENT`. |
 | `named_slug` | Optional. Omit → a UUID-only artifact. Reusing a slug creates the next version. |
 | `title` | Required. |
-| `content_type` | Required. TEXT must be `text/*`, `application/json`, `application/yaml`, or `application/javascript`. |
+| `content_type` | Required. TEXT must be `text/*`, `application/json`, `application/yaml`, `application/javascript`, `application/x-ndjson`, or a `+json` type. |
 | `content` | Raw UTF-8 text. |
 | `content_base64` | Binary alternative to `content`. |
 | `labels` | String array; trimmed + deduped. |
 | `scopes` | Arbitrary grouping strings (e.g. `a:bt-auto-route`). |
 | `allowed_access` | Email-glob patterns. Absent → inherit prior version, else `["*"]`. Empty `[]` → creator-only. |
+| `allowed_write` | Who may write (new version, append, edit). Absent → write follows read; `[]` → creator-only writes. |
 | `entry_point` | PACKAGE/APP entry file override. |
 | `ensure_new` | With `named_slug`: `409` if the slug already exists (don't accidentally version someone else's doc). |
+| `expected_latest_version` | With `named_slug`: publish only if the slug is still at this version (`409 stale-base-version` otherwise). |
+| `allow_type_change` | Permit a version that changes `artifact_type` or the base of `content_type` (`409 type-change` without it). |
 
 Success is `201` with the artifact metadata (`ArtifactInfo`, below), including a
 canonical `url`.
@@ -209,9 +214,9 @@ as genuinely no comments.
 
 | Param | Default | Notes |
 |---|---|---|
-| `limit` | 50 | Page size. |
+| `limit` | 50 | Page size. A value over 500 is clamped to 500. |
 | `offset` | 0 | Skip N rows. |
-| `order_by` | — | `title`, `type`, `slug`, `version`, `creator`, `scope`, `created`. |
+| `order_by` | — | `title`, `type`, `slug`, `version`, `creator`, `scope`, `created`, `archived`, `views`. |
 | `order_dir` | — | `asc` / `desc`. |
 
 `total` is the unpaginated count, so you can page with
@@ -221,9 +226,11 @@ as genuinely no comments.
 
 | Param | Effect |
 |---|---|
-| `type` | `TEXT`, `PACKAGE`, `APP`, `ATTACHMENT`, or pseudo-types `MARKDOWN`/`HTML` (match content-type prefix). |
-| `creator` | Creator-email substring. |
-| `scope` | Exact scope match. |
+| `type` | `TEXT`, `PACKAGE`, `APP`, `ATTACHMENT`, `MAP`, or a pseudo-type — `MARKDOWN`, `HTML`, `DIAGRAM`, `JSON`, `PDF`, `IMAGE` — that matches a content-type family. |
+| `creator` | The version's creator email. Exact, or a `*` glob (`alice*`). |
+| `owner` | The document's owner email. Exact, or a `*` glob. |
+| `scope` | Exact scope match, or a `*` glob. |
+| `via` | The credential that wrote it, e.g. `apikey:<id>`, or `apikey:*` for any API key. |
 | `slug` | Exact slug (drills into one slug, shows its versions). |
 | `label` | Repeatable; multiple labels are ANDed. |
 | `all_versions=true` | Show every version, not just the latest per slug. |
@@ -232,12 +239,13 @@ as genuinely no comments.
 ```sh
 # every report-labeled markdown doc by one author, newest first, page 1
 curl -s -H "Authorization: Bearer $TOKEN" \
-  'https://arti.example.com/api/artifacts?type=MARKDOWN&label=report&creator=tian&order_by=created&order_dir=desc&limit=25'
+  'https://arti.example.com/api/artifacts?type=MARKDOWN&label=report&creator=alice@example.com&order_by=created&order_dir=desc&limit=25'
 ```
 
 `search` additionally parses `field:value` tokens in `q` — `slug:`, `creator:`,
-`scope:`, `type:`, `label:`, each negatable with a leading `-`. Bare words are
-title/description substring search:
+`owner:`, `scope:`, `type:`, `label:`, `content_type:`, `via:`, and `bookmarked:me`.
+`creator:`, `scope:`, `type:`, `label:`, and `content_type:` can be negated with a
+leading `-`. Bare words are title/description substring search:
 
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" \
@@ -246,7 +254,9 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 ```
 
 For building faceted UIs, `GET /api/artifacts/aggregates` returns top-30
-histograms of scopes, scope-types, and labels (cached 60s per caller).
+histograms of scopes, scope types, labels, and content types (cached 60s per caller).
+`GET /api/artifacts/aggregates/browse?facet=label` returns every value of one facet
+with its count, paged — see the [REST reference](../reference/rest-api.md#get-apiartifacts-and-apiartifactssearch).
 
 ## Error handling
 
@@ -256,9 +266,9 @@ HTTP status; `code` is a stable machine string for the common cases.
 | Status | `code` | When |
 |---|---|---|
 | `400` | `bad-request` | Bad JSON, wrong content-type for the type, missing `title`, invalid UUID. |
-| `403` | `forbidden` | Not the creator (delete/patch), or upload-scoped token hitting a denied route. |
+| `403` | `forbidden` | Not allowed to archive or edit (creator, owner, or admin only), or an upload-scoped token hitting a denied route. |
 | `404` | `not-found` | Missing, or you lack read access (access denial is masked as 404, not 403). |
-| `409` | `slug-exists` / `conflict` | `ensure_new` and slug taken; or a concurrent append lost the race. |
+| `409` | `slug-exists` / `stale-base-version` / `type-change` / `conflict` | `ensure_new` and slug taken; the slug moved past `expected_latest_version`; the version would change the document's type; or a concurrent append lost the race. |
 | `410` | `idempotency-stale` | A cached idempotent reply points at a now-inaccessible artifact. |
 | `413` | `too-large` | Body over the 200 MiB limit. |
 | `500` | `internal` | Server-side fault. |

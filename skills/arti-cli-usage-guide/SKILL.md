@@ -92,7 +92,7 @@ Patterns match reader email or a group: `--access '*@example.com'`,
 - `--private` = creator-only (sends an explicit empty list). Mutually exclusive with `--access`.
 - `--write-access` (a subset of readers who may push new versions / append / edit) and
   `--write-private` (creator-only writes, readers stay read-only) — on `add`, `append`,
-  and `access` alike. Absent = writers follow readers.
+  and `access` alike. Absent = writers follow readers, except that a skill (label `skill` or `kind:skill`) is owner-only.
 - **Access is per-DOCUMENT, not per-version:** an access pair that differs from the
   slug's current one applies to every version (archived included), and only the slug's
   owner (its first version's creator, unless transferred) or an admin may change it. Re-sending the

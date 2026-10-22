@@ -1,7 +1,7 @@
 ---
 title: Introduction
 order: 1
-summary: arti is AngelList's artifact service — versioned text, multi-file PACKAGE bundles, and interactive APP artifacts, reachable from a web UI, REST API, MCP server, and CLI over one Postgres table plus S3 blob storage.
+summary: arti is AngelList's artifact service — versioned text, multi-file PACKAGE bundles, interactive APP artifacts, file attachments, and keyed MAP stores, reachable from a web UI, REST API, MCP server, and CLI over Postgres plus S3 blob storage.
 ---
 
 # Introduction
@@ -12,12 +12,13 @@ Almost anything you produce and want to keep can be an artifact: a generated rep
 
 ## What an artifact can be
 
-Four types, all rows in one table:
+Five types, all rows in one table:
 
 - **TEXT** — markdown, HTML, or plaintext. The common case. Bodies ≤ 64 KiB live inline in Postgres; larger bodies spill to S3. Rendered in the viewer with the right chrome for its MIME type.
 - **PACKAGE** — a multi-file bundle. Upload a directory; the CLI zips it deterministically and the server records a file manifest. Individual entries are fetchable without downloading the whole zip.
 - **APP** — a PACKAGE that also ships an `arti-app.json` manifest declaring a tool allowlist. arti injects an app bridge at serve time so the app's JavaScript can call MCP tools (and an LLM) through arti's governed proxy — no backend, no API keys of its own. See [App serving](../architecture/app-serving.md).
-- **ATTACHMENT** — a user-uploaded binary (a chat attachment, a PDF). Always S3-backed, never slugged or versioned, creator-only by default, hidden from the catalog for non-admins. See [Attachments](../architecture/attachments.md).
+- **ATTACHMENT** — a user-uploaded binary (a chat attachment, a PDF). Always S3-backed. A file another app posts is slugless, single-version and creator-only; a file a person publishes under a slug is an ordinary versioned document. See [Attachments](../architecture/attachments.md).
+- **MAP** — a keyed key/value store under one slug rather than a document body. Writes change a live head in place; a version is minted only when someone takes a snapshot. Behind the `ARTI_MAP_ARTIFACTS` flag, off by default. See [Concepts](concepts.md#artifact-types).
 
 The exact type constants and rules live in `internal/store/pgstore/store.go`. Read [Concepts](concepts.md) for crisp definitions of every noun.
 
@@ -27,14 +28,14 @@ Every operation is available on every surface; the service layer in `internal/ar
 
 | Surface | Endpoint | For |
 |---|---|---|
-| **Web UI** | `https://arti.example.com/` | Browse the catalog, view/render artifacts, share links, manage groups and roles. See [Web UI](../guides/web-ui.md). |
+| **Web UI** | `https://arti.example.com/` | Browse the catalog, view/render artifacts, write markdown and diagrams, share links, manage groups and roles. See [Web UI](../guides/web-ui.md). |
 | **REST API** | `/api/artifacts/*` | Scripts and services. JSON in, content streamed back with its original MIME type. See [REST API](../reference/rest-api.md). |
 | **MCP server** | `/mcp` (JSON-RPC 2.0) | Agents. The same operations exposed as MCP tools (`add_artifact`, `get_artifact`, `search_artifacts`, …). See [MCP guide](../guides/mcp.md). |
 | **CLI** | `arti` (single static binary) | Humans at a terminal and shell automation. See [Command line](../guides/command-line.md). |
 
-## Backed by one table plus blob storage
+## Backed by Postgres plus blob storage
 
-- **Postgres** holds every artifact row: UUID, slug, version, type, content type, scope, labels, access list, and a schema-less JSONB `metadata` column for type-specific extras (e.g. a PACKAGE's entry manifest). TEXT bodies ≤ 64 KiB are stored inline in the same row.
+- **Postgres** holds every artifact row: UUID, slug, version, type, content type, scope, labels, access list, and a schema-less JSONB `metadata` column for type-specific extras (e.g. a PACKAGE's entry manifest). TEXT bodies ≤ 64 KiB are stored inline in the same row. A MAP's keys are the one exception to "one row": they live in a side table keyed by the map's id.
 - **S3-compatible blob storage** (AWS S3 in prod, RustFS locally) holds everything else: large TEXT bodies, all PACKAGE/APP zips, and all ATTACHMENT files. A `blob_ref` on the row points at the object.
 
 That is the whole storage model. See [Data model](../architecture/data-model.md) for the column-level detail and [System overview](../architecture/system-overview.md) for how the pieces wire together.
@@ -52,7 +53,7 @@ Reach for arti when you have an **output that needs a durable, shareable, access
 
 Reach for something else when:
 
-- **You need continuous, fine-grained editing** — a document a team edits line-by-line throughout the day belongs in Notion or a Google Doc. arti has no editor and versions whole snapshots, not individual edits (it's happy to hold many iterations of the same thing, just not to edit them in place).
+- **You need continuous, fine-grained editing** — a document a team edits line-by-line throughout the day belongs in Notion or a Google Doc. arti's web editor (markdown and diagrams) saves each edit as a whole new version, not an in-place change, and there is no live co-editing (it's happy to hold many iterations of the same thing, just not to edit them in place).
 - **You need a code repository** — use git/GitHub. arti versions are append-only snapshots, not branches or diffs.
 - **You need a long-lived structured record other systems join against** — that belongs in a real schema, not a JSONB metadata blob.
 

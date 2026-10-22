@@ -825,6 +825,12 @@ describe("CatalogTable mobile cards", () => {
     expect((cards().querySelector("button") as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("does not offer archive to a person a service principal credited", () => {
+    nav.search = "slug=weekly-report";
+    render([row({ asserted_by: "couch@sa.arti.invalid" })], { email: "sam@example.com", name: "Sam", is_admin: false, permissions: [] });
+    expect((cards().querySelector("button") as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("marks an archived row on the card and offers to restore it", () => {
     nav.search = "slug=weekly-report";
     render([row({ deleted_at: "2026-08-01T00:00:00Z" })]);

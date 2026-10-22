@@ -30,6 +30,11 @@ type fakeServiceStore struct {
 	revokeErr     error
 	revokeByIDN   int64
 	revokeByIDErr error
+	services      map[string]bool // active service principals
+}
+
+func (f *fakeServiceStore) IsActiveServicePrincipal(_ context.Context, email string) bool {
+	return f.services[email]
 }
 
 func (f *fakeServiceStore) InsertAPIKey(_ context.Context, arg sqlc.InsertAPIKeyParams) (sqlc.ApiKey, error) {

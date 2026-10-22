@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,15 +28,20 @@ type serviceStore interface {
 	ListAllAPIKeys(ctx context.Context) ([]sqlc.ApiKey, error)
 	RevokeAPIKey(ctx context.Context, arg sqlc.RevokeAPIKeyParams) (int64, error)
 	RevokeAPIKeyByID(ctx context.Context, id pgtype.UUID) (int64, error)
+	IsActiveServicePrincipal(ctx context.Context, email string) bool
 }
 
 // Minted describes a key that has just been created, for notifying its owner.
 type Minted struct {
 	OwnerEmail string
-	Name       string
-	KeyPrefix  string
-	Scopes     []string
-	ExpiresAt  time.Time
+	// MintedBy is the admin who minted a service principal's key; empty when the
+	// owner minted it. The notification goes to them, since a service principal
+	// has no inbox.
+	MintedBy  string
+	Name      string
+	KeyPrefix string
+	Scopes    []string
+	ExpiresAt time.Time
 }
 
 // Service handles the mint/list/revoke HTTP layer for API keys.
@@ -69,12 +75,19 @@ func (s *Service) WithUsage(u usageStore) *Service { s.usage = u; return s }
 // (the mint path); list and revoke are authenticated but not separately rate-limited.
 func (s *Service) Mount(r chi.Router, mintLimiter func(http.Handler) http.Handler) {
 	r.With(mintLimiter).Post("/api/keys", s.httpCreate)
+	r.With(mintLimiter).Post("/api/admin/service-keys", s.httpMintServiceKey)
 	r.Get("/api/keys", s.httpList)
 	r.Get("/api/keys/usage", s.httpUsage)
 	r.Delete("/api/keys/{id}", s.httpRevoke)
 }
 
 // ─── request/response types ─────────────────────────────────────────────────
+
+type serviceKeyReq struct {
+	OwnerEmail string `json:"owner_email"`
+	Name       string `json:"name"`
+	TTLDays    int    `json:"ttl_days"`
+}
 
 type createReq struct {
 	Name    string   `json:"name"`
@@ -173,16 +186,68 @@ func (s *Service) httpCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "unsupported scope: "+scope)
 		return
 	}
+	if scope == auth.ServiceScope {
+		writeErr(w, http.StatusBadRequest, "service keys are minted by an admin for a service principal (POST /api/admin/service-keys)")
+		return
+	}
+	s.mint(w, r, email, "", scope, body.Name, body.TTLDays)
+}
 
-	if body.Name == "" {
+// httpMintServiceKey is an admin minting a key for a service principal: a
+// non-human identity nobody can log in as, so nobody could mint its key the
+// self-serve way. Same browser-session rule as httpCreate, plus
+// MANAGE_API_KEYS, and the owner must be an active admin-created service
+// principal. The key carries the service scope and records who minted it.
+func (s *Service) httpMintServiceKey(w http.ResponseWriter, r *http.Request) {
+	if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims.Typ == auth.TokenTypeAPIKey {
+		writeErr(w, http.StatusForbidden, "api keys cannot mint other keys")
+		return
+	}
+	if cred := auth.CredentialFromContext(r.Context()); !cred.FromBrowser() {
+		writeErr(w, http.StatusForbidden, "service keys are minted from a browser session")
+		return
+	}
+	caller := auth.EmailFromContext(r.Context())
+	if caller == "" {
+		writeErr(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	ok, err := s.canManageAll(r.Context(), caller)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "permission check failed")
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusForbidden, "MANAGE_API_KEYS required")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var body serviceKeyReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	owner := strings.ToLower(strings.TrimSpace(body.OwnerEmail))
+	if !s.store.IsActiveServicePrincipal(r.Context(), owner) {
+		writeErr(w, http.StatusBadRequest, "owner_email must be an active service principal added by an admin")
+		return
+	}
+	s.mint(w, r, owner, caller, auth.ServiceScope, body.Name, body.TTLDays)
+}
+
+// mint stores a new key for owner and returns its plaintext once. mintedBy is
+// empty when the owner mints their own key.
+func (s *Service) mint(w http.ResponseWriter, r *http.Request, owner, mintedBy, scope, name string, ttlDays int) {
+	scopes := []string{scope}
+	if name == "" {
 		writeErr(w, http.StatusBadRequest, "name is required")
 		return
 	}
 
 	// Clamp TTL: default 90d, minimum 1d, maximum maxTTL.
 	ttl := defaultTTL
-	if body.TTLDays > 0 {
-		ttl = time.Duration(body.TTLDays) * 24 * time.Hour
+	if ttlDays > 0 {
+		ttl = time.Duration(ttlDays) * 24 * time.Hour
 	}
 	if ttl < minTTL {
 		ttl = minTTL
@@ -200,10 +265,11 @@ func (s *Service) httpCreate(w http.ResponseWriter, r *http.Request) {
 	row, err := s.store.InsertAPIKey(r.Context(), sqlc.InsertAPIKeyParams{
 		KeyHash:    hash,
 		KeyPrefix:  prefix,
-		OwnerEmail: email,
-		Name:       body.Name,
-		Scopes:     body.Scopes,
+		OwnerEmail: owner,
+		Name:       name,
+		Scopes:     scopes,
 		ExpiresAt:  pgtype.Timestamptz{Time: time.Now().Add(ttl), Valid: true},
+		MintedBy:   nilIfEmpty(mintedBy),
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to store key")
@@ -211,14 +277,16 @@ func (s *Service) httpCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("api key minted",
-		"owner", email,
+		"owner", owner,
+		"minted_by", mintedBy,
 		"id", uuid.UUID(row.ID.Bytes).String(),
-		"scopes", body.Scopes,
+		"scopes", scopes,
 	)
 
 	if s.notifyMint != nil {
 		ev := Minted{
-			OwnerEmail: email,
+			OwnerEmail: owner,
+			MintedBy:   mintedBy,
 			Name:       row.Name,
 			KeyPrefix:  row.KeyPrefix,
 			Scopes:     row.Scopes,
@@ -337,6 +405,13 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func nilIfEmpty(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {

@@ -24,8 +24,11 @@ describe("browseRowHref", () => {
       `/?q=${encodeURIComponent("content_type:text/markdown")}`,
     );
   });
-  it("owner facet maps to a creator: token in q", () => {
+  it("owner opens the documents a person owns, creator the ones they wrote", () => {
     expect(browseRowHref("owner", "alice@example.com")).toBe(
+      `/?q=${encodeURIComponent("owner:alice@example.com")}`,
+    );
+    expect(browseRowHref("creator", "alice@example.com")).toBe(
       `/?q=${encodeURIComponent("creator:alice@example.com")}`,
     );
   });

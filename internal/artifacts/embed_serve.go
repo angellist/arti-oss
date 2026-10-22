@@ -96,6 +96,27 @@ func (s *Service) ServeForEmbedPinned(w http.ResponseWriter, r *http.Request, su
 	return served, false
 }
 
+// ServeForEmbedViewer is ServeForEmbedPinned without the artifact pin, for the
+// viewer-session cookie (pinned to the slug instead). It refuses an APP, writing
+// nothing, because an APP runs tools as the viewer and needs a fresh consent.
+func (s *Service) ServeForEmbedViewer(w http.ResponseWriter, r *http.Request, surface, ident string, ver *int32, viewer, frameAncestors string) (served bool) {
+	row, err := s.resolveIdent(r.Context(), ident, ver, viewer)
+	if err != nil || row.ArtifactType == pgstore.TypeApp {
+		return false
+	}
+	aid := pgstore.UUIDFromPG(row.ArtifactID).String()
+	tw := &writeErrTracker{ResponseWriter: w}
+	if row.ArtifactType == pgstore.TypePackage {
+		served = s.serveEmbedPackageEntry(tw, r, row, viewer, frameAncestors, s.embedFilesBase(surface, viewer, aid))
+	} else {
+		served = s.serveEmbedBody(tw, r, row, frameAncestors)
+	}
+	if served && tw.err == nil {
+		s.recordView(r, row, viewer, "embed-viewer")
+	}
+	return served
+}
+
 // ServeForEmbedUser is ServeForEmbed for a user-mode surface: there is NO
 // serve-time caller — the route's secret + slug_allow checks are the whole
 // gate for the static content (so any secret-holder can fetch the page's

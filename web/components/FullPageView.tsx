@@ -1,9 +1,10 @@
 import CommentsLayer from "./CommentsLayer";
+import FullPageAccess from "./FullPageAccess";
 import FullPageExit from "./FullPageExit";
 import FullPageHtmlFrame from "./FullPageHtmlFrame";
 import DiagramFigure from "./DiagramSvg";
 import { parseDiagram, type DiagramDoc } from "@/lib/diagram";
-import type { Me } from "@/lib/types";
+import type { ArtifactInfo, Me } from "@/lib/types";
 import { Frontmatter, renderMarkdown, PROSE_CLASSNAME } from "@/lib/markdown";
 import { fullPageKind, isJSONContentType, prettyPrintJSON } from "@/lib/viewer";
 import { encodeFilePath } from "@/lib/arti";
@@ -38,6 +39,7 @@ export default function FullPageView({
   entries,
   entryPoint,
   me,
+  info,
   textScale = 1,
   commentsEnabled = true,
 }: {
@@ -51,6 +53,8 @@ export default function FullPageView({
   entries?: Array<{ path: string; content_type: string }>;
   entryPoint?: string | null;
   me?: Me | null;
+  // Present → the access dot beside the ✕.
+  info?: ArtifactInfo;
   // Text scale multiplier — applied to text/markdown and text/plain views by
   // setting --arti-text-scale on the container, and to HTML bodies as a `zoom`
   // on the iframe element (see the html branch). Mirrors ArtifactViewer's
@@ -76,7 +80,12 @@ export default function FullPageView({
   // on the document like the Frontmatter disclosure below, so the theme it
   // holds cannot outlive the page it was measured from.
   const docKey = `${artifactID ?? ""}:${filePath ?? ""}`;
-  const exit = <FullPageExit key={docKey} />;
+  const exit = (
+    <>
+      {info ? <FullPageAccess key={`access:${docKey}`} info={info} me={me} /> : null}
+      <FullPageExit key={docKey} />
+    </>
+  );
   const kind = fullPageKind(contentType);
   // Non-text kinds (image/pdf/binary) render from the raw same-origin bytes
   // URL — never by coercing `body` (which for these is raw bytes-as-string)
@@ -181,6 +190,20 @@ export default function FullPageView({
         {exit}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={rawSrc} alt={title} className="max-h-full max-w-full object-contain" />
+      </div>
+    );
+  }
+  if ((kind === "video" || kind === "audio") && rawSrc) {
+    return (
+      <div className="arti-fullpage-layer flex items-center justify-center overflow-auto bg-black p-4">
+        {tracker}
+        {comments}
+        {exit}
+        {kind === "video" ? (
+          <video src={rawSrc} controls autoPlay playsInline preload="metadata" className="max-h-full max-w-full" />
+        ) : (
+          <audio src={rawSrc} controls preload="metadata" className="w-full max-w-xl" />
+        )}
       </div>
     );
   }

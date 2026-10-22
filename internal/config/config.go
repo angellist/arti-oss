@@ -35,6 +35,7 @@ type Config struct {
 	Comments      Comments      `yaml:"comments"`
 	Notifications Notifications `yaml:"notifications"`
 	LLM           LLM           `yaml:"llm"`
+	Dictation     Dictation     `yaml:"dictation"`
 }
 
 // Server holds listener addressing and canonical URLs.
@@ -229,13 +230,21 @@ type Notifications struct {
 
 // LLM configures the built-in llm.complete service.
 type LLM struct {
-	APIKey        string   `yaml:"-"` // ANTHROPIC_API_KEY; empty → llm disabled
-	DefaultModel  string   `yaml:"default_model"`
-	AllowedModels []string `yaml:"allowed_models"`
-	RPMPerViewer  int      `yaml:"rpm_per_viewer"`
-	TPHPerViewer  int64    `yaml:"tph_per_viewer"`
-	TPHPerApp     int64    `yaml:"tph_per_app"`
-	TPDPerOrg     int64    `yaml:"tpd_per_org"`
+	APIKey          string   `yaml:"-"` // ANTHROPIC_API_KEY; empty → llm disabled
+	DefaultModel    string   `yaml:"default_model"`
+	AllowedModels   []string `yaml:"allowed_models"`
+	RPMPerViewer    int      `yaml:"rpm_per_viewer"`
+	TPHPerViewer    int64    `yaml:"tph_per_viewer"`
+	TPHPerApp       int64    `yaml:"tph_per_app"`
+	TPDPerOrg       int64    `yaml:"tpd_per_org"`
+	USDPerViewerDay int64    `yaml:"usd_per_viewer_day"`
+}
+
+// Dictation configures voice input in the comment box (POST /api/dictate).
+type Dictation struct {
+	APIKey       string `yaml:"-"`              // OPENAI_API_KEY; empty → dictation disabled
+	Language     string `yaml:"language"`       // ISO-639-1 sent to the provider; empty → detect per clip
+	RPMPerViewer int    `yaml:"rpm_per_viewer"` // 0 = no cap
 }
 
 // LookupFn abstracts the process environment so Load is testable.

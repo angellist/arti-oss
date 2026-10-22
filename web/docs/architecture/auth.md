@@ -1,7 +1,7 @@
 ---
 title: Authentication & access
 order: 3
-summary: Humans authenticate via Google OAuth → Dex at the protected ingress and get an arti_session cookie; CLIs and headless agents get bearer tokens via the pair and RFC 8628 device flows; self-serve API keys give upload-only programmatic access; scoped app/embed tokens are minted for sandboxed pages and rejected on session routes.
+summary: Humans authenticate via Google OAuth → Dex at the protected ingress and get an arti_session cookie; CLIs and headless agents get bearer tokens via the pair and RFC 8628 device flows; self-serve API keys give upload-only programmatic access; admin-minted service keys act for a service principal; scoped app/embed tokens are minted for sandboxed pages and rejected on session routes.
 ---
 
 # Authentication & access
@@ -23,21 +23,35 @@ apply on every path: an **email-domain allowlist** and, when configured,
   have the suffix stripped before matching, so the config can stay short
   (`engineers` matches `engineers@example.com`).
 
+The allowlist check also refuses two kinds of address outright, on every path
+that runs it (all but the service secret; a service principal's key is checked
+against the roster instead):
+any address under the reserved `.invalid` TLD (service principals use these; see
+[below](#service-principals)), and any user an admin has **deactivated** on
+Settings → Users (`MANAGE_ROLES`). Deactivation deletes nothing — keys, roles,
+groups and documents stay — so it ends every cookie, bearer, API key and app
+token the person holds, and reactivating restores exactly what they had. The
+deactivation list is cached for at most 15 seconds, and a failed lookup denies.
+
 ## How a request is admitted
 
 The middleware tries credentials in order, admitting on the first that validates:
 
 1. **Service secret** — a shared-secret header (`X-Arti-Service-Secret`) for
    service-to-service callers (e.g. the couch FE proxy), compared constant-time.
-   Identity becomes a service principal.
+   Identity becomes the configured service email (`ARTI_SERVICE_EMAIL`, default
+   `service@arti.invalid`). This is not a roster
+   [service principal](#service-principals).
 2. **Token extraction** — a bearer is pulled from, in order, the `Authorization:
    Bearer` header, the `arti_session` cookie, then the forwarded
    `X-Auth-Request-Access-Token` header. (Cookie-before-forwarded-token precedence
    matters: the arti-signed cookie proves the login-time group gate that the
    forwarded proxy token lacks.) No token → `401`.
-3. **API key** — a token with the `arti_` prefix is looked up as a self-serve
+3. **API key** — a token with the `arti_` prefix is looked up as an
    [API key](#scoped-credentials) (SHA-256 match against a non-revoked, unexpired
-   row) and run through the domain gate. A bad key is `401`; it does not fall through.
+   row) and run through the domain gate, or, for a
+   [service principal's](#service-principals) key, through the active-service-principal
+   check instead. A bad key is `401`; it does not fall through.
 4. **OIDC bearer** — verified against Dex (JWKS). A domain/group rejection is `403`.
 5. **HS256 bearer** — the in-process signer behind the `arti_session` cookie,
    CLI-pair, and device tokens; app- and embed-scoped tokens are rejected here (below).
@@ -74,8 +88,10 @@ The cookie path applies no separate required-groups check, and that is
 deliberate: both interactive login handlers apply `AUTH_REQUIRED_GROUPS` before
 they mint `arti_session`, so a cookie that verifies has already passed the gate,
 and an `oidc`-mode request carries no groups header to re-read. The proxy path
-keeps checking `X-Auth-Request-Groups` on every request, where the proxy is the
-live authority on group membership.
+does not re-read `X-Auth-Request-Groups`: that header is read only by the login
+handler and `/oauth/authorize`, which sit behind the proxy. An OIDC bearer
+(including the proxy's forwarded access token) is checked against its own
+groups claim on every request.
 
 There is also a **local dev bypass** (`ARTI_AUTH_DISABLED`) that attributes every
 request to a fixed email and logs a loud warning. Never enable it in prod — and with
@@ -96,6 +112,11 @@ oauth2-proxy → Dex has already authenticated them, so the request carries the
   the `arti_session` cookie (HttpOnly, SameSite=Lax, Secure in prod).
 - Logging out clears the cookie and redirects to oauth2-proxy's sign-out so the
   upstream Dex session is revoked too.
+
+In `oidc` mode there is no proxy: arti runs the authorization-code flow itself
+(PKCE and a nonce) at `/auth/login` and `/auth/callback`, applies the same two
+gates, and mints the same cookie. Either login records the person in the users
+roster.
 
 The cookie is the credential for all in-app API calls. It is *also* what
 identifies the user at the OBO callback, where the public-ingress
@@ -158,7 +179,8 @@ middleware, which pins it to a single artifact/app.
 The **upload** scope is enforced separately, by a guard that sits after the main
 auth middleware in the authed group. For an upload credential it (a) applies a
 default-deny allowlist — downgrading *even an admin* to create/append/read only —
-and (b) caps the body size (`ARTI_DEVICE_MAX_UPLOAD_BYTES`). So a leaked upload bearer can never delete or
+and (b) caps the body size (`ARTI_DEVICE_MAX_UPLOAD_BYTES`; the default is 200 MiB,
+the same cap every write path has). So a leaked upload bearer can never delete or
 reach admin. Device tokens additionally re-check that the long-lived family isn't
 revoked or expired on every call.
 
@@ -167,8 +189,43 @@ stored only as a SHA-256 hash, minted self-serve by any authenticated user and t
 to that user's email. They carry the `upload` scope, so they hit the exact same guard
 (and body cap) as a device token — never delete, edit, admin, or MCP. Revocation and
 expiry are enforced at the API-key auth rung (a revoked or expired key simply fails to
-authenticate). Minting a key requires a full-access credential; an upload credential
-can't mint more keys.
+authenticate). Minting a key requires a **browser session**: a CLI or MCP bearer, an
+upload credential and another API key are all refused, so an agent holding its
+owner's bearer cannot mint keys the owner never sees.
+
+Each write records the credential that made it (`written_via` on the version), and
+each credential's use is counted per day by network and user agent. The owner of an
+API key can be told on Slack when a key is minted under their name and when it is
+first used from a new network; both notifications are off until the person turns
+them on.
+
+## Service principals {#service-principals}
+
+A **service principal** is a non-human identity: a `kind: service` row an admin
+adds to the users roster, under an address in the reserved `.invalid` TLD. No
+identity provider can issue a login for such an address and no allowlist entry
+admits one, so the principal has no session and nobody can mint its key the
+self-serve way.
+
+- **Keys.** An admin with `MANAGE_API_KEYS` mints its key from a browser session
+  (`POST /api/admin/service-keys`). The key carries the `service` scope — a full
+  bearer for that principal, `/mcp` included, not the upload allowlist — and
+  records the admin in `minted_by`. The key authenticates only while the roster
+  row is admin-created, `kind: service`, `.invalid`, and not deactivated, so
+  deactivating the row cuts off the key.
+- **Writing for a person** (`ASSERT_ACTOR`). A principal holding this permission
+  may send `X-Arti-Acting-For: <email>` on a create or append. The named person
+  must be an allowed, active user and not a service principal. The person is
+  recorded as the version's `creator`, the principal in `asserted_by`;
+  authorization is the principal's alone. A slug the principal opens this way is
+  owned by the principal. Any other route refuses the header.
+- **Reading org-wide documents** (`READ_ORG_SHARED`). A `.invalid` address never
+  matches a `*@<domain>` grant, so a principal holding this permission is given one
+  such read token per domain on the login allowlist. It affects document reads,
+  lists, search and aggregates only — never writes, comments or the apps proxy —
+  and gives a person holding it nothing.
+
+See the [REST API reference](../reference/rest-api.md) for the request shapes.
 
 ## Access control on reads
 
@@ -178,8 +235,18 @@ read a row if they're the creator, an `allowed_access` pattern matches their ema
 (glob-aware, case-insensitive), the pattern is `*` (everyone authenticated), or a
 `group:<name>` token overlaps their group membership. Admins (gated by RBAC /
 config) bypass the filter for management actions. Restricted artifacts return
-`404`, not `403`, so they can't be probed. See [Data model](data-model.md) for the
-column itself.
+`404`, not `403`, so they can't be probed. An archived version is visible only to
+its creator, the document's owner and admins. See [Data model](data-model.md) for
+the column itself.
+
+Writes answer to the document's **owner** — a stored record per slug, claimed by
+the first version and moved only by an explicit transfer (see
+[Sharing](../guides/sharing.md)). The owner may always write. Otherwise, when
+`allowed_write` is NULL write follows read; when it is set, it is the write list,
+and an empty list means owner-only. A **skill** (an artifact labelled `skill` or
+`kind:skill`) with no write list is owner-only, because other agents load it as
+instructions. Changing the ACL, the comment switch, share links or the owner takes
+the owner or an admin (`MANAGE_ARTIFACTS`).
 
 One rule sits above all of that: the **block list**. An admin with
 `MANAGE_ARTIFACTS` can block a slug, a slug glob, or a slug-less artifact's id, and

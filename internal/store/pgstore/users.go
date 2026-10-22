@@ -17,8 +17,9 @@ import (
 // The roster is a projection, never an authority. It reads the same
 // knownPrincipalsCTE the access-editor typeahead reads (people.go), so the two
 // surfaces cannot disagree about who exists, and it resolves roles and group
-// membership through the same code the access checks use. Nothing here is
-// consulted when deciding access.
+// membership through the same code the access checks use. One exception decides
+// access: IsActiveServicePrincipal, which lets an admin-added `kind: service` row
+// under the reserved .invalid TLD hold a key that skips the email allowlist.
 
 // HeldRole is one role a principal holds and where it came from: "baseline"
 // (the implicit USER role), "direct" (assigned to their email), or
@@ -330,8 +331,9 @@ var emailRe = regexp.MustCompile(`^[^\s*@]+@[^\s*@]+\.[^\s*@]+$`)
 // existing row updates its kind, note and attribution rather than failing, so
 // the caller can correct a typo'd note without a delete.
 //
-// This grants nothing. It records that a principal exists; roles are assigned
-// separately, and no access decision reads this table.
+// This grants no role. It records that a principal exists; roles are assigned
+// separately. A `kind: service` row with a .invalid address is the one row an
+// access decision reads (IsActiveServicePrincipal).
 func (s *Store) AddUser(ctx context.Context, email, kind, note, addedBy string) (RosterUser, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
@@ -376,4 +378,34 @@ func (s *Store) GetRosterUser(ctx context.Context, email string) (RosterUser, er
 		}
 	}
 	return RosterUser{}, ErrNotFound
+}
+
+// IsActiveServicePrincipal reports whether email is a service principal an admin
+// created and nobody has deactivated. A backfilled or self-registered row never
+// qualifies, whatever its kind, and neither does any address outside the
+// reserved .invalid TLD: AddUser upserts, so an admin could otherwise relabel a
+// real person as a service and mint a key under their name. Fails closed: a
+// lookup error is false.
+func (s *Store) IsActiveServicePrincipal(ctx context.Context, email string) bool {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if !strings.HasSuffix(email, ".invalid") || !strings.Contains(email, "@") {
+		return false
+	}
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM users WHERE email = $1 AND kind = $2 AND source = $3)`,
+		email, UserKindService, UserSourceAdmin).Scan(&ok)
+	if err != nil || !ok {
+		return false
+	}
+	return !s.IsDeactivated(email)
+}
+
+// IsServicePrincipal reports whether email has a service roster row of any
+// source. A service principal may not be named as the person a write is for.
+func (s *Store) IsServicePrincipal(ctx context.Context, email string) (bool, error) {
+	var ok bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE email = $1 AND kind = $2)`,
+		strings.ToLower(strings.TrimSpace(email)), UserKindService).Scan(&ok)
+	return ok, err
 }

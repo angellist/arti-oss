@@ -29,10 +29,11 @@ current state with a green (allowed) or grey (off) dot.
   on for v3 and off for v4. Inheritance also falls back to archived rows: a slug
   whose versions are *all* archived is still re-versionable, and republishing
   onto it must not re-open a document the owner closed.
-- **Owner only.** The setter is the slug's OWNER — the creator of its *earliest*
-  version — or a `MANAGE_ARTIFACTS` admin. It is deliberately not the patched
-  version's creator: versioning reassigns that field, so a delegated writer could
-  otherwise push a content-only version and take over the switch. The DTO carries
+- **Owner only.** The setter is the slug's OWNER — the stored owner record,
+  claimed by the first version and moved only by an explicit transfer — or a
+  `MANAGE_ARTIFACTS` admin. It is deliberately not the patched version's creator:
+  versioning reassigns that field, so a delegated writer could otherwise push a
+  content-only version and take over the switch. The DTO carries
   the server's own verdict as `can_manage_comments`, so the UI never re-derives it.
 - **Off means gone, not hidden.** The viewer mounts no overlay, arti-server stops
   injecting the overlay into served HTML, the list endpoints (REST and MCP) report
@@ -95,6 +96,26 @@ on the regular API/MCP routes (it's embed-scoped — see
 is kept out of the Next middleware matcher, so the sandboxed page can load the
 bundle as a subresource.
 
+## Writing comments from the API and MCP
+
+The same write path serves the overlay, the REST API and MCP, so a script or an
+agent can comment as itself:
+
+- REST: `POST /api/artifacts/{id}/comments` or
+  `POST /api/artifacts/by-slug/{slug}/comments` (the latest version the caller
+  can read, or `?version=`), then `POST /api/comments/{threadID}/replies`, `/resolve` and `/reopen`.
+- MCP: `add_comment`, `reply_to_comment`, `resolve_comment` and `list_comments`.
+  An APP reaches the same tools in-process (see [App serving](app-serving.md)).
+
+A write may name a `quote` instead of an anchor. arti checks the quote against
+the text the page renders, so a quote that still carries markdown markup is
+refused with a message saying so; quotes are refused outright on PACKAGE, APP
+and MAP artifacts, whose stored bytes are not the page. With neither, the
+comment lands on the doc thread. Each comment records where it came from
+(`source`: `web`, `embed` or `mcp`). Writes are rate-limited per caller,
+in memory on each pod: `ARTI_COMMENTS_GLOBAL_RPM` (default 30 a minute) across
+all documents and `ARTI_COMMENTS_ARTIFACT_RPM` (default 10) on one document.
+
 ## Slack notifications
 
 When a Slack bot token is configured, comment events DM the relevant people via the
@@ -109,10 +130,13 @@ pin number; the notifier then resolves Slack users by email and sends the DMs.
 Permalinks are the artifact viewer URL with a `#comment-<id>` hash, which the overlay
 opens to that exact comment on load.
 
-The owner here is the **document's** owner — the creator of the slug's earliest
-version, the same identity `pgstore.IsDocOwner` gates ACL changes on — not the
-creator of the version being commented on, which versioning reassigns to whoever
-pushed it.
+The owner here is the **document's** owner — the stored owner of the slug, the
+same identity `pgstore.IsDocOwner` gates ACL changes on — not the creator of the
+version being commented on, which versioning reassigns to whoever pushed it.
+
+Each recipient can turn comment DMs off for themselves (Settings →
+Notifications; on by default), and an admin's deployment switch stops every
+Slack notification at once.
 
 ## Mentions
 

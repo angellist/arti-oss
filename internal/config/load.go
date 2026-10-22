@@ -91,6 +91,7 @@ func Defaults() *Config {
 			TPHPerViewer:  300000,
 			TPHPerApp:     1000000,
 		},
+		Dictation: Dictation{RPMPerViewer: 20},
 	}
 }
 
@@ -315,6 +316,12 @@ func bindings(c *Config) []binding {
 		int64Var("ARTI_LLM_TPH_PER_VIEWER", &c.LLM.TPHPerViewer),
 		int64Var("ARTI_LLM_TPH_PER_APP", &c.LLM.TPHPerApp),
 		int64Var("ARTI_LLM_TPD_PER_ORG", &c.LLM.TPDPerOrg),
+		int64Var("ARTI_LLM_USD_PER_VIEWER_DAY", &c.LLM.USDPerViewerDay),
+
+		// Dictation
+		str("OPENAI_API_KEY", &c.Dictation.APIKey),
+		str("ARTI_DICTATION_LANGUAGE", &c.Dictation.Language),
+		integer("ARTI_DICTATION_RPM_PER_VIEWER", &c.Dictation.RPMPerViewer),
 	}
 }
 

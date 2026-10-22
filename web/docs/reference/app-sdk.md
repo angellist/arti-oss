@@ -21,16 +21,31 @@ built-in servers, and `llm.complete`. For the proxy endpoint itself see the
 ## What gets injected
 
 When arti serves an APP's HTML entry page it rewrites the body before sending it
-(`internal/artifacts/server.go:1787`, `injectAppBridge`):
+(`injectAppBridge`, `internal/artifacts/server.go`):
 
 1. A `<base href>` pointing relative asset references at the package-files API, unless
-   the page already declares its own `<base>` (`injectBaseHref`, `internal/artifacts/server.go:1739`).
+   the page already declares its own `<base>` (`injectBaseHref`, same file).
 2. `window.__ARTI_APP__` — the per-request config blob (below).
 3. The bridge script that defines `window.arti` and the host-compat shims.
 
-Injection only happens for `text/html` responses served to an authenticated viewer.
+Items 2 and 3 go in **just before the last `</body>`** (appended at the end when the
+page has none). An inline `<script>` earlier in the body runs before the bridge exists,
+so `window.arti` is still `undefined` there. Start your code from a
+`DOMContentLoaded` listener (or put it in a `<script defer>` / module file), not at the
+top level of an inline script:
+
+```html
+<script>
+  document.addEventListener("DOMContentLoaded", async () => {
+    const res = await window.arti.callTool("notion", "search", { query: "roadmap" });
+  });
+</script>
+```
+
+Injection only happens for `text/html` responses served to an authenticated viewer
+who has [consented](../architecture/app-serving.md#run-as-consent) to this version.
 Non-HTML package files are served as-is. The injected token is **per request, per
-viewer**, app-scoped, and lives ~12h (`appTokenTTL`, `internal/apps/apps.go:41`) — it
+viewer**, app-scoped, and lives ~12h (`appTokenTTL`, `internal/apps/apps.go`) — it
 is not part of the uploaded artifact and carries no upstream secrets.
 
 ## `window.__ARTI_APP__`
@@ -43,13 +58,14 @@ these fields are available directly.
 | `appId` | string (UUID) | This artifact's id. Sent as `app_id` on every proxy call. |
 | `token` | string (JWT) | The injected, app-scoped Bearer. Authenticates proxy calls. Reloading mints a fresh one. Injected only after the viewer has consented to this version — see [run-as consent](../architecture/app-serving.md#run-as-consent). |
 | `endpoint` | string | The proxy path — always `/api/apps/mcp`. |
-| `params` | object | Declared URL params, coerced per the manifest (see [params](#url-params)). `{}` when none declared. Also exposed as `window.arti.params`. |
+| `params` | object | Declared URL params, coerced per the manifest (see [params](#url-params)). Absent when none declared; `window.arti.params` is then `{}`. |
+| `connect` | object | Only on a `user`-mode [embed surface](../architecture/front-embed.md#per-user-mode-identity-user), which serves the page with no `token`. Carries the mint and poll endpoints the bridge uses to get one. |
 
-Source: `internal/artifacts/server.go:1795`.
+Source: `injectAppBridge` and `injectAppBridgeUser`, `internal/artifacts/server.go`.
 
 ## `window.arti`
 
-### `callTool(server, tool, args, opts?)`
+### `callTool(server, tool, args, opts?)` {#calltool}
 
 The one call that matters. POSTs a single `tools/call` to the proxy, which validates
 the app token, enforces the allowlist, resolves the named server, attaches the
@@ -87,13 +103,23 @@ The error also carries the proxy's structured fields: `err.code`, `err.status`,
 | `tool_error` | 503 | The server answered with a JSON-RPC error object (protocol-level: unknown method, malformed request). Retrying cannot help; `detail` carries the upstream code and message. Note that most MCP servers, Runlayer included, report a failed tool *execution* (unknown tool, bad arguments, SQL error) as a normal result with `isError: true`; that resolves, so check `result.isError` on success. |
 | `upstream_error` | 503 | Any other upstream failure (HTTP 5xx, malformed body, connection error). |
 | `server_lookup_failed` | 503 | arti could not read its connector list. Retry. |
-| `proxy_busy` | 503 | This arti pod is already relaying its maximum number of upstream calls. Retry after `err.retryAfter` seconds. |
+| `proxy_busy` | 503 | This arti pod is already relaying its maximum number of upstream calls (`ARTI_APP_CALL_MAX_INFLIGHT`, default 16; in-process `arti/*` and `llm` calls do not count). Retry after `err.retryAfter` seconds. |
 | `network_error` | 0 | Set client-side when `fetch` itself rejected: no response reached the page. From the sandboxed page this is what an edge error page without CORS headers looks like, as well as a real network failure. |
 | `not_allowlisted` | 403 | `server/tool` is missing from `arti-app.json`, or from the connector's tool allowlist on this arti. |
 | `unknown_server` | 400 | The server is not configured on this arti, or an admin disabled it. |
 | `edge_timeout` | 502/504/524 | Set client-side when nginx or Cloudflare answered with a non-JSON error page in arti's place. Treat like `upstream_timeout`. |
-| `bad-request`, `forbidden`, `slug-exists`, … | as REST | In-process `arti/*` tools answer with the same codes as `POST /api/artifacts`. |
+| `bad-request`, `forbidden`, `slug-exists`, … | as REST | In-process `arti/*` tools answer with the same codes as `POST /api/artifacts`. The comment tools answer `comment-error` with the REST comment status. |
 | `budget_exceeded`, `rate_limited`, … | see below | `llm/complete` has its own codes; see [Errors](#errors) under `llm.complete`. |
+
+Errors arti raises before it routes the call carry no `error` field, so `err.code` is
+`null` and `err.status` tells them apart: `400` for a malformed request or a missing or broken `arti-app.json`, `401` for a missing or expired app token
+(reload the page), `403` when the viewer's email is no longer allowed or the token is
+for another app, `404` when the viewer can no longer read the APP, `501` when the
+server needs OAuth or the LLM service and this arti has neither wired.
+
+**Upstream attribution.** Every call forwarded to an upstream MCP server carries
+`params._meta.consumer` naming the calling app: `arti:<slug>`, or `arti:<uuid>` for a
+slugless APP. An upstream can log it or fold it into its own audit tags.
 
 **Embedded per-user (no code change).** When the same APP is served into a
 `user`-mode [embed surface](../architecture/front-embed.md#per-user-mode-identity-user)
@@ -109,7 +135,7 @@ the visible "Connect as you" button.
 **OAuth handshake** is transparent: if the proxy returns `401 authorization_required`
 with an `authorize_url`, the bridge opens that URL in a popup, waits for the consent to
 post back `arti_oauth: "done"`, then retries the call once
-(`internal/artifacts/server.go:1696`). The `(server, tool)` pair must be in the
+(`appBridgeJS`, `internal/artifacts/server.go`). The `(server, tool)` pair must be in the
 manifest's `tools` allowlist or the proxy returns 403.
 
 ```js
@@ -124,7 +150,10 @@ artifacts as the signed-in viewer. All of arti's own tools run **in-process**
 (`internal/apps/apps.go`), reads and writes alike: same access as the viewer, **no
 consent popup**, and they work in local dev where no OBO upstream is wired. You still
 allowlist the underlying tools (`arti/read_artifact`, `arti/search_artifacts`, …) in the
-manifest.
+manifest. The in-process set is every tool in the
+[MCP tools reference](mcp-tools.md), including the comment tools and `map_get` /
+`map_put` / `map_delete` / `map_snapshot`, so an app can keep keyed state in a MAP
+artifact without rewriting a whole document.
 
 | Method | Returns | Wraps |
 |---|---|---|
@@ -148,7 +177,7 @@ const { artifacts } = await window.arti.search({ labels: ["dataset:demo"], limit
 
 The typed, coerced URL parameters the app declared in its manifest's `params` array,
 resolved against the request's query string by `resolveAppParams`
-(`internal/artifacts/appparams.go:45`). `{}` when nothing is declared.
+(`internal/artifacts/appparams.go`). `{}` when nothing is declared.
 
 Resolution is **lenient and never fails** (an embedded iframe must always render):
 
@@ -166,7 +195,7 @@ Resolution is **lenient and never fails** (an embedded iframe must always render
 ### Host-compat shims
 
 So unmodified Claude.ai / Cowork artifacts work without edits, the bridge also defines
-(only if absent) thin wrappers over `llm.complete` (`internal/artifacts/server.go:1716`):
+(only if absent) thin wrappers over `llm.complete` (`appBridgeJS`, `internal/artifacts/server.go`):
 
 | Global | Shape | Notes |
 |---|---|---|
@@ -181,20 +210,20 @@ handling, call `window.arti.callTool("llm", "complete", …)` directly.
 ## `arti-app.json` manifest
 
 A JSON file at the **root of the package** (`ManifestPath = "arti-app.json"`,
-`internal/apps/apps.go:43`). It declares the launch page, the URL-param contract, and —
+`internal/apps/apps.go`). It declares the launch page, the URL-param contract, and —
 critically — the exact `(server, tool)` allowlist. The proxy reads it fresh on every
-call and rejects anything not listed (`internal/apps/apps.go:203`).
+call and rejects anything not listed (`manifest.allows`, `internal/apps/apps.go`).
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `name` | string | no | Display name of the app. |
-| `entry` | string | no | Authoritative launch page within the package. Falls back to the package `entry_point`, then `index.html` (`internal/artifacts/server.go:1554`). |
+| `entry` | string | no | Authoritative launch page within the package. Falls back to the package `entry_point`, then `index.html` (`serveAppRow`, `internal/artifacts/server.go`). |
 | `tools` | array | yes (for tool access) | The allowlist. Each item is `{ "server": string, "tool": string }`. A call is permitted only if its exact `(server, tool)` pair appears here. |
 | `params` | array | no | URL-param contract; each item is an [`appParamSpec`](#param-spec). |
 
 ### `params[]` entry — `appParamSpec` {#param-spec}
 
-Source: `internal/artifacts/appparams.go:14`.
+Source: `internal/artifacts/appparams.go`.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -239,7 +268,7 @@ upstream has to support).
 
 | Server name | Auth mode | Upstream | Notes |
 |---|---|---|---|
-| `arti-self` | `none` | arti's own `/mcp` (loopback) | Built-in. Credential-free local verification; reachable even when auth is disabled. |
+| `arti-self` | `none` | arti's own `/mcp` (loopback) | Built-in. Treated like `arti`: arti's own tools run in-process as the viewer. Anything else goes to the loopback `/mcp` with no credential, which only answers when auth is disabled (local dev). |
 | `llm` | `service` | In-process Anthropic Messages API | Built-in. The single-Claude completion; see below. No OBO. |
 | `arti` | in-process\* | arti's own MCP | The name is special: every arti tool, read and write, runs in-process as the viewer (no consent popup, works in local dev, needs no server entry). A write is stamped `written_via: app:<uuid>` with the viewer as `creator`. See [Reading other artifacts](#reading-artifacts). |
 | anything else | `none` / `oauth` | operator's choice | Deployment configuration — e.g. entries for Notion, Slack, Linear, or an MCP gateway the organization runs. |
@@ -248,7 +277,7 @@ upstream has to support).
 the in-process branch sits ahead of the server lookup, so arti access does not depend on
 it. See [Reading other artifacts](#reading-artifacts).
 
-**Auth modes** (`ServerConfig.Auth`, `internal/apps/apps.go:49`):
+**Auth modes** (`ServerConfig.Auth`, `internal/apps/apps.go`):
 
 - `none` — forwarded with no upstream credential. A 401 from such a server is a genuine
   rejection, surfaced as `503` `upstream_error` (no consent loop).
@@ -267,7 +296,7 @@ non-streaming Claude call made in-process with arti's service key
 attributed to the viewer + app — but the viewer's identity is used only for budgeting,
 not auth.
 
-### Arguments (`CompleteInput`, `internal/llm/llm.go:58`)
+### Arguments (`CompleteInput`, `internal/llm/llm.go`)
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -292,13 +321,13 @@ On success, the MCP result body:
 
 On failure the proxy returns the structured error's HTTP status with a body of
 `{ "error": <code>, "detail": <msg>, "retry_after": <seconds> }`
-(`internal/llm/llm.go:248`).
+(`internal/llm/llm.go`).
 
 | Status | `error` code | When |
 |---|---|---|
 | 400 | `bad_input` | No prompt/messages, or model not in allowlist. |
 | 429 | `rate_limited` | Anthropic 429 (`retry_after` ≈ 30s). |
-| 429 | `budget_exceeded` | Viewer/app/org budget cap hit (`retry_after` set). |
+| 429 | `budget_exceeded` | A budget cap was hit (`retry_after` set): requests per minute or tokens per hour for the viewer, a dollar cap per viewer over a rolling 24 hours (`retry_after` 3600), tokens per hour for the app, or tokens per day for the whole deployment. The org and dollar caps are off unless the operator sets them; see [Configuration → LLM](configuration.md#llm-built-in-completion). |
 | 503 | `budget_unavailable` | Budget ledger unreadable — the gate fails **closed**. |
 | 503 | `overloaded` | Anthropic 529. |
 | 503 | `upstream` | Any other Anthropic error. |
@@ -320,10 +349,10 @@ console.log(r.content[0].text);
 
 - The served APP page runs in an **opaque-origin sandbox** (no `allow-same-origin`), so
   it cannot read `arti_session` or reach arti's other APIs directly
-  (`setContentSecurityApp`, `internal/artifacts/server.go:1820`). Its only privileged
+  (`setContentSecurityApp`, `internal/artifacts/server.go`). Its only privileged
   channel is `window.arti.callTool` with the injected token.
 - The proxy re-checks the email-domain allowlist on every call, so a revoked user can't
-  keep driving tool calls until the token expires (`internal/apps/apps.go:159`).
+  keep driving tool calls until the token expires (`handleMCP`, `internal/apps/apps.go`).
 - The injected token is app-scoped: it's rejected by the main auth middleware, so a
   leaked app token can't be replayed as a session credential on the REST/MCP routes.
 - Framing is governed by `frame-ancestors` (`ARTI_APP_FRAME_ANCESTORS`); see

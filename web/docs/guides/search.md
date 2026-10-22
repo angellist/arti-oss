@@ -1,7 +1,7 @@
 ---
 title: Searching the catalog
 order: 2
-summary: Open the search bar (Search item, the / shortcut, or type-to-focus) and the full free-text + field:value operator grammar — phrases, booleans, wildcards, slug/label/scope/creator/type filters, negation — with examples.
+summary: Open the search bar (Search item, the / shortcut, or type-to-focus) and the full free-text + field:value operator grammar — phrases, booleans, wildcards, slug/label/scope/creator/owner/type filters, negation — with examples.
 ---
 
 # Searching the catalog
@@ -24,7 +24,8 @@ Three ways to open it:
 Press **Enter** to search. **✕ close** (or clearing the query) collapses the bar
 and returns to the plain listing. Opening a search from a rail chip — a label,
 scope, or the `👤 Owned by Me` toggle — reveals the bar too, pre-filled with the
-matching token.
+matching token. Beside the box, **Browse All** opens the faceted index at
+`/browse`, and `?` opens this page.
 
 ## Free-text query syntax
 
@@ -41,6 +42,12 @@ ANDed by default.
 | `( … )` | grouping | `(raft OR kafka) AND vacuum` |
 | `stem*` | prefix wildcard | `deploy*` |
 
+This grammar, and matching on **content**, needs the optional OpenSearch layer
+(see [OpenSearch](../operations/opensearch.md)). Without it — and for any query
+that also uses `owner:`, `bookmarked:` or `via:`, or asks for an explicit sort —
+arti falls back to Postgres: each word must appear as a substring of the title,
+description, slug, creator or labels, and the body is not searched.
+
 ## Structured filters
 
 These match **metadata exactly** (not full text). Repeat or combine them; prefix
@@ -52,11 +59,12 @@ any with `-` to exclude.
 | `label:` | a label — repeatable (ANDed), globs allowed | `label:memory` · `label:mem*` |
 | `scope:` | a scope (the value may itself contain `:`) | `scope:topic:funds` |
 | `creator:` | the uploader's email | `creator:alice@example.com` |
-| `type:` | artifact type | `type:TEXT` · `type:PACKAGE` · `type:APP` · `type:ATTACHMENT` |
+| `owner:` | the document owner's email (case-insensitive) — differs from `creator:` once ownership is transferred | `owner:alice@example.com` |
+| `type:` | artifact type, or one of the rail's body-type families (`markdown`, `diagram`, `html`, `json`, `image`) | `type:TEXT` · `type:APP` · `type:MAP` · `type:markdown` |
 | `content_type:` | exact MIME content type | `content_type:text/markdown` |
 | `bookmarked:me` | documents you bookmarked | `bookmarked:me` |
 | `via:` | the credential that wrote it — globs allowed | `via:apikey:3f2a…` · `via:apikey:*` · `via:session` |
-| `-<filter>` | exclude (negate) — `label` / `scope` / `creator` / `type` | `-label:archived` |
+| `-<filter>` | exclude (negate) — `label` / `scope` / `creator` / `type` / `content_type` | `-label:archived` |
 
 > Typing `slug:foo` is a **search** (it keeps the toggles and collapses to the
 > latest version per slug). Clicking a slug in the results is a **drill-in** — a

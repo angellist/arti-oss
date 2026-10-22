@@ -1,7 +1,7 @@
 ---
 title: Using the API
 order: 3
-summary: Call arti's HTTP API from a service, script, or agent — the credential menu (session, CLI login, device flow, API key, service secret), how to mint a self-serve upload API key, and a first request.
+summary: Call arti's HTTP API from a service, script, or agent — the credential menu (session, CLI login, device flow, API key, service key, service secret), how to mint a self-serve upload API key, and a first request.
 ---
 
 # Using the API
@@ -21,7 +21,7 @@ browser, the `arti_session` cookie).
 
 ## Getting a token — the credential menu
 
-There are five ways to authenticate, in two families. **Full-access** credentials
+There are six ways to authenticate, in two families. **Full-access** credentials
 act as you across the whole API (subject to each artifact's read rules).
 **Upload-scoped** credentials are deliberately weak: create, append, and read
 artifacts, nothing else.
@@ -32,6 +32,7 @@ artifacts, nothing else.
 | CLI login | A person at a terminal | `arti login` (browser PKCE) | 7-day access, 90-day refresh | Full |
 | **API key** | A service/script you own | Self-serve, **in the web app only** — [Settings → API Keys](#api-keys-self-serve) | Up to 365 days (default 90); no auto-refresh | **Upload only** |
 | **Device flow** | A headless agent needing a human to vouch | [RFC 8628 device flow](../recipes/agent.md) — human approves once | 24-hour access (+30-day refresh for a standing agent) | **Upload only** |
+| **Service key** | A service principal (a non-person identity an admin added) | An admin with `MANAGE_API_KEYS` mints it from a browser session with [`POST /api/admin/service-keys`](../reference/rest-api.md#post-apiadminservice-keys); no Settings page covers it | Up to 365 days (default 90) | Full, as that principal — including `/mcp` |
 | Service secret | Service-to-service backends | Operator sets `ARTI_SERVICE_SECRET`; send `X-Arti-Service-Secret` | Static | Service principal |
 
 Both upload-scoped credentials run through the **same** default-deny guard
@@ -54,16 +55,19 @@ an admin. Both are also capped at **200 MiB per request** body
   you upload large payloads over plain HTTP, which keeps the bytes **out of the
   model's context window** (unlike the MCP `add_artifact` tool, which routes
   content through the model) — cheaper and more reliable for anything big.
-- **You're an internal backend calling arti machine-to-machine** → the service
-  secret.
+- **You're an internal backend calling arti machine-to-machine** → a service key
+  for a service principal an admin set up for it, or the service secret. A service
+  principal holding `ASSERT_ACTOR` can also write on a person's behalf with
+  [`X-Arti-Acting-For`](../reference/rest-api.md#writing-on-a-persons-behalf-x-arti-acting-for).
 
 ## API keys (self-serve) {#api-keys-self-serve}
 
 An API key is a long-lived, personal, **upload-only** bearer — the low-ceremony
 way to let a service you own publish to arti. Every key is **tied to you**: all
-uploads are attributed to your email, exactly as if you'd run them yourself. In v1
-the only scope is `upload`, so a key can create, append, and read — never delete,
-edit metadata, manage access, or reach admin/MCP.
+uploads are attributed to your email, exactly as if you'd run them yourself. A
+self-serve key always carries the `upload` scope, so it can create, append, and read —
+never delete, edit metadata, manage access, or reach admin/MCP. (Full-access
+`service` keys exist only for service principals, and only an admin mints them.)
 
 Keys look like `arti_upload_XXXXX…` and are shown **once**, at creation — arti
 stores only a SHA-256 hash, so it can never show you the secret again. Lost it?
@@ -72,14 +76,16 @@ Revoke and mint a new one.
 ### Create one in the UI
 
 Go to **Settings → API Keys** (`/settings/keys` — the tab is available to
-everyone). Give the key a **name** (e.g. `ci-upload`), leave the scope on
-**Upload**, pick an expiry (30 / 90 / 180 / 365 days; default 90), and create. The
-full key is revealed once in a copy-me dialog — copy it immediately. The list
-below shows each key's prefix, owner, created/expiry dates, last-used time, and
-status (Active / Expired / Revoked), with a Revoke button.
+everyone) and click **Create key**. Give the key a **name** (e.g. `ci-upload`); the
+access is fixed at **Read + Upload**. Pick an expiry (30 / 90 / 180 / 365 days;
+default 90) and click **Generate**. The full key is revealed once in the same dialog —
+copy it immediately; closing the dialog asks you to confirm that you have. The list
+shows each key's prefix, created/expiry dates, last-used time, and status (Active /
+Expired / Revoked), with a Revoke button. Holders of `MANAGE_API_KEYS` also get an
+**All keys** tab covering every owner.
 
-A yellow badge appears on your user menu when any active key is within **7 days**
-of expiring — keys do **not** auto-refresh, so rotate before then (mint a new key,
+A badge appears on the **Settings** entry in the side rail when any active key is
+within **7 days** of expiring — keys do **not** auto-refresh, so rotate before then (mint a new key,
 swap it into `ARTI_TOKEN`, revoke the old one).
 
 ### Keys are created in the web app, not over REST

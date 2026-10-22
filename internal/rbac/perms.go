@@ -18,12 +18,9 @@ const (
 	// ManageArtifacts: read/write ALL artifacts — the admin bypass of
 	// per-artifact access control.
 	ManageArtifacts Permission = "MANAGE_ARTIFACTS"
-	// ManageSkills: write (create/append/archive) `kind:skill` artifacts, and
-	// see `scope:app:couch` artifacts in List/Search (so an app's service
-	// identity can build its skill catalog). Narrower than ManageArtifacts:
-	// it does NOT bypass per-artifact access control for non-skill artifacts.
-	// Granted to app service identities (e.g. couch's service@) that manage
-	// skills on the app's behalf.
+	// ManageSkills: see `scope:app:couch` artifacts in List/Search, so an app's
+	// service identity can build its skill catalog. It grants no write: a skill
+	// is written by whoever its document's write list names.
 	ManageSkills Permission = "MANAGE_SKILLS"
 	// ManageAPIKeys: read/list and revoke ALL users' API keys — the
 	// cross-owner admin view.
@@ -31,6 +28,14 @@ const (
 	// ManageConnectors: add, edit, enable, disable and delete the MCP
 	// connectors APP artifacts may reach through the apps proxy.
 	ManageConnectors Permission = "MANAGE_CONNECTORS"
+	// AssertActor: a service principal may write a version on behalf of a named
+	// person (X-Arti-Acting-For). The person is credited as creator; the
+	// principal is authorized, owns what it opens, and is recorded as asserted_by.
+	AssertActor Permission = "ASSERT_ACTOR"
+	// ReadOrgShared: a service principal reads what is shared org-wide
+	// (`*@<allowlisted domain>`), which its `.invalid` address never matches.
+	// Grants no write, and nothing to a person.
+	ReadOrgShared Permission = "READ_ORG_SHARED"
 	// UseArtifacts: baseline ability to read/write one's own or otherwise
 	// visible artifacts. Held by every authenticated user via the USER role.
 	UseArtifacts Permission = "USE_ARTIFACTS"
@@ -46,6 +51,8 @@ var AllPermissions = []Permission{
 	ManageSkills,
 	ManageAPIKeys,
 	ManageConnectors,
+	AssertActor,
+	ReadOrgShared,
 	UseArtifacts,
 }
 

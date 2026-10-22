@@ -6,7 +6,7 @@ import { hardNavigate } from "@/lib/navigate";
 import { exitFullPageSearch } from "@/lib/viewer";
 import { useTopLevelWindow } from "@/lib/useViewport";
 
-const EXIT_SIZE = 18;
+export const EXIT_SIZE = 18;
 
 // The way out of the chrome-less ?v=full view: a small square ✕ wedged into
 // the top-right corner with no inset, so it takes as little of the content as
@@ -35,13 +35,7 @@ export default function FullPageExit() {
         width: EXIT_SIZE,
         height: EXIT_SIZE,
       }}
-      className={
-        "fixed z-[60] grid place-items-center border-b border-l text-[#9b9b95] opacity-70 " +
-        "backdrop-blur-[12px] transition hover:opacity-100 " +
-        (dark
-          ? "border-[rgba(255,255,255,.14)] bg-[rgba(32,32,30,.78)] hover:bg-[rgba(255,255,255,.08)] hover:text-[#f2f1ee]"
-          : "border-[rgba(230,229,225,.9)] bg-white/[.72] hover:bg-[#f6f5f2] hover:text-[#33332e]")
-      }
+      className={cornerButtonClass(dark)}
     >
       <svg
         width="11"
@@ -59,13 +53,24 @@ export default function FullPageExit() {
   );
 }
 
+// The surface both corner controls share, so they read as one strip.
+export function cornerButtonClass(dark: boolean): string {
+  return (
+    "fixed z-[60] grid place-items-center border-b border-l text-[#9b9b95] opacity-70 " +
+    "backdrop-blur-[12px] transition hover:opacity-100 " +
+    (dark
+      ? "border-[rgba(255,255,255,.14)] bg-[rgba(32,32,30,.78)] hover:bg-[rgba(255,255,255,.08)] hover:text-[#f2f1ee]"
+      : "border-[rgba(230,229,225,.9)] bg-white/[.72] hover:bg-[#f6f5f2] hover:text-[#33332e]")
+  );
+}
+
 // True when the surface under this bubble is dark. Two kinds of full-page view
 // can be: one arti renders itself, which follows the reader's theme, and an
 // HTML body in an opaque-origin iframe whose background nothing out here can
 // read. So the app theme is the starting answer, and a frame's own report
 // overrides it — the frame is what fills the screen when there is one. A page
 // with commenting off injects no overlay, so nothing reports.
-function useHostTheme(): boolean {
+export function useHostTheme(): boolean {
   // The attribute is external state, written by the pre-paint script before
   // React exists, so it is read through a store rather than seeded in an
   // effect. Nothing subscribes: the theme is written once per document load,

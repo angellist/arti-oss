@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 
 import type { RosterRole, RosterUser } from "@/lib/types";
 import { addUser, listUsers, setGroupMember, setUserActive } from "@/lib/arti";
+import AccessAuditModal from "./AccessAuditModal";
 
 // UsersManager renders the Users roster and the one write it supports.
 //
@@ -151,37 +152,100 @@ function GroupChips({
   );
 }
 
+const PAGE_SIZE = 100;
+
+type SortKey = "email" | "roles" | "groups" | "last_seen" | "status";
+
+// Each column's first click sorts in the direction an admin scans it for:
+// newest sign-in, most roles or groups, deactivated rows first.
+const FIRST_DIR: Record<SortKey, 1 | -1> = { email: 1, roles: -1, groups: -1, last_seen: -1, status: 1 };
+
+const sortValue: Record<SortKey, (u: RosterUser) => string | number> = {
+  email: (u) => u.email,
+  roles: (u) => u.roles.length,
+  groups: (u) => u.groups.length + u.idp_groups.length,
+  last_seen: (u) => (u.last_seen_at ? Date.parse(u.last_seen_at) : -Infinity),
+  status: (u) => (u.deactivated_at === null ? 1 : 0),
+};
+
 export default function UsersManager({
   initialUsers,
   sources,
   currentEmail = "",
   manageableGroups = [],
+  permissions = [],
 }: {
   initialUsers: RosterUser[];
   sources: string[];
   currentEmail?: string;
   manageableGroups?: { name: string; members: string[] }[];
+  permissions?: string[];
 }) {
   const [users, setUsers] = useState<RosterUser[]>(initialUsers);
   const [q, setQ] = useState("");
+  const [kindF, setKindF] = useState("");
+  const [roleF, setRoleF] = useState("");
+  const [groupF, setGroupF] = useState("");
+  const [statusF, setStatusF] = useState<"" | "active" | "deactivated">("");
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "email", dir: 1 });
+  const [pageAt, setPageAt] = useState({ view: "", page: 0 });
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState("");
   const [flash, setFlash] = useState("");
   const [pending, setPending] = useState("");
+  const [auditing, setAuditing] = useState("");
   const [groupMembers, setGroupMembers] = useState<Record<string, string[]>>(() =>
     Object.fromEntries(manageableGroups.map((g) => [g.name, g.members])),
   );
 
+  const roleOptions = useMemo(
+    () => [...new Set([...users.flatMap((u) => u.roles.map((r) => r.name)), ...(roleF ? [roleF] : [])])].sort(),
+    [users, roleF],
+  );
+  const groupOptions = useMemo(
+    () =>
+      [
+        ...new Set([
+          ...users.flatMap((u) => [...u.groups.map((g) => `group:${g}`), ...u.idp_groups.map((g) => `idp:${g}`)]),
+          ...(groupF ? [groupF] : []),
+        ]),
+      ].sort(),
+    [users, groupF],
+  );
+
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    if (!needle) return users;
     return users.filter((u) =>
+      (!kindF || u.kind === kindF) &&
+      (!roleF || u.roles.some((r) => r.name === roleF)) &&
+      (!groupF || u.groups.some((g) => `group:${g}` === groupF) || u.idp_groups.some((g) => `idp:${g}` === groupF)) &&
+      (!statusF || (statusF === "deactivated") === (u.deactivated_at !== null)) &&
       [u.email, u.kind, u.note, ...u.roles.map((r) => `${r.name} ${r.source}`), ...u.groups.map((g) => `group:${g}`), ...u.idp_groups.map((g) => `idp:${g}`)]
         .join(" ")
         .toLowerCase()
         .includes(needle),
     );
-  }, [users, q]);
+  }, [users, q, kindF, roleF, groupF, statusF]);
+
+  const sorted = useMemo(() => {
+    const v = sortValue[sort.key];
+    return [...shown].sort((a, b) => {
+      const x = v(a);
+      const y = v(b);
+      const c = x < y ? -1 : x > y ? 1 : 0;
+      return c * sort.dir || a.email.localeCompare(b.email);
+    });
+  }, [shown, sort]);
+
+  // A filter or sort change returns to page 1: the page is kept only while the
+  // view it was chosen on is still the one shown.
+  const view = JSON.stringify([q, kindF, roleF, groupF, statusF, sort]);
+  const pages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const page = Math.min(pageAt.view === view ? pageAt.page : 0, pages - 1);
+  const pageRows = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const goTo = (n: number) => setPageAt({ view, page: Math.max(0, Math.min(n, pages - 1)) });
+  const deactivatedCount = users.filter((u) => u.deactivated_at !== null).length;
+  const auditUser = users.find((u) => u.email === auditing);
 
   const refresh = async () => {
     try {
@@ -244,7 +308,14 @@ export default function UsersManager({
         </div>
       ) : null}
 
-      <div className="mb-2.5 flex items-center gap-2">
+      <div className="mb-2.5 flex items-baseline justify-between gap-3">
+        <h2 className="text-[14px] font-semibold text-neutral-900">Users</h2>
+        <span className="text-[12px] text-neutral-500">
+          {users.length} total · {deactivatedCount} deactivated
+        </span>
+      </div>
+
+      <div className="mb-2.5 flex flex-wrap items-center gap-2">
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
@@ -252,11 +323,38 @@ export default function UsersManager({
           aria-label="filter users"
           className="w-full max-w-[320px] rounded-md border border-neutral-200 px-2.5 py-1.5 text-[12px] text-neutral-800 placeholder:text-neutral-400"
         />
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
-          {shown.length === users.length
-            ? `${users.length} user${users.length === 1 ? "" : "s"}`
-            : `${shown.length} of ${users.length}`}
-        </span>
+        {(
+          [
+            ["type", kindF, setKindF, ["human", "service"]],
+            ["role", roleF, setRoleF, roleOptions],
+            ["group", groupF, setGroupF, groupOptions],
+          ] as const
+        ).map(([label, value, set, options]) => (
+          <select
+            key={label}
+            value={value}
+            onChange={(e) => set(e.target.value)}
+            aria-label={`filter by ${label}`}
+            className="max-w-[14rem] rounded-md border border-neutral-200 bg-white px-2 py-1.5 text-[12px] text-neutral-800"
+          >
+            <option value="">any {label}</option>
+            {options.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        ))}
+        <select
+          value={statusF}
+          onChange={(e) => setStatusF(e.target.value as typeof statusF)}
+          aria-label="filter by status"
+          className="max-w-[14rem] rounded-md border border-neutral-200 bg-white px-2 py-1.5 text-[12px] text-neutral-800"
+        >
+          <option value="">any status</option>
+          <option value="active">active</option>
+          <option value="deactivated">deactivated</option>
+        </select>
         <span className="flex-1" />
         <button
           type="button"
@@ -274,37 +372,60 @@ export default function UsersManager({
       <div className="overflow-x-auto rounded-md border border-neutral-200">
         <table className="w-full table-fixed border-collapse">
           <colgroup>
+            <col className="w-[34%]" />
+            <col className="w-[23%]" />
             <col className="w-[28%]" />
-            <col className="w-[20%]" />
-            <col className="w-[26%]" />
-            <col className="w-[14%]" />
-            <col className="w-[12%]" />
+            <col className="w-[15%]" />
+            <col className="w-[7rem]" />
           </colgroup>
           <thead>
             <tr className="bg-neutral-50">
-              {["Email", "Roles", "Groups", "Last sign-in", ""].map((h, i) => (
+              {(
+                [
+                  ["email", "Email"],
+                  ["roles", "Roles"],
+                  ["groups", "Groups"],
+                  ["last_seen", "Last sign-in"],
+                  ["status", "Status"],
+                ] as const
+              ).map(([key, h]) => (
                 <th
-                  key={h || i}
+                  key={key}
+                  aria-sort={sort.key === key ? (sort.dir === 1 ? "ascending" : "descending") : undefined}
                   className="border-b border-neutral-200 px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider text-neutral-500"
                 >
-                  {h}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: FIRST_DIR[key] }))
+                    }
+                    className="uppercase tracking-wider hover:text-neutral-800"
+                  >
+                    {h}
+                    <span className="ml-1 inline-block w-2">{sort.key === key ? (sort.dir === 1 ? "▲" : "▼") : ""}</span>
+                  </button>
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {shown.map((u) => {
+            {pageRows.map((u) => {
               const seen = relative(u.last_seen_at);
               const inactive = u.deactivated_at !== null;
               return (
                 <tr key={u.email} className="border-b border-neutral-200 last:border-b-0 hover:bg-neutral-50">
                   <td className="px-3 py-2 align-top text-[13px] text-neutral-800">
-                    <span
-                      className={"block truncate" + (inactive ? " text-neutral-400 line-through" : "")}
-                      title={u.email}
+                    <button
+                      type="button"
+                      onClick={() => setAuditing(u.email)}
+                      className={
+                        "block max-w-full truncate text-left hover:underline" +
+                        (inactive ? " text-neutral-400 line-through" : "")
+                      }
+                      title={`${u.email} — permissions and credentials`}
                     >
                       {u.email}
-                    </span>
+                    </button>
                     <span className="mt-0.5 flex flex-wrap items-center gap-1">
                       {inactive ? (
                         <span
@@ -344,14 +465,14 @@ export default function UsersManager({
                   <td className="px-3 py-2 align-top text-[13px] text-neutral-800" title={seen.title}>
                     {u.last_seen_at ? seen.label : <span className="italic text-neutral-400">{seen.label}</span>}
                   </td>
-                  <td className="px-3 py-2 text-right align-top">
+                  <td className="px-3 py-2 align-top">
                     {u.email === currentEmail.toLowerCase() ? null : (
                       <button
                         type="button"
                         onClick={() => toggleActive(u)}
                         disabled={pending !== ""}
                         className={
-                          "rounded-md border px-2 py-1 text-[11px] disabled:opacity-40 " +
+                          "whitespace-nowrap rounded-md border px-2 py-1 text-[11px] disabled:opacity-40 " +
                           (inactive
                             ? "border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-50"
                             : "border-rose-200 bg-white text-rose-700 hover:bg-rose-50")
@@ -367,7 +488,7 @@ export default function UsersManager({
             {shown.length === 0 ? (
               <tr>
                 <td colSpan={5} className="px-3 py-8 text-center text-[12px] text-neutral-400">
-                  {users.length === 0 ? "no users yet" : `nothing matches “${q}”`}
+                  {users.length === 0 ? "no users yet" : "nothing matches these filters"}
                 </td>
               </tr>
             ) : null}
@@ -375,11 +496,46 @@ export default function UsersManager({
         </table>
       </div>
 
+      <div className="mt-2.5 flex items-center justify-between gap-3 text-[12px] text-neutral-500">
+        <span>
+          {sorted.length === 0
+            ? "0 shown"
+            : `Showing ${page * PAGE_SIZE + 1}–${page * PAGE_SIZE + pageRows.length} of ${sorted.length}${
+                sorted.length === users.length ? "" : " matching"
+              }`}
+        </span>
+        {pages > 1 ? (
+          <span className="flex items-center gap-1">
+            <button type="button" aria-label="previous page" disabled={page === 0} onClick={() => goTo(page - 1)} className="rounded-md border border-neutral-200 px-2 py-0.5 disabled:opacity-40">
+              ‹
+            </button>
+            <span>
+              page {page + 1} of {pages}
+            </span>
+            <button type="button" aria-label="next page" disabled={page === pages - 1} onClick={() => goTo(page + 1)} className="rounded-md border border-neutral-200 px-2 py-0.5 disabled:opacity-40">
+              ›
+            </button>
+          </span>
+        ) : null}
+      </div>
+
       {sources.length > 0 ? (
         <p className="mt-2.5 text-[11px] leading-relaxed text-neutral-400">
           assembled from {sources.join(", ")}. a principal that appears in none of these is not
           listed.
         </p>
+      ) : null}
+
+      {auditUser ? (
+        <AccessAuditModal
+          key={auditUser.email}
+          email={auditUser.email}
+          subtitle={`${auditUser.kind} · ${
+            auditUser.last_seen_at ? `last sign-in ${relative(auditUser.last_seen_at).label}` : "no sign-in recorded"
+          } · ${auditUser.deactivated_at === null ? "active" : "deactivated"}`}
+          permissions={permissions}
+          onClose={() => setAuditing("")}
+        />
       ) : null}
 
       {adding ? (

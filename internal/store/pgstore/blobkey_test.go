@@ -15,7 +15,8 @@ func TestApplyAttachmentInvariants(t *testing.T) {
 	got := applyAttachmentInvariants(PutInput{
 		ArtifactType:  TypeAttachment,
 		NamedSlug:     &slug,
-		AllowedAccess: []string{"*"}, // inherited / caller-supplied wide access
+		AllowedAccess: []string{"*"}, // inherited from the slug, not passed by the caller
+		InheritAccess: true,
 	})
 	if got.NamedSlug != nil {
 		t.Errorf("attachment NamedSlug = %v, want nil (slugless)", *got.NamedSlug)

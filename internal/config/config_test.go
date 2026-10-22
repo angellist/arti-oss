@@ -283,13 +283,14 @@ auth:
 
 func TestEnvTypeParsing(t *testing.T) {
 	cfg, err := loadWith(t, required(map[string]string{
-		"S3_USE_SSL":              "true",
-		"ARTI_DEVICE_TOKEN_TTL":   "1h30m",
-		"ARTI_IDP_GROUPS_MAX_AGE": "48h",
-		"ARTI_LLM_TPH_PER_VIEWER": "42",
-		"ARTI_DEVICE_CODE_RPM":    "0",
-		"ARTI_LLM_ALLOWED_MODELS": "m1,m2",
-		"AUTH_REQUIRED_GROUPS":    "",
+		"S3_USE_SSL":                  "true",
+		"ARTI_DEVICE_TOKEN_TTL":       "1h30m",
+		"ARTI_IDP_GROUPS_MAX_AGE":     "48h",
+		"ARTI_LLM_TPH_PER_VIEWER":     "42",
+		"ARTI_LLM_USD_PER_VIEWER_DAY": "100",
+		"ARTI_DEVICE_CODE_RPM":        "0",
+		"ARTI_LLM_ALLOWED_MODELS":     "m1,m2",
+		"AUTH_REQUIRED_GROUPS":        "",
 	}), "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -302,6 +303,9 @@ func TestEnvTypeParsing(t *testing.T) {
 	}
 	if cfg.Auth.IdPGroupsMaxAge.Std() != 48*time.Hour {
 		t.Errorf("IdPGroupsMaxAge = %v, want 48h", cfg.Auth.IdPGroupsMaxAge)
+	}
+	if cfg.LLM.USDPerViewerDay != 100 {
+		t.Errorf("LLM.USDPerViewerDay = %d", cfg.LLM.USDPerViewerDay)
 	}
 	if cfg.LLM.TPHPerViewer != 42 {
 		t.Errorf("LLM.TPHPerViewer = %d", cfg.LLM.TPHPerViewer)

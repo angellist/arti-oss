@@ -16,7 +16,7 @@ default in dev — every write is attributed to `ARTI_LOCAL_EMAIL`.
 | --- | --- | --- |
 | Go | 1.25+ | `go.mod` declares `go 1.25.7`. Builds both binaries. |
 | Docker | any recent | Runs the Postgres + RustFS compose stack. |
-| Node | 20+ | The web sidecar (`node:20-alpine` in `web/Dockerfile`). |
+| Node | 20 | The web sidecar. CI runs the web checks on `node:20-alpine` (`web/Dockerfile`); see [Build & test](build-test.md#node-version). |
 | `goose` | latest | DB migrations (`db/Makefile`). |
 | `sqlc` | latest | Regenerates `gen/sqlc` from SQL. |
 | `oapi-codegen` | latest | Checked by `make setup`; see the [codegen](codegen.md) caveat — the OpenAPI spec is hand-maintained, not generated. |
@@ -47,9 +47,13 @@ make dev-up        # Postgres :5436, RustFS :9210 (console :9211)
 ```
 
 This runs `deployments/docker-compose/docker-compose.yml`: a `postgres:16-alpine`
-(DB `arti_dev`, user/pass `postgres`/`postgres`) and `quay.io/rustfs/rustfs` with a
-`rustfs-init` sidecar that creates the `arti-dev` and `arti-test` buckets. Tear
-down with `make dev-down`; nuke the volumes with `make dev-reset`.
+(DB `arti_dev`, user/pass `postgres`/`postgres`) and `rustfs/rustfs` with a
+`rustfs-init` sidecar that creates the `arti-dev` and `arti-test` buckets. The
+same file also starts Dex on `:5556` (an OIDC issuer for testing `oidc` login
+mode; static user `admin@example.com` / `password`) and a single-node OpenSearch
+on `:9200` with security off ([OpenSearch](../operations/opensearch.md#local-development)).
+Neither is needed for the default auth-disabled loop. Tear down with
+`make dev-down`; nuke the volumes with `make dev-reset`.
 
 ## Apply migrations
 
@@ -59,11 +63,13 @@ make migrate-test    # → arti_test  (needed for integration tests)
 ```
 
 Both shell out to `goose -dir migrations` against `db/migrations/`. The test
-database is a separate DB on the same Postgres instance; create it once if it's
-missing (the compose stack only auto-creates `arti_dev`):
+database is a separate DB on the same Postgres instance.
+`deployments/docker-compose/postgres-init.sql` creates it when the Postgres
+volume is first initialized. A volume created before that script existed lacks
+it; create it once by hand:
 
 ```sh
-make psql -C db   # then: CREATE DATABASE arti_test;
+make psql   # then: CREATE DATABASE arti_test;
 ```
 
 ## Configure the environment
@@ -106,8 +112,10 @@ set -a && source .env && set +a
 # shortcut: `make server` builds then runs serve
 ```
 
-`arti-server` has two subcommands: `serve` (above) and `migrate` (an in-process
-goose runner, an alternative to `make migrate`). See `cmd/arti-server/main.go`.
+`arti-server` has four subcommands: `serve` (above), `migrate` (an in-process
+goose runner, an alternative to `make migrate`), `reindex` (backfill the
+OpenSearch index from Postgres), and `doctor` (validate the configuration and
+probe each dependency). See `cmd/arti-server/main.go`.
 
 Check it's up:
 
@@ -162,9 +170,9 @@ To mint a real token without Google, run the server with `ARTI_TEST_MODE=true`
 ./scripts/e2e-smoke.sh
 ```
 
-Boots a fresh artifact and walks 27 assertions across REST, CLI, MCP, and the FE.
-`make test-e2e` runs the Go e2e suite under `tests/e2e/`. See
-[Build & test](build-test.md) for the full test matrix.
+Creates a fresh artifact and checks it across REST, CLI, MCP, and the FE. It
+expects the server on `:8095` and the web sidecar on `:3031`, as set up above.
+See [Build & test](build-test.md) for the full test matrix.
 
 ## Where to go next
 

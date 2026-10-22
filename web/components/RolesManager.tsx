@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Group, Role, RoleAssignment, UserAccess } from "@/lib/types";
+import type { Group, Role, RoleAssignment } from "@/lib/types";
+import { usePeopleSearch } from "@/lib/usePeopleSearch";
+import { PermName } from "./PermissionMatrix";
 import {
   assignRole,
   createRole,
@@ -9,21 +11,9 @@ import {
   listAssignments,
   listGroups,
   listRoles,
-  lookupUserAccess,
   unassignRole,
   updateRole,
 } from "@/lib/arti";
-
-// Human labels for the opaque permission keys. Unknown keys fall back to the
-// raw string so a newly-added permission still renders.
-const PERM_LABEL: Record<string, string> = {
-  MANAGE_ROLES: "Manage roles",
-  MANAGE_USER_GROUPS: "Manage user groups",
-  MANAGE_ARTIFACTS: "Manage all artifacts",
-  MANAGE_SKILLS: "Manage skills",
-  USE_ARTIFACTS: "Use artifacts",
-};
-const permLabel = (k: string) => PERM_LABEL[k] ?? k;
 
 export default function RolesManager({
   initialRoles,
@@ -66,9 +56,7 @@ export default function RolesManager({
         </div>
       ) : null}
 
-      <UserLookup permissions={permissions} />
-
-      <h2 className="mb-2 mt-8 text-[11px] font-semibold uppercase tracking-wide text-neutral-500">Roles</h2>
+      <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-neutral-500">Roles</h2>
       <div className="flex flex-col gap-0 rounded-md border border-neutral-200 md:flex-row">
         {/* left: role list */}
         <div className="w-full shrink-0 border-b border-neutral-200 md:w-56 md:border-b-0 md:border-r">
@@ -154,109 +142,6 @@ export default function RolesManager({
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-// ─── per-user lookup matrix ──────────────────────────────────────────
-
-function UserLookup({ permissions }: { permissions: string[] }) {
-  const [email, setEmail] = useState("");
-  const [access, setAccess] = useState<UserAccess | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  const lookup = async () => {
-    const e = email.trim();
-    if (!e) return;
-    setBusy(true);
-    setErr("");
-    try {
-      setAccess(await lookupUserAccess(e));
-    } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : String(ex));
-      setAccess(null);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="max-w-3xl rounded-md border border-neutral-200 p-4">
-      <h2 className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">Look up a person</h2>
-      <div className="mt-2 flex items-center gap-2">
-        <input
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              lookup();
-            }
-          }}
-          placeholder="email@example.com"
-          disabled={busy}
-          className="min-w-0 flex-1 rounded-md border border-neutral-200 bg-white px-2 py-1 text-[13px] focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-200"
-        />
-        <button
-          type="button"
-          onClick={lookup}
-          disabled={busy || !email.trim()}
-          className="rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          Look up
-        </button>
-      </div>
-      {err ? <p className="mt-2 text-[11px] text-rose-600">{err}</p> : null}
-      {access ? <AccessMatrix access={access} permissions={permissions} /> : null}
-    </div>
-  );
-}
-
-// AccessMatrix renders one column per role the person holds and one row per
-// permission, a dot where the role grants it — so the union across columns is
-// the person's effective access.
-function AccessMatrix({ access, permissions }: { access: UserAccess; permissions: string[] }) {
-  if (access.roles.length === 0) {
-    return <p className="mt-3 text-[12px] text-neutral-500">{access.email} holds no roles.</p>;
-  }
-  const effective = new Set(access.effective_permissions);
-  return (
-    <div className="mt-3 overflow-x-auto">
-      <table className="border-collapse text-[12px]">
-        <thead>
-          <tr>
-            <th className="border-b border-neutral-200 px-2 py-1 text-left font-medium text-neutral-500">Permission</th>
-            {access.roles.map((role, i) => (
-              <th key={role.name + ":" + role.source + ":" + i} className="border-b border-neutral-200 px-3 py-1 text-center">
-                <div className="font-medium text-neutral-800">{role.name}</div>
-                <div className="text-[10px] font-normal text-neutral-400">
-                  {role.source.startsWith("group:") ? "from " + role.source : role.source}
-                </div>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {permissions.map((perm) => (
-            <tr key={perm} className={effective.has(perm) ? "" : "opacity-60"}>
-              <td className="border-b border-neutral-100 px-2 py-1 text-neutral-700">
-                {permLabel(perm)}
-                <span className="ml-1 font-mono text-[10px] text-neutral-400">{perm}</span>
-              </td>
-              {access.roles.map((role, i) => (
-                <td key={role.name + ":" + role.source + ":" + i} className="border-b border-neutral-100 px-3 py-1 text-center">
-                  {role.permissions.includes(perm) ? (
-                    <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" aria-label="granted" />
-                  ) : (
-                    <span className="text-neutral-300">·</span>
-                  )}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }
@@ -354,16 +239,18 @@ function RoleEditor({
         <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-neutral-500">Permissions</label>
         <ul className="rounded-md border border-neutral-200">
           {permissions.map((p) => (
-            <li key={p} className="flex items-center gap-2 border-b border-neutral-100 px-3 py-1.5 last:border-b-0">
-              <input
-                type="checkbox"
-                checked={has(p)}
-                disabled={busy || permsLocked}
-                onChange={() => toggle(p)}
-                aria-label={p}
-              />
-              <span className={"text-[13px] " + (permsLocked ? "text-neutral-400" : "text-neutral-800")}>{permLabel(p)}</span>
-              <span className="font-mono text-[10px] text-neutral-400">{p}</span>
+            <li key={p} className="border-b border-neutral-100 last:border-b-0">
+              <label className="flex items-start gap-2 px-3 py-1.5">
+                <input
+                  type="checkbox"
+                  checked={has(p)}
+                  disabled={busy || permsLocked}
+                  onChange={() => toggle(p)}
+                  aria-label={p}
+                  className="mt-[3px]"
+                />
+                <PermName perm={p} muted={permsLocked} />
+              </label>
             </li>
           ))}
         </ul>
@@ -394,19 +281,20 @@ function AssignmentsEditor({ role, busy }: { role: string; busy: boolean }) {
     listGroups().then(setGroups).catch(() => setGroups([]));
   }, []);
 
-  // Group typeahead: groups matching the typed text that aren't already
-  // assigned this role.
-  const assignedGroups = new Set(
-    assignments.filter((a) => a.principal_type === "group").map((a) => a.principal_id),
-  );
   const q = pid.trim().toLowerCase();
-  const groupMatches =
+  const assigned = assignments.filter((a) => a.principal_type === ptype).map((a) => a.principal_id);
+  const people = usePeopleSearch(ptype === "user" ? pid : "", assigned);
+
+  // Typeahead: principals matching the typed text that don't already hold
+  // this role.
+  const matches: { id: string; label: string }[] =
     ptype === "group"
       ? groups
-          .filter((g) => !assignedGroups.has(g.name))
+          .filter((g) => !assigned.includes(g.name))
           .filter((g) => q === "" || g.name.toLowerCase().includes(q) || g.display_name.toLowerCase().includes(q))
+          .map((g) => ({ id: g.name, label: g.display_name || g.name }))
           .slice(0, 6)
-      : [];
+      : people.slice(0, 6).map((e) => ({ id: e, label: e }));
 
   const add = async (explicitId?: string) => {
     const id = (explicitId ?? pid).trim();
@@ -461,7 +349,7 @@ function AssignmentsEditor({ role, busy }: { role: string; busy: boolean }) {
                   add();
                 }
               }}
-              placeholder={ptype === "user" ? "email@example.com" : "search your groups"}
+              placeholder={ptype === "user" ? "search by email" : "search your groups"}
               disabled={busy}
               className="min-w-0 flex-1 rounded-md border border-neutral-200 bg-white px-2 py-1 text-[13px] focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-200"
             />
@@ -474,20 +362,22 @@ function AssignmentsEditor({ role, busy }: { role: string; busy: boolean }) {
               Add
             </button>
           </div>
-          {ptype === "group" && focused && groupMatches.length > 0 ? (
+          {focused && matches.length > 0 ? (
             <ul className="mt-1 max-h-40 overflow-auto rounded-md border border-neutral-200 bg-white py-1">
-              {groupMatches.map((g) => (
-                <li key={g.name}>
+              {matches.map((m) => (
+                <li key={m.id}>
                   <button
                     type="button"
                     onMouseDown={(e) => {
                       e.preventDefault();
-                      add(g.name);
+                      add(m.id);
                     }}
                     className="block w-full px-2.5 py-1 text-left hover:bg-neutral-50"
                   >
-                    <span className="text-[13px] text-neutral-800">{g.display_name || g.name}</span>
-                    <span className="ml-1.5 rounded bg-neutral-100 px-1 font-mono text-[10px] text-neutral-500">{g.name}</span>
+                    <span className="text-[13px] text-neutral-800">{m.label}</span>
+                    {m.label !== m.id ? (
+                      <span className="ml-1.5 rounded bg-neutral-100 px-1 font-mono text-[10px] text-neutral-500">{m.id}</span>
+                    ) : null}
                   </button>
                 </li>
               ))}
@@ -569,10 +459,11 @@ function CreateRoleForm({
         <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-neutral-500">Permissions</label>
         <ul className="rounded-md border border-neutral-200">
           {permissions.map((p) => (
-            <li key={p} className="flex items-center gap-2 border-b border-neutral-100 px-3 py-1.5 last:border-b-0">
-              <input type="checkbox" checked={perms.includes(p)} disabled={busy} onChange={() => toggle(p)} aria-label={p} />
-              <span className="text-[13px] text-neutral-800">{permLabel(p)}</span>
-              <span className="font-mono text-[10px] text-neutral-400">{p}</span>
+            <li key={p} className="border-b border-neutral-100 last:border-b-0">
+              <label className="flex items-start gap-2 px-3 py-1.5">
+                <input type="checkbox" checked={perms.includes(p)} disabled={busy} onChange={() => toggle(p)} aria-label={p} className="mt-[3px]" />
+                <PermName perm={p} />
+              </label>
             </li>
           ))}
         </ul>

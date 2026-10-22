@@ -4,13 +4,14 @@
 // and talks to the comments API with a scoped bearer token (the page
 // can't send the session cookie).
 import { mountCommentsOverlay, type CommentsApi } from "../lib/commentsOverlay";
+import { connectParentDictation } from "../lib/dictationBridge";
 import type { ThreadDTO } from "../lib/arti";
 
 type CommentWriteResponse = { thread: ThreadDTO; mentions_sent?: string[]; mentions_unreachable?: string[] };
 
 declare global {
   interface Window {
-    __ARTI_COMMENTS__?: { artifactId: string; token: string; me?: { email: string; name?: string; picture?: string } };
+    __ARTI_COMMENTS__?: { artifactId: string; token: string; me?: { email: string; name?: string; picture?: string }; dictation?: boolean };
   }
 }
 
@@ -55,6 +56,7 @@ if (cfg && cfg.artifactId && cfg.token) {
       me: cfg.me ? { email: cfg.me.email, name: cfg.me.name, picture: cfg.me.picture, is_admin: false } : null,
       allowPin: true, // it's an HTML page → pins allowed
       api,
+      dictation: cfg.dictation ? connectParentDictation() : undefined,
     });
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);

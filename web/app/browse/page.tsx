@@ -13,7 +13,7 @@ type SP = Record<string, string | string[] | undefined>;
 // covers effectively every value for the facets in practice (dozens, not
 // thousands), not just the current page.
 const PAGE_SIZE = 500;
-const FACETS: BrowseFacet[] = ["type", "label", "scope", "content_type", "owner"];
+const FACETS: BrowseFacet[] = ["type", "label", "scope", "content_type", "owner", "creator"];
 
 function pick(sp: SP, k: string): string | undefined {
   const v = sp[k];
@@ -37,13 +37,14 @@ export default async function Browse({
   const sort = pick(sp, "sort") === "name" ? "name" : "count";
   const dir = pick(sp, "dir") === "asc" ? "asc" : "desc";
   const pageNum = Math.max(1, parseInt(pick(sp, "page") ?? "1", 10) || 1);
+  const versions = pick(sp, "versions") === "all" ? "all" : "latest";
 
   let total = 0;
   let values: Awaited<ReturnType<typeof getBrowseAggregates>>["values"] = [];
   let err = "";
   try {
     const data = await getBrowseAggregates(
-      { facet, sort, dir, page: pageNum, page_size: PAGE_SIZE },
+      { facet, sort, dir, page: pageNum, page_size: PAGE_SIZE, versions },
       cookie,
     );
     total = data.total;
@@ -74,6 +75,7 @@ export default async function Browse({
           page={pageNum}
           sort={sort}
           dir={dir}
+          versions={versions}
         />
       </main>
     </SearchRailProvider>

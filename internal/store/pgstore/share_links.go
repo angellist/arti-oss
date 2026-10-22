@@ -117,8 +117,9 @@ func (s *Store) SlugLiveCreator(ctx context.Context, slug string) (string, error
 // reclaim. Both look like "the live lineage was written by someone who is not
 // the owner"; only the timing separates them.
 type LiveLineageFacts struct {
-	// Creator of the slug's earliest NON-archived version. Empty when every
-	// version is archived.
+	// Author of the slug's earliest NON-archived version: its asserting
+	// principal if it has one, else its creator. Empty when every version is
+	// archived.
 	LiveCreator string
 	// When that version was published.
 	LiveCreatedAt time.Time
@@ -144,7 +145,7 @@ func (s *Store) LiveLineageFacts(ctx context.Context, slug string) (LiveLineageF
 		SELECT live.creator, live.created_at, o.updated_at, o.updated_by
 		  FROM artifact_owners o
 		  LEFT JOIN LATERAL (
-		    SELECT creator, created_at FROM artifacts
+		    SELECT COALESCE(asserted_by, creator) AS creator, created_at FROM artifacts
 		     WHERE named_slug = o.named_slug AND deleted_at IS NULL
 		     ORDER BY version ASC, created_at ASC, artifact_id ASC LIMIT 1
 		  ) live ON TRUE

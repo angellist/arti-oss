@@ -13,7 +13,9 @@
 package embed
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -21,6 +23,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -46,6 +49,10 @@ type ArtServer interface {
 	// different artifact than this request resolves to" from an access denial, so
 	// the caller can re-prompt instead of showing a dead placeholder.
 	ServeForEmbedPinned(w http.ResponseWriter, r *http.Request, surface, ident string, ver *int32, viewer, frameAncestors, pinnedArtifactID string) (served, pinMismatch bool)
+	// ServeForEmbedViewer renders a non-APP artifact as the signed-in viewer,
+	// with no artifact pin (the viewer-session cookie is pinned to the slug).
+	// An APP writes nothing, so it goes back through consent.
+	ServeForEmbedViewer(w http.ResponseWriter, r *http.Request, surface, ident string, ver *int32, viewer, frameAncestors string) (served bool)
 	// ServeEmbedFile serves one file from a packaged artifact as `caller`.
 	ServeEmbedFile(w http.ResponseWriter, r *http.Request, artifactID, filePath, caller, frameAncestors, filesRoot string) bool
 	// ServeEmbedFilePublic serves one file from a packaged artifact with no
@@ -73,6 +80,13 @@ type ViewerTokenVerifier interface {
 	// VerifyEmbedViewerToken → the viewer email + artifact id an embed-viewer
 	// token authorizes. It MUST reject a token lacking the embed-viewer scope.
 	VerifyEmbedViewerToken(tok string) (email, artifactID string, err error)
+}
+
+// ViewerSessionTokens mints and verifies the slug-scoped token the viewer-mode
+// doc route keeps in a partitioned cookie, so a reload skips the sign-in popup.
+type ViewerSessionTokens interface {
+	MintEmbedViewerSession(email, surface, slug string) (string, error)
+	VerifyEmbedViewerSession(tok, surface, slug string) (email string, err error)
 }
 
 // Surface is one configured embedder.
@@ -113,7 +127,15 @@ type Surface struct {
 	// shell_slug be a static app slug while the per-thread id rides in the query.
 	// "" = none.
 	ShellQuery string `json:"shell_query"`
+	// HostKey, when set, lets the embedding host's SERVER mint a viewer's app
+	// token itself (POST /embed/{surface}/host-token), skipping the consent popup.
+	// The host vouches for the viewer's email, so this is full trust in the host.
+	// Never client-visible, unlike Secret. User mode only; "" = feature off.
+	HostKey string `json:"host_key"`
 }
+
+// viewerSessionMaxAge matches apps.EmbedViewerSessionTTL (the token's own expiry).
+const viewerSessionMaxAge = 7 * 24 * time.Hour
 
 // Service serves the configured surfaces.
 type Service struct {
@@ -181,6 +203,15 @@ func ParseSurfaces(jsonStr string) (map[string]Surface, error) {
 		default:
 			return nil, fmt.Errorf("embed surface %q: unknown identity %q (want \"service\", \"user\" or \"viewer\")", name, s.Identity)
 		}
+		if s.HostKey != "" && s.Identity != "user" {
+			return nil, fmt.Errorf("embed surface %q: host_key is only valid with identity \"user\"", name)
+		}
+		if s.HostKey != "" && len(s.HostKey) < 32 {
+			return nil, fmt.Errorf("embed surface %q: host_key must be at least 32 bytes", name)
+		}
+		if s.HostKey != "" && s.HostKey == s.Secret {
+			return nil, fmt.Errorf("embed surface %q: host_key must differ from secret (the secret is client-visible)", name)
+		}
 		if s.Shell != "" && s.Shell != "front" {
 			return nil, fmt.Errorf("embed surface %q: unknown shell %q", name, s.Shell)
 		}
@@ -239,6 +270,8 @@ func (s *Service) Mount(r chi.Router) {
 	})
 	r.Post("/embed/{surface}/token", s.handleComplete)
 	r.Get("/embed/{surface}/token", s.handlePoll)
+	// Server-to-server only: no CORS, so no browser page can read the answer.
+	r.Post("/embed/{surface}/host-token", s.handleHostToken)
 }
 
 // handleDoc serves the artifact named by ?slug= (+ optional ?version=) for a
@@ -287,9 +320,18 @@ func (s *Service) handleDoc(w http.ResponseWriter, r *http.Request) {
 		// token we serve only the gate page, which runs the consent handshake and
 		// reloads itself with ?t=. Nothing about the artifact — not its title, not
 		// whether it exists — reaches an unauthenticated caller.
+		surface := chi.URLParam(r, "surface")
 		email, artifactID, ok := s.viewerFromToken(r)
 		if !ok {
-			s.writeGatePage(w, chi.URLParam(r, "surface"), surf, slug, fa)
+			if email := s.viewerFromCookie(r, surface, slug); email != "" {
+				// Any miss goes back to the gate: the viewer may need to sign in with
+				// another account, and the HttpOnly cookie can't be cleared from Notion.
+				w.Header().Set("Referrer-Policy", "no-referrer")
+				if s.art.ServeForEmbedViewer(w, r, surface, slug, parseVersion(r), email, fa) {
+					return
+				}
+			}
+			s.writeGatePage(w, surface, surf, slug, fa)
 			return
 		}
 		// The token pins one artifact. Serving as `email` re-runs checkAccess, and
@@ -301,9 +343,9 @@ func (s *Service) handleDoc(w http.ResponseWriter, r *http.Request) {
 		// still falls through to the placeholder, so the two are not conflated.
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		var mismatch bool
-		served, mismatch = s.art.ServeForEmbedPinned(w, r, chi.URLParam(r, "surface"), slug, parseVersion(r), email, fa, artifactID)
+		served, mismatch = s.art.ServeForEmbedPinned(s.withViewerCookie(w, surface, slug, email), r, surface, slug, parseVersion(r), email, fa, artifactID)
 		if mismatch {
-			s.writeGatePage(w, chi.URLParam(r, "surface"), surf, slug, fa)
+			s.writeGatePage(w, surface, surf, slug, fa)
 			return
 		}
 	} else if surf.Identity == "user" {
@@ -393,6 +435,77 @@ func (s *Service) viewerFromToken(r *http.Request) (email, artifactID string, ok
 		return "", "", false
 	}
 	return email, artifactID, true
+}
+
+// viewerCookieName is per slug: Path can scope a cookie to the surface but not
+// to a query parameter, and one embed must not overwrite another's.
+func viewerCookieName(slug string) string {
+	h := sha256.Sum256([]byte(slug))
+	return "arti_ev_" + hex.EncodeToString(h[:8])
+}
+
+// viewerFromCookie returns the viewer a session cookie names for exactly this
+// surface + slug, or "" (no cookie, expired, or minted for another slug).
+func (s *Service) viewerFromCookie(r *http.Request, surface, slug string) string {
+	vs, ok := s.tokens.(ViewerSessionTokens)
+	if !ok {
+		return ""
+	}
+	ck, err := r.Cookie(viewerCookieName(slug))
+	if err != nil {
+		return ""
+	}
+	email, err := vs.VerifyEmbedViewerSession(ck.Value, surface, slug)
+	if err != nil {
+		return ""
+	}
+	return email
+}
+
+// withViewerCookie sets the viewer-session cookie only when the pinned serve
+// starts writing, i.e. after the token's artifact matched this slug and the
+// viewer's ACL passed. A pin mismatch or denial writes nothing, so no cookie.
+func (s *Service) withViewerCookie(w http.ResponseWriter, surface, slug, email string) http.ResponseWriter {
+	vs, ok := s.tokens.(ViewerSessionTokens)
+	if !ok {
+		return w
+	}
+	return &cookieOnWrite{ResponseWriter: w, set: func() {
+		tok, err := vs.MintEmbedViewerSession(email, surface, slug)
+		if err != nil {
+			return
+		}
+		// Partitioned (CHIPS): the browser keys it to the top-level site, so it
+		// only comes back inside the same embedder, never on a first-party visit.
+		http.SetCookie(w, &http.Cookie{
+			Name: viewerCookieName(slug), Value: tok, Path: "/embed/" + surface,
+			MaxAge: int(viewerSessionMaxAge.Seconds()), Secure: true, HttpOnly: true,
+			SameSite: http.SameSiteNoneMode, Partitioned: true,
+		})
+	}}
+}
+
+type cookieOnWrite struct {
+	http.ResponseWriter
+	set  func()
+	done bool
+}
+
+func (c *cookieOnWrite) WriteHeader(code int) {
+	if !c.done {
+		c.done = true
+		if code < 300 {
+			c.set()
+		}
+	}
+	c.ResponseWriter.WriteHeader(code)
+}
+
+func (c *cookieOnWrite) Write(b []byte) (int, error) {
+	if !c.done {
+		c.WriteHeader(http.StatusOK)
+	}
+	return c.ResponseWriter.Write(b)
 }
 
 // secretOK constant-time compares the surface secret against ?auth_secret=.

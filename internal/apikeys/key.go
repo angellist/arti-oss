@@ -1,7 +1,8 @@
 // Package apikeys implements self-serve, scope-generic API keys: an opaque
 // "arti_{scope}_…" bearer a user mints to give a tool/agent scoped, non-
 // interactive access to arti. arti stores only sha256(key); plaintext is shown
-// once. v1 supports only the "upload" scope.
+// once. Self-serve keys carry the "upload" scope; an admin mints "service"
+// keys for service principals.
 package apikeys
 
 import (
@@ -16,7 +17,7 @@ const keyBytes = 32
 
 // SupportedScopes is the mint + auth allowlist. Adding a scope requires shipping
 // its enforcement too (see design note B). Order-insensitive membership only.
-var SupportedScopes = []string{auth.UploadScope}
+var SupportedScopes = []string{auth.UploadScope, auth.ServiceScope}
 
 // IsSupportedScope reports whether s is in SupportedScopes.
 func IsSupportedScope(s string) bool {

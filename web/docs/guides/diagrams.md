@@ -6,9 +6,9 @@ summary: Build flowcharts and boxes-and-arrows diagrams on a drag-and-drop canva
 
 # Drawing diagrams
 
-Diagrams are drawn in arti, not uploaded to it. Hover **New** in the left rail
-and pick **Diagram** to open a canvas: drag shapes in, wire them together, name
-it, and press **Create**. What you get back is an ordinary artifact, so a diagram
+Diagrams are drawn in arti, not uploaded to it. Hover or click **NEW** in the left
+rail and pick **Diagram** (or go straight to `/new/diagram`) to open a canvas:
+drag shapes in, wire them together, name it, and press **Create**. What you get back is an ordinary artifact, so a diagram
 has a slug, versions, labels, scopes, access control, comments and search —
 everything on this page comes from the
 [artifact model](../overview/concepts.md), not from anything diagram-specific.
@@ -17,7 +17,7 @@ A diagram always renders at full width, wherever you view it: a canvas squeezed
 into a reading column just scales the picture down, so the viewer's width control
 is hidden for diagrams. Your width preference for prose documents is untouched.
 
-To find diagrams later, the rail's **TYPE** row has a **diagram** chip.
+To find diagrams later, the rail's **FILTERS** row has a **diagram** chip.
 
 ## Drawing
 

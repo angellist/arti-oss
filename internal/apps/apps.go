@@ -69,13 +69,20 @@ const (
 	// TestEmbedViewerToken_ScopeSeparation, which pins both halves.
 	//
 	// Same TTL as embedUserScope.
-	embedViewerScope  = "embed-viewer"
+	embedViewerScope = "embed-viewer"
+	// embedHostScope marks a token an embedding host's server minted through
+	// /embed/{surface}/host-token. No human clicked anything for it, so it is
+	// told apart from embedUserScope for monitoring and a targeted kill-switch.
+	embedHostScope    = "embed-host"
 	embedUserTokenTTL = 8 * time.Hour
 	// embedViewerTokenTTL is deliberately much shorter than embedUserTokenTTL: a
 	// viewer token rides in a URL query parameter, so it can land in browser
 	// history, and it only has to survive the gate page's single self-reload,
 	// which happens within seconds of consent. An expired one simply re-prompts.
 	embedViewerTokenTTL = 5 * time.Minute
+	// EmbedViewerSessionTTL is the life of the partitioned cookie that lets a
+	// viewer-mode embed reload without the sign-in popup.
+	EmbedViewerSessionTTL = 7 * 24 * time.Hour
 	// embedFilesScopePrefix scopes a user-mode sibling-files token to one
 	// artifact (scope `app-files:<artifactID>`). It carries NO email: a
 	// user-mode surface serves static content gated on the surface secret, not
@@ -331,6 +338,16 @@ const (
 	appConsentTTL    = 30 * 24 * time.Hour
 )
 
+// embedViewerSessionDomain seals the viewer-mode embed cookie. A sealed blob
+// never parses as a JWT, so it cannot pass as a bearer or app token.
+const embedViewerSessionDomain = "arti-embed-viewer-session:"
+
+type viewerSession struct {
+	Email string `json:"e"`
+	Key   string `json:"k"`
+	Exp   int64  `json:"x"`
+}
+
 type appConsent struct {
 	Email string `json:"e"`
 	App   string `json:"a"`
@@ -393,6 +410,32 @@ func (s *Service) MintEmbedUserToken(ctx context.Context, appID, email string) (
 		Scopes: []string{appScopePrefix + appID, embedUserScope},
 		TTL:    embedUserTokenTTL,
 	})
+}
+
+// MintEmbedHostToken mints email's app token for the latest version of the APP
+// slug that email can read (an older readable version when a newer one is
+// restricted), for the host-token route. It returns the version the token is
+// scoped to, which the host must load. Denials come back as pgstore.ErrNotFound.
+//
+// Only a version the slug's owner published is minted. No viewer clicks anything
+// on this path, so a version from any other writer would run as every viewer
+// unseen; the host then falls back to the consent popup instead.
+func (s *Service) MintEmbedHostToken(ctx context.Context, slug, email string) (token, appID string, version int32, err error) {
+	row, err := s.art.GetLatestBySlugForCaller(ctx, slug, email)
+	if err != nil || row.ArtifactType != pgstore.TypeApp || row.Version == nil {
+		return "", "", 0, pgstore.ErrNotFound
+	}
+	owner, err := s.art.DocOwner(ctx, row)
+	if err != nil || !strings.EqualFold(owner, row.Creator) {
+		return "", "", 0, pgstore.ErrNotFound
+	}
+	appID = pgstore.UUIDFromPG(row.ArtifactID).String()
+	token, err = s.signer.Sign(auth.Claims{
+		Email:  email,
+		Scopes: []string{appScopePrefix + appID, embedHostScope},
+		TTL:    embedUserTokenTTL,
+	})
+	return token, appID, *row.Version, err
 }
 
 // EmbedViewerArtifact authorizes a viewer-mode embed request: it verifies email
@@ -472,6 +515,29 @@ func (s *Service) VerifyEmbedViewerToken(tok string) (email, artifactID string, 
 		return "", "", errors.New("token missing app scope")
 	}
 	return claims.Email, app, nil
+}
+
+// MintEmbedViewerSession seals the cookie record for one surface + slug. Pure
+// signing: the doc route calls it only after a consented viewer token was
+// verified and pinned to the artifact this slug resolves to.
+func (s *Service) MintEmbedViewerSession(email, surface, slug string) (string, error) {
+	return s.signer.SealBlob(embedViewerSessionDomain, viewerSession{
+		Email: email, Key: surface + "/" + slug, Exp: time.Now().Add(EmbedViewerSessionTTL).Unix(),
+	}), nil
+}
+
+// VerifyEmbedViewerSession returns the viewer a session record names, only for
+// the exact surface + slug it was sealed for and only while IsAllowed still
+// admits that viewer (offboarding and deactivation end it immediately).
+func (s *Service) VerifyEmbedViewerSession(value, surface, slug string) (string, error) {
+	var v viewerSession
+	if !s.signer.OpenBlob(embedViewerSessionDomain, value, &v) {
+		return "", errors.New("not an embed viewer session")
+	}
+	if v.Email == "" || v.Key != surface+"/"+slug || time.Now().Unix() > v.Exp || !auth.IsAllowed(v.Email) {
+		return "", errors.New("embed viewer session expired, for another slug, or viewer not allowed")
+	}
+	return v.Email, nil
 }
 
 func hasScope(c auth.Claims, want string) bool {

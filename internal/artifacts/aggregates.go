@@ -177,7 +177,7 @@ var browseFacets = map[string]bool{
 	// so visitors can see who creates what in aggregate, but the click-through
 	// to the catalog naturally applies access filtering — only artifacts the
 	// viewer can read are returned there.
-	"owner": true,
+	"owner": true, "creator": true,
 }
 
 // BrowseValueCount mirrors pgstore.BrowseValueCount on the wire.
@@ -215,7 +215,7 @@ func (s *Service) httpBrowseAggregates(w http.ResponseWriter, r *http.Request) {
 	facet := q.Get("facet")
 	if !browseFacets[facet] {
 		writeError(w, http.StatusBadRequest, "bad_request",
-			"facet must be one of: type, label, scope, content_type, owner")
+			"facet must be one of: type, label, scope, content_type, owner, creator")
 		return
 	}
 	pageSize := int32(50)
@@ -243,7 +243,7 @@ func (s *Service) httpBrowseAggregates(w http.ResponseWriter, r *http.Request) {
 	// a viewer only sees the subset they can actually read. Every other facet
 	// still respects the per-caller access filter.
 	browseCallerEmail := caller
-	if facet == "owner" {
+	if facet == "owner" || facet == "creator" {
 		browseCallerEmail = ""
 	}
 	res, err := s.store.BrowseAggregates(r.Context(), pgstore.BrowseAggregatesInput{
@@ -253,6 +253,7 @@ func (s *Service) httpBrowseAggregates(w http.ResponseWriter, r *http.Request) {
 		Limit:       pageSize,
 		Offset:      int32(page-1) * pageSize,
 		CallerEmail: browseCallerEmail,
+		AllVersions: q.Get("versions") == "all",
 	})
 	if err != nil {
 		writeInternal(w, r, err)

@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -133,7 +132,7 @@ func toolSpecs() []toolSpec {
 	return []toolSpec{
 		{
 			Name:        "add_artifact",
-			Description: "Create (or version) an artifact. Default type=TEXT. Pass ensure_new=true with a named_slug to fail (409) if that slug already exists. Pass allowed_access to gate who can read the artifact — array of glob-on-email patterns; '*' (default) allows any authenticated reader, '*@example.com' restricts to that domain, ['alice@x','bob@x'] restricts to specific people. Empty array = creator-only. Access is per-DOCUMENT, not per-version: publishing onto an existing slug with a DIFFERENT allowed_access/allowed_write updates every version of the slug (slug owner or admin only); omitting them inherits the slug's current access unchanged, so routine re-publishing needs no ACL fields at all. Pass allowed_write to split read from write: it's the subset of readers allowed to push new versions / append / edit (unioned into allowed_access automatically). Omit allowed_write = writers are the same as readers; empty array = creator-only writes. Pass scopes as an array (e.g. [\"a:bt-auto-route\",\"u:lavina.kalwani\"]); the singular \"scope\" is deprecated. Versioning an existing slug REFUSES (409) to change what the document is — its artifact_type, or the base of its content_type (republishing an HTML doc as text/markdown renders the page as source) — unless you pass allow_type_change=true, so send the slug's current content_type unless you mean to change it. Pass expected_latest_version to make the publish conditional on that still being the latest version (409 if someone published first).",
+			Description: "Create (or version) an artifact. Default type=TEXT. Pass ensure_new=true with a named_slug to fail (409) if that slug already exists. Pass allowed_access to gate who can read the artifact — array of glob-on-email patterns; '*' (default) allows any authenticated reader, '*@example.com' restricts to that domain, ['alice@x','bob@x'] restricts to specific people. Empty array = creator-only. Access is per-DOCUMENT, not per-version: publishing onto an existing slug with a DIFFERENT allowed_access/allowed_write updates every version of the slug (slug owner or admin only); omitting them inherits the slug's current access unchanged, so routine re-publishing needs no ACL fields at all. Pass allowed_write to split read from write: it's the subset of readers allowed to push new versions / append / edit (unioned into allowed_access automatically). Omit allowed_write = writers are the same as readers (a skill is owner-only instead); empty array = creator-only writes. Pass scopes as an array (e.g. [\"a:bt-auto-route\",\"u:lavina.kalwani\"]); the singular \"scope\" is deprecated. Versioning an existing slug REFUSES (409) to change what the document is — its artifact_type, or the base of its content_type (republishing an HTML doc as text/markdown renders the page as source) — unless you pass allow_type_change=true, so send the slug's current content_type unless you mean to change it. Pass expected_latest_version to make the publish conditional on that still being the latest version (409 if someone published first).",
 			InputSchema: map[string]any{
 				"type":     "object",
 				"required": []string{"title", "content_type"},
@@ -142,7 +141,7 @@ func toolSpecs() []toolSpec {
 					"content_type":            str(),
 					"content":                 str(),
 					"content_base64":          str(),
-					"artifact_type":           map[string]any{"type": "string", "enum": []string{"TEXT", "PACKAGE", "APP"}},
+					"artifact_type":           map[string]any{"type": "string", "enum": []string{"TEXT", "PACKAGE", "APP", "ATTACHMENT"}},
 					"named_slug":              str(),
 					"description":             str(),
 					"scope":                   str(),
@@ -248,7 +247,7 @@ func toolSpecs() []toolSpec {
 		},
 		{
 			Name:        "update_artifact",
-			Description: "Update an existing artifact's METADATA in place — title, description, scopes, labels, and/or allowed_access — WITHOUT creating a new version. Use this to LABEL or re-describe a doc that was published bare: labels and description are the two fields browse/search surface, so fixing them is how you make an existing artifact findable. Content and artifact_type are immutable: to change the body, call add_artifact with the same named_slug to publish a new version. `ident` is a UUID (edits that exact version) or a slug (edits the latest version you can read). Title/description/labels/scopes are per-version: sibling versions keep theirs, so edit them individually if needed. allowed_access/allowed_write are per-DOCUMENT: an owner/admin edit applies to EVERY version of the slug (archived included), and even re-sending the current values re-converges any drifted versions — so avoid re-sending ACL fields on every routine metadata touch. Only fields you pass are changed; omit a field to leave it untouched, or pass an empty value to clear it (e.g. allowed_access:[] = creator-only, description:\"\" = no description). allowed_write is the subset of readers who may write (omit = writers follow readers; [] = creator-only writes); it is unioned into allowed_access. Creator-or-MANAGE_ARTIFACTS only; editing a kind:skill artifact also requires MANAGE_SKILLS. comments_enabled is the per-DOCUMENT comment switch (false turns commenting off for every version of the slug, hiding all comment controls and refusing new comments); unlike the other fields it is settable only by the artifact's OWNER (its first version's creator, unless ownership was transferred) or an admin.",
+			Description: "Update an existing artifact's METADATA in place — title, description, scopes, labels, and/or allowed_access — WITHOUT creating a new version. Use this to LABEL or re-describe a doc that was published bare: labels and description are the two fields browse/search surface, so fixing them is how you make an existing artifact findable. Content and artifact_type are immutable: to change the body, call add_artifact with the same named_slug to publish a new version. `ident` is a UUID (edits that exact version) or a slug (edits the latest version you can read). Title/description/labels/scopes are per-version: sibling versions keep theirs, so edit them individually if needed. allowed_access/allowed_write are per-DOCUMENT: an owner/admin edit applies to EVERY version of the slug (archived included), and even re-sending the current values re-converges any drifted versions — so avoid re-sending ACL fields on every routine metadata touch. Only fields you pass are changed; omit a field to leave it untouched, or pass an empty value to clear it (e.g. allowed_access:[] = creator-only, description:\"\" = no description). allowed_write is the subset of readers who may write (omit = leave unchanged; [] = creator-only writes); it is unioned into allowed_access. Creator-or-owner-or-MANAGE_ARTIFACTS only. comments_enabled is the per-DOCUMENT comment switch (false turns commenting off for every version of the slug, hiding all comment controls and refusing new comments); unlike the other fields it is settable only by the artifact's OWNER (its first version's creator, unless ownership was transferred) or an admin.",
 			InputSchema: map[string]any{
 				"type":     "object",
 				"required": []string{"ident"},
@@ -554,7 +553,7 @@ func (s *Server) listCaller(ctx context.Context, _ bool) (string, []string, erro
 	if ok {
 		return "", nil, nil // MANAGE_ARTIFACTS bypasses the access filter
 	}
-	groups, err := s.svc.CallerGroups(ctx, caller)
+	groups, err := s.svc.ReadTokens(ctx, caller)
 	if err != nil {
 		return "", nil, err
 	}
@@ -799,18 +798,12 @@ func (s *Server) toolArchive(ctx context.Context, raw json.RawMessage) (any, err
 	}
 	caller := auth.EmailFromContext(ctx)
 	if id, err := uuid.Parse(a.Ident); err == nil {
-		admin, err := s.svc.HasPermission(ctx, caller, rbac.ManageArtifacts)
-		if err != nil {
-			return nil, err
+		allowed, aerr := s.svc.CanArchiveID(ctx, caller, id)
+		if aerr != nil {
+			return nil, aerr
 		}
-		if !admin {
-			creator, cerr := s.svc.CreatorOf(ctx, id)
-			if cerr != nil {
-				return nil, cerr
-			}
-			if !strings.EqualFold(creator, caller) {
-				return nil, errors.New("forbidden: only the creator or MANAGE_ARTIFACTS may archive")
-			}
+		if !allowed {
+			return nil, errors.New("forbidden: only the creator, the document's owner, or MANAGE_ARTIFACTS may archive")
 		}
 		n, err := s.svc.ArchiveByID(ctx, id)
 		if err != nil {
@@ -826,7 +819,7 @@ func (s *Server) toolArchive(ctx context.Context, raw json.RawMessage) (any, err
 		return nil, errors.New("not found")
 	}
 	if !allowed {
-		return nil, errors.New("forbidden: only the creator of every version or MANAGE_ARTIFACTS may archive this slug")
+		return nil, errors.New("forbidden: only the document's owner, the creator of every version, or MANAGE_ARTIFACTS may archive this slug")
 	}
 	n, err := s.svc.ArchiveBySlug(ctx, a.Ident)
 	if err != nil {

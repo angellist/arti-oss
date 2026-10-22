@@ -4,10 +4,10 @@ INSERT INTO artifacts (
     title, description, content_type,
     inline_content, blob_ref, sha256, size_bytes,
     creator, scope, scopes, labels, metadata, allowed_access, allowed_write,
-    comments_enabled, written_via, written_via_name, map_id
+    comments_enabled, written_via, written_via_name, map_id, asserted_by
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-    sqlc.narg('map_id')::uuid
+    sqlc.narg('map_id')::uuid, sqlc.narg('asserted_by')
 )
 RETURNING *;
 
@@ -165,8 +165,11 @@ LIMIT 1;
 -- away. Share links need the live answer, because acting on the slug now means
 -- acting on whatever document currently occupies it.
 --
+-- A version written on someone's behalf counts as written by the principal
+-- that asserted it: being credited is not authorship.
+--
 -- name: SlugLiveCreator :one
-SELECT creator FROM artifacts
+SELECT COALESCE(asserted_by, creator)::text AS creator FROM artifacts
 WHERE named_slug = $1 AND deleted_at IS NULL
 ORDER BY version ASC
 LIMIT 1;

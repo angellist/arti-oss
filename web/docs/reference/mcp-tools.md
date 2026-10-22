@@ -21,13 +21,13 @@ which lets APP artifacts reach *other* upstream MCP servers.
 | Transport | Streamable HTTP, JSON-RPC 2.0 |
 | Protocol version | `2024-11-05` |
 | Server info | `{ name: "arti", version: "0.1.0" }` |
-| Auth | Bearer JWT or `arti_session` cookie (mounted inside the authed group) |
+| Auth | Bearer JWT, admin-minted service API key, or `arti_session` cookie (mounted inside the authed group). Upload-scoped credentials — device-flow tokens and self-serve `arti_upload_…` keys — get `403` |
 
 > If your organization runs an MCP gateway, prefer reaching this endpoint
 > through it rather than connecting directly — see
 > [Using the MCP server](../guides/mcp.md#authentication).
 
-Supported JSON-RPC methods (`internal/mcp/server.go:75`):
+Supported JSON-RPC methods (`internal/mcp/server.go:76`):
 
 | Method | Purpose |
 |---|---|
@@ -42,11 +42,12 @@ errors are returned in the JSON-RPC `error` object; the HTTP status stays `200`.
 
 Calls are attributed to the authenticated caller. List/search results are filtered to
 what the caller can read (their email + group memberships); admins with
-`MANAGE_ARTIFACTS` see everything. Archive and edit enforce creator-or-admin.
+`MANAGE_ARTIFACTS` see everything. Archive and metadata edits need the version's
+creator, the document's owner, or `MANAGE_ARTIFACTS`.
 
 ## Tools
 
-19 tools (`internal/mcp/server.go:118`). `ident` accepts a UUID **or** a named slug.
+19 tools (`toolSpecs`, `internal/mcp/server.go:121`). `ident` accepts a UUID **or** a named slug.
 `version` is optional — for a slug it defaults to the latest version the caller can read.
 
 ### `add_artifact`
@@ -55,8 +56,8 @@ Create (or version) an artifact.
 
 > Create (or version) an artifact. Default type=TEXT. Pass ensure_new=true with a
 > named_slug to fail (409) if that slug already exists. Pass allowed_access to gate who
-> can read this version … Empty array = creator-only. Pass scopes as an array …; the
-> singular "scope" is deprecated.
+> can read the artifact … Empty array = creator-only. Access is per-DOCUMENT, not
+> per-version … Pass scopes as an array …; the singular "scope" is deprecated.
 
 | Param | Type | Required | Notes |
 |---|---|---|---|
@@ -64,7 +65,7 @@ Create (or version) an artifact.
 | `content_type` | string | yes | MIME |
 | `content` | string | no | raw text body |
 | `content_base64` | string | no | base64 body (binary) |
-| `artifact_type` | string (`TEXT`\|`PACKAGE`\|`APP`) | no | default `TEXT` |
+| `artifact_type` | string (`TEXT`\|`PACKAGE`\|`APP`\|`ATTACHMENT`) | no | default `TEXT` |
 | `named_slug` | string | no | |
 | `description` | string | no | |
 | `scope` | string | no | deprecated; use `scopes` |
@@ -75,9 +76,14 @@ Create (or version) an artifact.
 | `expected_latest_version` | int | no | publish only if the slug is still at this version (409 `stale-base-version`) |
 | `allow_type_change` | boolean | no | permit a version that changes `artifact_type` or the base of `content_type` (409 `type-change` without it) |
 | `allowed_access` | string[] | no | glob-on-email; `["*"]` any reader, `[]` creator-only |
-| `allowed_write` | string[] | no | subset of readers allowed to write; omit = writers follow readers, `[]` = creator-only writes |
+| `allowed_write` | string[] | no | subset of readers allowed to write; omit = writers follow readers (a skill is owner-only), `[]` = creator-only writes |
 
 **Returns:** `ArtifactInfo` (see [REST API](rest-api.md#artifactinfo)).
+
+Access is per-DOCUMENT. Publishing onto an existing slug with a *different*
+`allowed_access` or `allowed_write` rewrites them on every version of the slug, and
+only the slug's owner or an admin may do that. Omit both to keep the slug's current
+access.
 
 Versioning a slug keeps the document's kind: send its current `content_type`
 unless you mean to change it. Republishing an HTML document as `text/markdown`
@@ -101,7 +107,7 @@ caches the response 24h per `(key, creator)` and replays it.
 | `description` | string | no | |
 | `content_type` | string | no | required on auto-create |
 | `scopes` / `labels` / `allowed_access` | string[] | no | nil → inherit from prior |
-| `allowed_write` | string[] | no | subset of readers allowed to write; nil → inherit / writers follow readers, `[]` → creator-only writes |
+| `allowed_write` | string[] | no | subset of readers allowed to write; nil → inherit / writers follow readers (a skill is owner-only), `[]` → creator-only writes |
 
 **Returns:** `{ "artifact": ArtifactInfo, "idempotent_replay": boolean }`.
 
@@ -112,9 +118,12 @@ Update an existing artifact's **metadata** in place — `title`, `description`, 
 `artifact_type` are immutable: to change the body, call `add_artifact` with the same
 `named_slug` to publish a new version. Only the fields you pass change; omit a field to
 leave it untouched, or pass an empty array to clear it (e.g. `allowed_access: []` →
-creator-only). The edit applies to a single version — for a slug, the latest version the
-caller can read; sibling versions keep their prior metadata. Creator-or-`MANAGE_ARTIFACTS`
-only; editing a `kind:skill` artifact also requires `MANAGE_SKILLS`.
+creator-only). `title`, `description`, `scopes`, and `labels` are per-version — for a
+slug, the edit lands on the latest version the caller can read, and sibling versions
+keep theirs. `allowed_access`, `allowed_write`, and `comments_enabled` are per-DOCUMENT:
+an owner's or admin's edit applies to every version of the slug, archived ones
+included. The version's creator, the document's owner, or `MANAGE_ARTIFACTS` only.
+Removing the `skill` label from a skill also needs write access to it.
 
 | Param | Type | Required | Notes |
 |---|---|---|---|
@@ -125,7 +134,7 @@ only; editing a `kind:skill` artifact also requires `MANAGE_SKILLS`.
 | `scopes` | string[] | no | replaces the set; `[]` clears |
 | `labels` | string[] | no | replaces the set; `[]` clears |
 | `allowed_access` | string[] | no | glob-on-email; `[]` → creator-only |
-| `allowed_write` | string[] | no | subset of readers allowed to write; omit → writers follow readers, `[]` → creator-only writes (unioned into `allowed_access`) |
+| `allowed_write` | string[] | no | subset of readers allowed to write; omit → unchanged, `[]` → creator-only writes (unioned into `allowed_access`) |
 | `comments_enabled` | bool | no | per-DOCUMENT comment switch — applies to every version of the slug, and only the artifact's OWNER (first version's creator, unless transferred) or an admin may set it |
 
 **Returns:** the refreshed `ArtifactInfo`.
@@ -176,11 +185,13 @@ List artifacts (filterable). All params optional.
 
 | Param | Type | Notes |
 |---|---|---|
-| `type` | string | filter by artifact type |
-| `creator` | string | filter by creator email |
+| `type` | string | artifact type, or a pseudo-type (`MARKDOWN`, `HTML`, `DIAGRAM`, `JSON`, `PDF`, `IMAGE`) that matches a content-type family |
+| `creator` | string | creator email; exact, or a `*` glob |
 | `scope` | string | filter by scope |
-| `labels` | string[] | filter by labels |
-| `limit` / `offset` | integer | pagination |
+| `labels` | string[] | filter by labels (all must match) |
+| `limit` / `offset` | integer | pagination; `limit` defaults to 50, and a value over 500 is clamped to 500 |
+| `order_by` | string | `created` (default) \| `title` \| `type` \| `slug` \| `version` \| `creator` \| `scope` |
+| `order_dir` | string | `desc` (default) \| `asc` |
 | `include_archived` | boolean | non-admins still see only their own archived |
 
 **Returns:** `{ "artifacts": ArtifactInfo[], "total": int }`. Each `ArtifactInfo`
@@ -188,14 +199,17 @@ carries `size_bytes`, so you can gauge document sizes straight from the listing.
 
 ### `search_artifacts`
 
-Substring search over title, description, slug.
+Substring search over title, description, slug. `q` may be omitted when `labels` or
+`scope` is given (for example, to enumerate a dataset by label); a call with none of the
+three is an error.
 
 | Param | Type | Required |
 |---|---|---|
-| `q` | string | yes |
+| `q` | string | no |
 | `scope` | string | no |
 | `labels` | string[] | no |
 | `limit` / `offset` | integer | no |
+| `order_by` / `order_dir` | string | no — same values as `list_artifacts`; an explicit `order_by` replaces relevance ranking |
 | `include_archived` | boolean | no |
 
 **Returns:** same shape as `list_artifacts`.
@@ -212,8 +226,10 @@ List every non-deleted version of a slug.
 
 ### `archive_artifact`
 
-Soft-delete by UUID (one version) or slug (all versions). Creator-or-admin; unauthorized
-calls error.
+Soft-delete by UUID (one version) or slug (all versions). By UUID: the version's
+creator, the document's owner, or `MANAGE_ARTIFACTS`. By slug: the document's owner,
+the creator of every version, or `MANAGE_ARTIFACTS`. A non-admin archiving a skill also needs write access to it, and a version
+written on your behalf by a service principal does not count as yours. Unauthorized calls error.
 
 | Param | Type | Required |
 |---|---|---|
@@ -261,39 +277,6 @@ service is configured.
 
 **Returns:** `{ "threads": Thread[] }` (same Thread/Comment shape as the
 [comments REST API](rest-api.md#comments-authed)).
-
-## OAuth for MCP clients {#oauth}
-
-A client that can't present an `arti_session` cookie or a pre-issued JWT authenticates
-through arti's OAuth endpoints — RFC 7591 dynamic client registration plus an RFC 6749
-authorization-code grant with PKCE. This is how Runlayer and similar gateways connect
-without pre-shared credentials.
-
-### Discovery
-
-On an unauthenticated `/mcp` call, arti returns `401` with a `WWW-Authenticate` header
-pointing at its protected-resource metadata (absolute URL, per RFC 9728). Two
-discovery documents (`internal/auth/wellknown.go`):
-
-- `GET /.well-known/oauth-protected-resource` — `resource`, `authorization_servers`,
-  `bearer_methods_supported`, `resource_documentation`.
-- `GET /.well-known/oauth-authorization-server` — `authorization_endpoint`,
-  `token_endpoint`, `registration_endpoint`, `code_challenge_methods_supported: ["S256"]`,
-  `token_endpoint_auth_methods_supported: ["none","client_secret_basic",
-  "client_secret_post"]`.
-
-### Flow
-
-| Step | Endpoint | Notes |
-|---|---|---|
-| 1. Register | `POST /oauth/register` | Body `{ client_name?, redirect_uris, … }`. Redirect URIs must be `https://` or `http://localhost`. Returns `client_id` (+ `client_secret` unless auth method `none`). |
-| 2. Authorize | `GET /oauth/authorize` | Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge` (S256), `code_challenge_method=S256`, `state`. The caller's identity comes from the signed `arti_session` cookie, or from the upstream proxy headers where `ARTI_AUTH_MODE=proxy` declares a proxy overwrites them; an unidentified caller is redirected to `/auth/login` and returned here. Identity is checked against the email-domain allowlist, and against the required-groups list on the proxy path. Renders a consent page naming the client and the redirect URI; issues nothing by itself. |
-| 2b. Approve | `POST /oauth/authorize/confirm` | The consent page's submit. Carries the page's signed `consent` blob and its `SameSite=Strict` identity cookie, so only the user who was shown the page can approve it. Redirects back with a single-use `code` (10-min TTL). |
-| 3. Token | `POST /oauth/token` | `grant_type=authorization_code` with `code`, `redirect_uri`, `code_verifier`, client auth; or `grant_type=refresh_token`. Returns `{ access_token, refresh_token, token_type: "Bearer", expires_in, scope }`. |
-
-Token lifetimes (`cmd/arti-server/cmd_serve.go:227`): access **7 days**, refresh
-**90 days**. The client secret is stored only as a hash. Use the returned access token as
-`Authorization: Bearer …` on `/mcp`.
 
 ### `add_comment`
 
@@ -358,8 +341,9 @@ Write entries to a MAP — one call covers a single write and a batch of up to 1
 Creates the MAP at v1 when the slug does not exist, in which case `title` is required.
 At most one guard per entry: `if_absent` writes only when the key is free, and
 `if_rev` writes only when the entry is still at that revision. Without a guard the
-write is last-wins. The call returns 409 when any entry's guard lost, and the losing
-entry comes back with the incumbent that won.
+write is last-wins. A lost guard is a result, not a tool error: the reply sets
+`conflict: true`, and the losing entry comes back with the incumbent that won. (The
+REST route answers the same case with `409`.)
 
 | Param | Type | Required | Notes |
 |---|---|---|---|
@@ -397,6 +381,41 @@ chain.
 | `slug` | string | yes | |
 
 **Returns:** `{ "unchanged": boolean, "version": int, "entries": int, "artifact_id": string, "size_bytes": int }`.
+
+## OAuth for MCP clients {#oauth}
+
+A client that can't present an `arti_session` cookie or a pre-issued JWT authenticates
+through arti's OAuth endpoints — RFC 7591 dynamic client registration plus an RFC 6749
+authorization-code grant with PKCE. This is how Runlayer and similar gateways connect
+without pre-shared credentials.
+
+### Discovery
+
+On an unauthenticated `/mcp` call, arti returns `401` with a `WWW-Authenticate` header
+pointing at its protected-resource metadata (absolute URL, per RFC 9728). Two
+discovery documents (`internal/auth/wellknown.go`):
+
+- `GET /.well-known/oauth-protected-resource` (also served at the RFC 9728 §3.1
+  path-scoped form `/.well-known/oauth-protected-resource/mcp`, which is what the
+  `401` advertises) — `resource`, `authorization_servers`,
+  `bearer_methods_supported`, `resource_documentation`.
+- `GET /.well-known/oauth-authorization-server` — `authorization_endpoint`,
+  `token_endpoint`, `registration_endpoint`, `code_challenge_methods_supported: ["S256"]`,
+  `token_endpoint_auth_methods_supported: ["none","client_secret_basic",
+  "client_secret_post"]`.
+
+### Flow
+
+| Step | Endpoint | Notes |
+|---|---|---|
+| 1. Register | `POST /oauth/register` | Body `{ client_name?, redirect_uris, … }`. Redirect URIs must be `https://` or `http://localhost`. Returns `client_id` (+ `client_secret` unless auth method `none`). |
+| 2. Authorize | `GET /oauth/authorize` | Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge` (S256), `code_challenge_method=S256`, `state`. The caller's identity comes from the signed `arti_session` cookie, or from the upstream proxy headers where `ARTI_AUTH_MODE=proxy` declares a proxy overwrites them; an unidentified caller is redirected to `/auth/login` and returned here. Identity is checked against the email-domain allowlist, and against the required-groups list on the proxy path. Renders a consent page naming the client and the redirect URI; issues nothing by itself. |
+| 2b. Approve | `POST /oauth/authorize/confirm` | The consent page's submit. Carries the page's signed `consent` blob and its `SameSite=Strict` identity cookie, so only the user who was shown the page can approve it. Redirects back with a single-use `code` (10-min TTL). |
+| 3. Token | `POST /oauth/token` | `grant_type=authorization_code` with `code`, `redirect_uri`, `code_verifier`, client auth; or `grant_type=refresh_token`. Returns `{ access_token, refresh_token, token_type: "Bearer", expires_in, scope }`. |
+
+Token lifetimes (`cmd/arti-server/cmd_serve.go:231`): access **7 days**, refresh
+**90 days**. The client secret is stored only as a hash. Use the returned access token as
+`Authorization: Bearer …` on `/mcp`.
 
 ## See also
 

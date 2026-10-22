@@ -18,6 +18,9 @@ export interface ArtifactInfo {
   // "unknown", not "a person in a browser".
   written_via: string | null;
   written_via_name: string | null;
+  // asserted_by: the service principal that wrote this version for `creator`,
+  // who is credited but cannot edit or archive it.
+  asserted_by?: string;
   scopes: string[];
   labels: string[];
   allowed_access: string[];
@@ -51,6 +54,8 @@ export interface ArtifactInfo {
   // which names whoever pushed this version — on a transferred document the two
   // answer for different people.
   can_edit_metadata?: boolean;
+  // can_archive: the server's verdict on archive/unarchive for this caller.
+  can_archive?: boolean;
   // Whether the caller may mint an external share link. Server-computed from
   // the slug's immutable owner; never re-derive it from `creator`, which
   // versioning reassigns to whoever pushed the latest version.
@@ -117,7 +122,7 @@ export interface AggregatesResponse {
 
 // BrowseFacet is one of the Browse page's four facets — the value each maps
 // to on the wire (?facet=…) and in row-link filter tokens.
-export type BrowseFacet = "type" | "label" | "scope" | "content_type" | "owner";
+export type BrowseFacet = "type" | "label" | "scope" | "content_type" | "owner" | "creator";
 
 export interface BrowseValueCount {
   value: string;
@@ -227,6 +232,8 @@ export interface Me {
   // (ARTI_SHARE_ENABLED). When false the Share dialog offers only the
   // copy-this-URL half, because the mint endpoint is not mounted at all.
   share_links_enabled?: boolean;
+  // Whether POST /api/dictate has a provider key (OPENAI_API_KEY).
+  dictation_enabled?: boolean;
 }
 
 // ShareLink is one external timed link as its owner sees it. There is
@@ -408,6 +415,55 @@ export interface RosterUser {
   deactivated_at: string | null;
   deactivated_by: string;
 }
+
+// CredentialAudit is GET /api/users/access: every stored credential one email
+// holds, plus where its credentials were used. Sessions and CLI/MCP tokens are
+// never stored, so they appear only in usage.
+export interface CredentialAudit {
+  email: string;
+  api_keys: {
+    id: string;
+    name: string;
+    key_prefix: string;
+    scopes: string[];
+    created_at: string;
+    expires_at: string;
+    last_used_at: string | null;
+    revoked_at: string | null;
+  }[];
+  device_tokens: {
+    family_id: string;
+    scope: string;
+    created_at: string;
+    rotated_at: string;
+    expires_at: string;
+    revoked: boolean;
+  }[];
+  share_links: {
+    id: string;
+    token_prefix: string;
+    target: string;
+    note: string;
+    created_at: string;
+    expires_at: string;
+    revoked_at: string | null;
+    last_opened_at: string | null;
+    open_count: number;
+  }[];
+  connections: { resource: string; expiry: string; updated_at: string }[];
+  usage: {
+    cred: string;
+    ip: string;
+    user_agent: string;
+    reads: number;
+    writes: number;
+    first_seen: string;
+    last_seen: string;
+  }[];
+  usage_days: number;
+}
+
+export type AuditCredentialKind = "apikey" | "device" | "share" | "connection";
 
 export interface RosterResponse {
   users: RosterUser[];

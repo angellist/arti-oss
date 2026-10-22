@@ -20,7 +20,7 @@ A slug is an optional, human-readable name for an artifact — `q3-board-deck` i
 
 The rule to remember: uploading again under an existing slug never overwrites anything — it adds the next version. You don't choose the version number; arti always assigns the next one up. (A slug is unique while it's in use, so one name always points at one line of versions.)
 
-ATTACHMENT artifacts are the exception — they're always slugless, and therefore single-version. See [Artifact types](#artifact-types).
+ATTACHMENT artifacts posted by another app (with an API key or upload token) are the exception — they're always slugless, and therefore single-version. A person who publishes a file under a slug gets an ordinary versioned document. See [Artifact types](#artifact-types).
 
 ## Version {#version}
 
@@ -41,6 +41,8 @@ Every artifact has a canonical URL. Which form you use depends on what you want 
 
 Both `/s/daily-notes/2` and `/s/daily-notes/v_2` resolve to version 2; a segment that isn't a real version simply falls back to the latest. `arti url <ident>` prints the canonical link for any artifact.
 
+Add `?v=full` to any of these to open the content full-page, without the viewer's chrome. An APP runs at `/app/<slug>/<N>` (or `/app/<slug>` for the latest).
+
 Files inside a PACKAGE or APP are addressable on their own, too — fetch a single entry with `arti get <slug>/<path/in/zip>` (or the matching REST route) without downloading the whole bundle.
 
 ## Artifact types {#artifact-types}
@@ -52,21 +54,22 @@ Every artifact is one of five types, and the type decides how arti stores and se
 | **TEXT** | inline if ≤ 64 KiB, else blob | yes | yes | markdown, HTML, or plaintext — the common case. |
 | **PACKAGE** | zip + file manifest | yes | yes | a multi-file bundle; entries are fetchable one at a time. |
 | **APP** | zip (same as PACKAGE) | yes | yes | a PACKAGE that also ships an `arti-app.json` manifest and gets an app bridge at serve time. |
-| **ATTACHMENT** | blob only | no (slugless, single-version) | hidden for non-admins | a user-uploaded file; visible only to its creator by default. |
+| **ATTACHMENT** | blob only | only when a person publishes it under a slug | yes, to those with access | a user-uploaded file; one posted by another app is slugless and visible only to its creator. |
 | **MAP** | rows in a keyed head, plus NDJSON snapshots | yes (slug required) | yes | a key/value store rather than a document; see below. |
 
 PACKAGE and APP are stored and served the same way — an APP is just a PACKAGE that additionally declares a tool allowlist and gets the bridge injected, letting its JavaScript call MCP tools and an LLM through arti's governed proxy with no backend of its own. See [App serving](../architecture/app-serving.md) for how that works and [Attachments](../architecture/attachments.md) for the creator-only rules.
 
 A **MAP** is the one type whose content is not a body. Its keys live in a table as a
 live head that every write changes in place, and a version is minted only when someone
-calls snapshot, which freezes the whole head as NDJSON in key order. So `/s/<slug>`
-shows the latest snapshot rather than the current keys, and a map nobody has
-snapshotted reads as empty in the viewer. The keys belong to the map, not to the name
+calls snapshot, which freezes the whole head as NDJSON in key order. So the body
+read at `/s/<slug>` is the latest snapshot rather than the current keys, and a map
+nobody has snapshotted has an empty body. The web viewer shows the live head as a
+table instead, and its Raw Source view shows the snapshot. The keys belong to the map, not to the name
 it is published under: archiving hides them and publishing a new map at a freed slug
 starts empty. Keys are flat strings namespaced by a `:` convention, values are JSON up
 to 64 KiB, and a map holds at most 10,000 keys and 8 MiB. Reach a MAP through
 `arti map`, the four `map_*` MCP tools, or the `/map` REST routes. MAP is behind
-`ARTI_MAP_ARTIFACTS`, which is on in staging and production.
+`ARTI_MAP_ARTIFACTS`, which is off by default and on in staging and production.
 
 ## Scope {#scope}
 
@@ -86,7 +89,11 @@ Where scope says what an artifact belongs to, labels are how you'd find it in a 
 
 ## Access {#access}
 
-Every artifact has an access list of glob patterns matched against email addresses. The default, `{*}`, means anyone who can reach arti may read it. An empty list means creator-only — the rule ATTACHMENTs are locked into. Group and role permissions layer on top of this; see [Authentication & access](../architecture/auth.md).
+Every artifact has an access list of glob patterns matched against email addresses. The default, `{*}`, means anyone who can reach arti may read it. An empty list means creator-only — the rule a slugless ATTACHMENT is locked into. Group and role permissions layer on top of this; see [Authentication & access](../architecture/auth.md).
+
+A second, optional list says who may **write** — publish new versions, append, edit. When it is unset, anyone who can read may write (except a document labelled `skill` or `kind:skill`, which is then owner-only); when it is set, it is always a subset of the read list. Access is a property of the whole document: a change applies to every version of the slug.
+
+Each slugged document also has one **owner** — whoever created its first version, unless ownership was transferred since. The owner (or an admin) changes access, turns comments on or off, creates external share links, and can hand the document to someone else (`arti owner`, or **Transfer…** in the access dialog).
 
 ## The four surfaces {#surfaces}
 

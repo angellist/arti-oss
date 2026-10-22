@@ -103,7 +103,7 @@ export default async function ByID({
         : (await fetchContent(uuid, cookie)).body
       : "";
     const textScale = textScaleFromParam(sp);
-    return <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />;
+    return <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} info={info} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />;
   }
 
   if (info.artifact_type === "PACKAGE" || info.artifact_type === "APP") {

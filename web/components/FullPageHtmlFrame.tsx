@@ -5,6 +5,7 @@ import { fileParamSearch, resolvePackageEntry } from "@/lib/viewer";
 import { useHtmlFitZoom } from "@/lib/useViewport";
 import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
 import { useAppConsentMessage } from "@/lib/useAppConsentMessage";
+import { useDictationBridge } from "@/lib/useDictationBridge";
 
 // The full-page HTML iframe, plus the listener that keeps the browser URL
 // (?file=<path>) in sync as the reader follows in-content links from one
@@ -47,6 +48,7 @@ export default function FullPageHtmlFrame({
   const currentFile = useRef<string | null>(initialFile ?? null);
   useExternalLinkMessage(iframeRef);
   useAppConsentMessage(iframeRef);
+  useDictationBridge(iframeRef);
 
   // Fit-to-width on a narrow viewport (see htmlFitZoom). 1 on the server, so
   // the SSR markup is the desktop one and only the client ever scales down.

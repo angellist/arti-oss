@@ -33,10 +33,17 @@ type fakeMinter struct {
 	viewerToken   string
 	viewerCalls   int
 	viewerMintFor string
+	// host-token fields
+	version             int32
+	hostSlug, hostEmail string
 }
 
 func (f *fakeMinter) EmbedUserApp(_ context.Context, appID, email string) (string, string, error) {
 	return f.title, f.slug, f.appErr
+}
+func (f *fakeMinter) MintEmbedHostToken(_ context.Context, slug, email string) (string, string, int32, error) {
+	f.hostSlug, f.hostEmail = slug, email
+	return f.token, f.aid, f.version, f.appErr
 }
 func (f *fakeMinter) MintEmbedUserToken(_ context.Context, appID, email string) (string, error) {
 	return f.token, f.mintErr

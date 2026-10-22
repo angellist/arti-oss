@@ -20,6 +20,12 @@ describe("fullPageKind", () => {
     expect(fullPageKind("image/jpeg")).toBe("image");
     expect(fullPageKind("image/svg+xml")).toBe("image");
   });
+  it("renders video and audio with the browser player, not as a download", () => {
+    expect(fullPageKind("video/mp4")).toBe("video");
+    expect(fullPageKind("video/webm; codecs=vp9")).toBe("video");
+    expect(fullPageKind("audio/mpeg")).toBe("audio");
+    expect(fullPageKind("audio/wav")).toBe("audio");
+  });
   it("classifies pdf as pdf", () => {
     expect(fullPageKind("application/pdf")).toBe("pdf");
   });

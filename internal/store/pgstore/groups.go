@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/angellist/arti-oss/internal/rbac"
 )
 
 // Group is a named collection of member emails. The token `group:<Name>` in an
@@ -159,6 +161,28 @@ func (s *Store) CallerGroups(ctx context.Context, caller string) ([]string, erro
 		return nil, err
 	}
 	return append(tokens, idp...), nil
+}
+
+// ReadTokens is CallerGroups plus, for a service principal holding
+// READ_ORG_SHARED, one `*@<domain>` token per allowlisted domain. A person
+// holding it gains nothing: for them it would read across companies. Document
+// reads only: writes, roles, comments and the APP proxy use CallerGroups,
+// because the comment and APP gates also authorize posting and tool calls.
+func (s *Store) ReadTokens(ctx context.Context, caller string) ([]string, error) {
+	tokens, err := s.CallerGroups(ctx, caller)
+	if err != nil || s.orgDomains == nil || !s.IsActiveServicePrincipal(ctx, caller) {
+		return tokens, err
+	}
+	ok, err := s.HasPermission(ctx, caller, rbac.ReadOrgShared)
+	if err != nil || !ok {
+		return tokens, err
+	}
+	for _, d := range s.orgDomains() {
+		if d = strings.ToLower(strings.TrimSpace(d)); d != "" && !strings.Contains(d, "@") {
+			tokens = append(tokens, "*@"+d)
+		}
+	}
+	return tokens, nil
 }
 
 // groupNamesFor returns the names of the groups in snap whose membership

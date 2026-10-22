@@ -1,7 +1,7 @@
 ---
 title: Sharing a document
 order: 6
-summary: The two halves of the Share dialog — copying the page URL for people who can sign in, and minting a time-limited external link for someone with no AngelList account — plus what pinned and tracking links show, who may create them, and how revocation and the access log behave.
+summary: The two halves of the Share dialog — copying the page URL for people who can sign in, and minting a time-limited external link for someone with no account on your arti deployment — plus what pinned and tracking links show, who may create them, and how revocation and the access log behave.
 ---
 
 # Sharing a document
@@ -17,17 +17,24 @@ nothing at all. This half is available to everyone who can see the document.
 
 Use it for colleagues. It is the normal way to point someone at a document.
 
+Someone who signs in but is not on the access list of a live (not archived)
+document does not get a bare "not found". They see an **Access required** page with the document's title and
+slug, its owner, and a button that drafts an email asking the owner for access.
+
 ## External link
 
 A time-limited URL that opens the document for **anyone holding it**, with no
-AngelList account and no sign-in. The URL is the whole credential: whoever has
+account on your arti deployment and no sign-in. The URL is the whole credential: whoever has
 it can read the document until the link expires or you revoke it.
+
+External links are **off by default**. This half of the dialog appears only when
+the deployment sets `ARTI_SHARE_ENABLED=true`.
 
 Only the document's **owner** — whoever created its first version, unless
 ownership has since been transferred — or an
 administrator can create one. That is the same authority it takes to change the
 document's access list, because publishing a document to the internet is a
-larger act than widening who inside AngelList can read it. Someone who can
+larger act than widening who inside your organization can read it. Someone who can
 merely edit the document cannot create an external link for it.
 
 The link is shown **once**, when you create it. arti stores only a hash of it,
@@ -50,8 +57,8 @@ pinned option unless you specifically want the recipient to track updates.
 
 ### Expiry
 
-Every link expires: 1 hour, 8 hours, 1 day, 7 days or 30 days. There is no
-"never". An external link that never expires is a permanent unauthenticated
+Every link expires: 1 hour, 8 hours, 1 day (the default), 7 days or 30 days.
+There is no "never". An external link that never expires is a permanent unauthenticated
 grant, which is exactly what this feature is built to avoid.
 
 ## Revoking, and the access log

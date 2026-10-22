@@ -67,6 +67,7 @@ describe("BrowseTable resets its query when the facet changes", () => {
           page={1}
           sort="count"
           dir="desc"
+          versions="latest"
         />,
       );
     });
@@ -122,6 +123,7 @@ describe("BrowseTable resets its query when the facet changes", () => {
           page={1}
           sort="name"
           dir="asc"
+          versions="latest"
         />,
       );
     });

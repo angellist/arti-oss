@@ -8,9 +8,9 @@ export function browseRowHref(facet: BrowseFacet, value: string): string {
   if (facet === "type") {
     return `/?type=${encodeURIComponent(value)}`;
   }
-  // "owner" maps to the catalog's `creator:` field token.
-  if (facet === "owner") {
-    return `/?q=${encodeURIComponent(`creator:${value}`)}`;
+  // "owner" is the document owner; "creator" is whoever wrote each version.
+  if (facet === "owner" || facet === "creator") {
+    return `/?q=${encodeURIComponent(`${facet}:${value}`)}`;
   }
   return `/?q=${encodeURIComponent(`${facet}:${value}`)}`;
 }

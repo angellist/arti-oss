@@ -29,6 +29,7 @@ import (
 	"github.com/angellist/arti-oss/internal/comments"
 	"github.com/angellist/arti-oss/internal/config"
 	"github.com/angellist/arti-oss/internal/credusage"
+	"github.com/angellist/arti-oss/internal/dictate"
 	"github.com/angellist/arti-oss/internal/embed"
 	"github.com/angellist/arti-oss/internal/groups"
 	"github.com/angellist/arti-oss/internal/httperr"
@@ -145,6 +146,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	auth.SetAllowedEmails(cfg.Auth.AllowedEmails)
 	logger.Info("email allowlist", "entries", auth.AllowedEmails())
 	auth.SetDeactivationCheck(pgstoreInst.IsDeactivated)
+	pgstoreInst.SetOrgDomains(auth.AllowedEmails)
 
 	auth.SetAdminEmails(cfg.Admin.Emails)
 	logger.Info("admin allowlist", "emails", auth.AdminEmails())
@@ -352,6 +354,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	authCfg := auth.NewConfig(oidcVerifier, signer, cfg.Auth.ServiceSecret, cfg.Auth.RequiredGroups)
 	authCfg.ServiceSecretEmail = cfg.Auth.ServiceEmail
 	authCfg.APIKeys = apikeys.NewAuthenticator(pgstoreInst)
+	authCfg.ServicePrincipal = pgstoreInst.IsActiveServicePrincipal
 	if cfg.Auth.Disabled {
 		logger.Warn("AUTH DISABLED: every request is attributed to "+cfg.Auth.LocalEmail+" — must be off in prod",
 			"local_email", cfg.Auth.LocalEmail)
@@ -505,10 +508,11 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 			DefaultModel: cfg.LLM.DefaultModel,
 			Allowed:      cfg.LLM.AllowedModels,
 			Store: llm.NewPGStore(pool, llm.Budgets{
-				RPMPerViewer: cfg.LLM.RPMPerViewer,
-				TPHPerViewer: cfg.LLM.TPHPerViewer,
-				TPHPerApp:    cfg.LLM.TPHPerApp,
-				TPDPerOrg:    cfg.LLM.TPDPerOrg,
+				RPMPerViewer:    cfg.LLM.RPMPerViewer,
+				TPHPerViewer:    cfg.LLM.TPHPerViewer,
+				TPHPerApp:       cfg.LLM.TPHPerApp,
+				TPDPerOrg:       cfg.LLM.TPDPerOrg,
+				USDPerViewerDay: cfg.LLM.USDPerViewerDay,
 			}),
 		})
 		if lerr != nil {
@@ -599,6 +603,13 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		logger.Info("MAP artifact type enabled")
 	}
 
+	svc.SetDictationEnabled(cfg.Dictation.APIKey != "")
+	if cfg.Dictation.APIKey != "" {
+		logger.Info("comment dictation enabled", "language", cfg.Dictation.Language)
+	} else {
+		logger.Warn("comment dictation disabled (OPENAI_API_KEY unset)")
+	}
+
 	if cfg.Share.Enabled {
 		svc.SetShareConfig(artifacts.ShareConfig{
 			Enabled: true,
@@ -640,12 +651,18 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		}).WithUsage(pgstoreInst)
 		if notifier != nil {
 			keysSvc.OnMint(func(ctx context.Context, ev apikeys.Minted) {
-				notifier.NotifyKeyMinted(ctx, ev.OwnerEmail, slacknotify.MintedKey{
+				to := ev.OwnerEmail
+				if ev.MintedBy != "" {
+					to = ev.MintedBy
+				}
+				notifier.NotifyKeyMinted(ctx, to, slacknotify.MintedKey{
 					Name: ev.Name, KeyPrefix: ev.KeyPrefix, Scopes: ev.Scopes, ExpiresAt: ev.ExpiresAt,
 				})
 			})
 		}
 		keysSvc.Mount(r, ipRateLimiter(cfg.Auth.APIKeys.MintRPM))
+		r.With(viewerRateLimiter(cfg.Dictation.RPMPerViewer)).Method(http.MethodPost, "/api/dictate",
+			&dictate.Handler{Key: cfg.Dictation.APIKey, Language: cfg.Dictation.Language})
 		r.Handle("/mcp", mcpSrv.Handler())
 	})
 	root.Group(func(r chi.Router) {

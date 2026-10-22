@@ -41,8 +41,13 @@ them:
 
 - **Slugless.** No named slug, so the row is single-version. Append is rejected
   for ATTACHMENT whatever its slug.
-- **Creator-only.** Allowed-access is forced empty (creator-only; admins bypass).
-  An access update on a slugless ATTACHMENT can't widen it either.
+- **Creator-only by default.** With no reader list in the request, allowed-access
+  is forced empty (creator-only; admins bypass), and so is the write list. A
+  caller that names readers itself keeps them — a service principal, for
+  example, must be able to read back what it stored. A list inherited from a
+  slug the request named never widens an attachment. Later, only the owner or an
+  admin may change a slugless attachment's access, and an update that omits the
+  list keeps it creator-only rather than opening it to everyone.
 - **S3-only.** The inline-content branch is TEXT-only, so ATTACHMENT always falls
   through to S3 even for tiny files, under an `attachments/` key prefix.
 
@@ -61,8 +66,8 @@ drop-to-version work for a PDF or an image in the viewer.
 Serving: a previewable attachment (PDF, image) is served `inline` so `/a/<uuid>`
 links and the viewer's `<img>`/`<iframe>` render it; non-renderable bytes get
 `Content-Disposition: attachment` so the browser saves them. `?download=1` forces
-the download. Because attachments are creator-only, inline serving only ever
-happens for the uploader viewing their own file.
+the download. A slugless attachment is usually creator-only, so inline serving is
+mostly the uploader viewing their own file.
 
 ![How an attachment flows through arti](./attachments.svg)
 
@@ -71,7 +76,9 @@ happens for the uploader viewing their own file.
 - ATTACHMENT is **slugless and single-version** unless a person published it
   under a slug; append is rejected either way.
 - Bytes always go to **S3**, never inline content.
-- A slugless ATTACHMENT's access is **creator-only** and can never be widened.
+- A slugless ATTACHMENT is **creator-only** unless the uploading caller named
+  readers, or its owner or an admin later sets them explicitly; an inherited ACL
+  never widens it.
 - **No migration needed.** The artifact type is a free string and every column
   it uses already exists.
 

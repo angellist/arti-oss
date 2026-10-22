@@ -10,7 +10,8 @@ arti uses an OpenSearch index (`artifacts`) for full-text BM25 search across
 titles, descriptions, creator names, labels, and artifact content. The search
 layer is **optional** — when `OPENSEARCH_ENDPOINT` is empty the server falls
 back to Postgres `ILIKE` queries. This makes rollout incremental and
-risk-free.
+risk-free, and running without OpenSearch is a supported configuration, not
+only a rollout step: a small or staging deployment can leave it off.
 
 ## Architecture overview
 
@@ -36,6 +37,7 @@ then fetch full rows from Postgres and re-verify access controls.
 | `OPENSEARCH_ENDPOINT` | No | `""` | Full URL (e.g. `https://search-arti-xxx.us-west-2.es.amazonaws.com`). Empty = disabled. |
 | `OPENSEARCH_USERNAME` | No | `""` | Basic-auth username (internal user DB or master user). |
 | `OPENSEARCH_PASSWORD` | No | `""` | Basic-auth password. |
+| `OPENSEARCH_REGION` | No | `""` | AWS region. Set it and leave `OPENSEARCH_USERNAME` empty to sign requests with AWS SigV4 from the ambient credential chain (for example a pod IAM role) instead of basic auth. |
 
 In Kubernetes, source these from a Secret; in compose, from the environment.
 
@@ -48,7 +50,7 @@ security disabled:
 
 ```sh
 make dev-up
-# Starts: Postgres :5436, RustFS :9210, OpenSearch :9200
+# Starts: Postgres :5436, RustFS :9210, Dex :5556, OpenSearch :9200
 ```
 
 The server auto-connects when you set the endpoint:
@@ -67,6 +69,16 @@ curl -s http://localhost:9200/_cluster/health | jq .status
 
 On server start (`arti-server serve`), `EnsureIndex()` creates the `artifacts`
 index with the correct mapping if it doesn't exist.
+
+### Shards and replicas
+
+`EnsureIndex()` creates the index with one shard and **zero replicas**, and on
+every boot it sets `number_of_replicas` back to `0` on an existing index. On a
+single-node cluster a replica can never be allocated and leaves the cluster
+`yellow` for good. If that settings update fails, the server logs
+`opensearch: replica sync failed` and keeps OpenSearch on. Zero replicas means
+the index has no redundant copy; after data loss, rebuild it with `reindex`
+([below](#re-indexing)).
 
 ---
 
@@ -149,6 +161,11 @@ curl -s "$OPENSEARCH_ENDPOINT/artifacts/_mapping" -u "$OPENSEARCH_USERNAME:$OPEN
 
 ### Re-indexing
 
+Sync-on-write keeps the index current, so a deploy does not need a reindex.
+Do not run a full reindex as a hook on every deploy: it pages through every
+row (O(catalog)) and can hold the rollout for many minutes. Run it by hand
+when one of the cases below applies.
+
 The `reindex` command is idempotent — safe to re-run at any time. It overwrites
 existing documents by ID. Use it after:
 - Schema changes to the index mapping (delete the index first to pick up new
@@ -205,7 +222,7 @@ index never leak data.
 | Environment | Instance | Storage | Monthly |
 |-------------|----------|---------|---------|
 | Staging | 1x t3.small.search | 20 GiB gp3 | ~$28 |
-| Production | 2x t3.medium.search (multi-AZ) | 50 GiB gp3 | ~$115 |
+| Production | 1x t3.medium.search | 50 GiB gp3 | ~$60 |
 
 No data transfer charges for same-VPC access. Costs scale with document count
 and query volume; current artifact counts (~low thousands) are well within these

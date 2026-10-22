@@ -147,7 +147,14 @@ type Store struct {
 	bus   *invalidationBus
 
 	busHealthy atomic.Bool
+
+	// orgDomains returns the login allowlist; see ReadTokens.
+	orgDomains func() []string
 }
+
+// SetOrgDomains wires the login allowlist that READ_ORG_SHARED expands into
+// `*@<domain>` read tokens. Full-address entries are ignored.
+func (s *Store) SetOrgDomains(fn func() []string) { s.orgDomains = fn }
 
 func New(pool *pgxpool.Pool, b blob.Store, cfg Config) *Store {
 	cfg.defaults()
@@ -198,6 +205,14 @@ type PutInput struct {
 	// value a caller read earlier.
 	MapID pgtype.UUID
 
+	// Owner, when set, becomes the owner of a slug this write creates instead of
+	// Creator: a service principal writing for a person keeps the document it
+	// maintains. Ignored when the slug already has an owner.
+	Owner string
+	// AssertedBy names the service principal that wrote this version on
+	// Creator's behalf; empty for a direct write.
+	AssertedBy string
+
 	// KeepAttachmentSlug exempts this write from the slugless/creator-only
 	// ATTACHMENT clamp below, for the one case that isn't a chat file: a
 	// person publishing a binary under a slug they named, which is a
@@ -239,8 +254,17 @@ func applyAttachmentInvariants(in PutInput) PutInput {
 		return in
 	}
 	in.NamedSlug = nil
-	in.AllowedAccess = []string{} // empty (not nil) == creator-only
-	in.AllowedWrite = []string{}  // creator-only writes too
+	// Creator-only unless the caller itself named readers: an upload stays
+	// private by default, and a caller that shares it (a person publishing to
+	// their grantees, a service principal that must read back what it stored)
+	// says so. A list inherited from a slug the request named is not the
+	// caller's choice and never widens an attachment.
+	if in.AllowedAccess == nil || in.InheritAccess {
+		in.AllowedAccess = []string{} // empty (not nil) == creator-only
+	}
+	if in.AllowedWrite == nil || in.InheritWrite {
+		in.AllowedWrite = []string{} // creator-only writes too
+	}
 	return in
 }
 
@@ -375,12 +399,14 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 			WrittenVia:      strPtrOrNil(in.WrittenVia),
 			WrittenViaName:  strPtrOrNil(in.WrittenViaName),
 			MapID:           in.MapID,
+			AssertedBy:      strPtrOrNil(in.AssertedBy),
 		}
 	}
 
 	// Slugless artifacts are single-version: no siblings, no document to
 	// inherit a comment switch or ACL from, and nothing to serialize against.
 	if in.NamedSlug == nil {
+		in = withAsserterReader(in)
 		row, err := s.q.InsertArtifact(ctx, insertParams(nil, finalAccess(in.AllowedAccess, in.AllowedWrite), in.AllowedWrite, true))
 		if err != nil {
 			return sqlc.Artifact{}, fmt.Errorf("pgstore: insert: %w", err)
@@ -423,7 +449,12 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 	// Claimed by the FIRST version and immovable thereafter, so this writes a
 	// row only for a slug that has none — a brand-new one, or one that
 	// predates migration 0029.
-	if _, err := claimSlugOwner(ctx, tx, *in.NamedSlug, in.Creator); err != nil {
+	owner := in.Creator
+	if in.Owner != "" {
+		owner = in.Owner
+	}
+	slugOwner, err := claimSlugOwner(ctx, tx, *in.NamedSlug, owner)
+	if err != nil {
 		return sqlc.Artifact{}, err
 	}
 
@@ -489,6 +520,17 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 		if in.InheritWrite {
 			in.AllowedWrite = livePrev.AllowedWrite
 		}
+	} else if in.AllowedWrite == nil && in.NamedSlug != nil && *in.NamedSlug != "" && IsSkill(in.Labels) {
+		// A skill is a prompt other agents load: a new one is written by its owner
+		// alone unless the publisher named writers. Decided here, under the slug
+		// lock, so every path that opens a slug (create, append) gets it.
+		in.AllowedWrite = []string{}
+	}
+	// The principal joins the readers only of a slug this write opens or one it
+	// owns: an owner may change the ACL anyway, and on anyone else's document the
+	// addition would be an ACL change no authority check has seen.
+	if livePrev == nil || strings.EqualFold(slugOwner, in.AssertedBy) {
+		in = withAsserterReader(in)
 	}
 	access := finalAccess(in.AllowedAccess, in.AllowedWrite)
 
@@ -625,6 +667,8 @@ type AppendInput struct {
 	Separator      []byte // inserted between existing body and new content; default "\n\n" if nil
 	Content        []byte // bytes to append
 	Creator        string
+	Owner          string // see PutInput.Owner
+	AssertedBy     string // see PutInput.AssertedBy
 	WrittenVia     string // see PutInput.WrittenVia
 	WrittenViaName string // see PutInput.WrittenViaName
 	ContentType    string // optional override; defaults to prior version's content_type
@@ -697,6 +741,8 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 				ContentType:    in.ContentType,
 				Content:        in.Content,
 				Creator:        in.Creator,
+				Owner:          in.Owner,
+				AssertedBy:     in.AssertedBy,
 				WrittenVia:     in.WrittenVia,
 				WrittenViaName: in.WrittenViaName,
 				Scopes:         in.Scopes,
@@ -799,6 +845,8 @@ func (s *Store) Append(ctx context.Context, in AppendInput) (sqlc.Artifact, erro
 			ContentType:    contentType,
 			Content:        combined,
 			Creator:        in.Creator,
+			Owner:          in.Owner,
+			AssertedBy:     in.AssertedBy,
 			WrittenVia:     in.WrittenVia,
 			WrittenViaName: in.WrittenViaName,
 			Scopes:         scopes,
@@ -955,7 +1003,7 @@ func (s *Store) GetLatestBySlugForCaller(ctx context.Context, slug, caller strin
 	// Resolve the caller's group tokens so a version granted via a group is
 	// readable here too — keeping this single-row path consistent with both
 	// List (buildWhere) and CanAccess.
-	groups, err := s.CallerGroups(ctx, caller)
+	groups, err := s.ReadTokens(ctx, caller)
 	if err != nil {
 		return sqlc.Artifact{}, err
 	}
@@ -1005,10 +1053,11 @@ func (s *Store) GetBySlug(ctx context.Context, slug string, version *int32) (sql
 // total count and how many were created by someone other than `caller`
 // (case-insensitive). Used to gate slug-wide archive: a non-admin may archive
 // a slug only when they created every live version (foreign == 0), since
-// ArchiveBySlug soft-deletes them all.
+// ArchiveBySlug soft-deletes them all. A version a service principal wrote on
+// the caller's behalf counts as foreign: being credited is not authorship.
 func (s *Store) SlugLiveVersionStats(ctx context.Context, slug, caller string) (total, foreign int, err error) {
 	err = s.pool.QueryRow(ctx,
-		`SELECT count(*), count(*) FILTER (WHERE lower(creator) <> lower($2))
+		`SELECT count(*), count(*) FILTER (WHERE lower(creator) <> lower($2) OR asserted_by IS NOT NULL)
 		   FROM artifacts WHERE named_slug = $1 AND deleted_at IS NULL`,
 		slug, caller).Scan(&total, &foreign)
 	return total, foreign, err
@@ -1038,6 +1087,8 @@ type ListInput struct {
 	ArtifactType *string
 	ContentType  *string // optional content-type filter; supports `text/markdown*` glob
 	Creator      *string
+	// Owner filters on the document owner (ownerSQL), not the version's creator.
+	Owner *string
 	// WrittenVia filters on the credential that made the write
 	// (artifacts.written_via). Glob-aware like the other scalar filters, so
 	// `apikey:*` narrows to every key-written document.
@@ -1073,7 +1124,7 @@ type ListInput struct {
 	// CallerGroups are the caller's current group tokens ("group:<name>").
 	// Folded into the access filter so artifacts granted to a group the
 	// caller belongs to show up in the catalog. Only consulted when
-	// CallerEmail is set. Populated by the handler via Store.CallerGroups.
+	// CallerEmail is set. Populated by the handler via Store.ReadTokens.
 	CallerGroups []string
 
 	// HideAppCouch drops rows scoped `app:couch` from the result. Set by the
@@ -1269,6 +1320,9 @@ func buildWhere(in ListInput) (where []string, args []any) {
 	}
 	if in.Creator != nil && *in.Creator != "" {
 		addFilter("creator", *in.Creator)
+	}
+	if in.Owner != nil && *in.Owner != "" {
+		addFilter("lower"+ownerSQL, strings.ToLower(*in.Owner))
 	}
 	if in.BookmarkedBy != nil {
 		args = append(args, *in.BookmarkedBy)
@@ -1522,14 +1576,17 @@ func (s *Store) UpdateScopes(ctx context.Context, id uuid.UUID, scopes []string)
 // when write is non-nil it is unioned into access so read paths stay a
 // superset. Permission enforced at the HTTP layer; per-version, not per-slug.
 func (s *Store) UpdateAccess(ctx context.Context, id uuid.UUID, access []string, write []string) (int64, error) {
-	// Slugless attachments stay creator-only — an access update must never
-	// widen them. Enforced here (the single update chokepoint) so every caller
-	// is covered, mirroring applyAttachmentInvariants on create. A SLUGGED
-	// attachment is a document a person published, so its access is editable
-	// like any other document's; the same exemption applies in both places or
-	// such a document could never be shared at all.
+	// A slugless attachment's access follows the rule applyAttachmentInvariants
+	// applies on create: an omitted list stays creator-only rather than widening
+	// to everyone, and an explicit one is honored. Callers reach this only after
+	// the owner/admin ACL-change check.
 	if row, err := s.GetByID(ctx, id); err == nil && row.ArtifactType == TypeAttachment && row.NamedSlug == nil {
-		access, write = []string{}, []string{}
+		if access == nil {
+			access = []string{}
+		}
+		if write == nil {
+			write = []string{}
+		}
 	}
 	if access == nil {
 		access = []string{"*"}
@@ -1686,7 +1743,8 @@ func CanWrite(row sqlc.Artifact, caller string, callerGroups []string, owner str
 		return true
 	}
 	if row.AllowedWrite == nil {
-		return matchPatterns(row.AllowedAccess, caller, callerGroups)
+		// A skill is a prompt other agents load: with no write list it is the owner's alone.
+		return !IsSkill(row.Labels) && matchPatterns(row.AllowedAccess, caller, callerGroups)
 	}
 	return matchPatterns(row.AllowedWrite, caller, callerGroups)
 }
@@ -2011,7 +2069,7 @@ func (s *Store) Aggregates(ctx context.Context, in AggregatesInput) (AggregatesR
 	accessClause := ""
 	args := []any{limit}
 	if in.CallerEmail != "" {
-		groups, err := s.CallerGroups(ctx, in.CallerEmail)
+		groups, err := s.ReadTokens(ctx, in.CallerEmail)
 		if err != nil {
 			return AggregatesResult{}, err
 		}
@@ -2183,8 +2241,14 @@ var browseFacetColumns = map[string]string{
 	"content_type": "content_type",
 	"label":        "unnest(labels)",
 	"scope":        "unnest(scopes)",
-	"owner":        "creator",
+	"owner":        ownerSQL,
+	"creator":      "creator",
 }
+
+// ownerSQL is a row's document owner, by DocOwner's rule: a slug's owner row
+// (else its creator); a slugless row's asserting principal (else its creator).
+const ownerSQL = `(CASE WHEN NULLIF(artifacts.named_slug, '') IS NULL THEN COALESCE(artifacts.asserted_by, artifacts.creator)
+	ELSE COALESCE((SELECT o.owner_email FROM artifact_owners o WHERE o.named_slug = artifacts.named_slug), artifacts.creator) END)`
 
 // BrowseValueCount is one row of a BrowseAggregates result: a distinct facet
 // value and how many (latest, readable) artifacts carry it.
@@ -2210,6 +2274,8 @@ type BrowseAggregatesInput struct {
 	Limit       int32
 	Offset      int32
 	CallerEmail string
+	// AllVersions counts every live version instead of each slug's latest.
+	AllVersions bool
 }
 
 // BrowseAggregates returns every distinct value (and its count) for one
@@ -2232,7 +2298,7 @@ func (s *Store) BrowseAggregates(ctx context.Context, in BrowseAggregatesInput) 
 	accessClause := ""
 	args := []any{}
 	if in.CallerEmail != "" {
-		groups, err := s.CallerGroups(ctx, in.CallerEmail)
+		groups, err := s.ReadTokens(ctx, in.CallerEmail)
 		if err != nil {
 			return BrowseAggregatesResult{}, err
 		}
@@ -2265,6 +2331,9 @@ func (s *Store) BrowseAggregates(ctx context.Context, in BrowseAggregatesInput) 
 				WHERE b.named_slug = artifacts.named_slug AND b.deleted_at IS NULL
 			)
 		)`
+	if in.AllVersions {
+		latestClause = ""
+	}
 
 	// label/scope unnest an array and so can produce '' for an empty
 	// element; type/content_type are NOT NULL scalars and never empty.
@@ -2350,4 +2419,44 @@ func (s *Store) BrowseAggregates(ctx context.Context, in BrowseAggregatesInput) 
 		return BrowseAggregatesResult{}, fmt.Errorf("pgstore: browse aggregates %s iter: %w", in.Facet, err)
 	}
 	return out, nil
+}
+
+// SkillLabels mark an artifact as a skill. couch labels its catalog `skill`;
+// `kind:skill` is the older spelling.
+var SkillLabels = []string{"skill", "kind:skill"}
+
+// IsSkill reports whether any label set marks a skill.
+func IsSkill(labelSets ...[]string) bool {
+	for _, ls := range labelSets {
+		for _, l := range ls {
+			for _, s := range SkillLabels {
+				if l == s {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// withAsserterReader adds the asserting service principal to a version's
+// readers. Its creator is the person it was written for, and creator is the
+// only reader the store admits without a matching token, so without this the
+// principal could not read back what it maintains. A nil list (everyone) needs
+// nothing.
+func withAsserterReader(in PutInput) PutInput {
+	if in.AssertedBy != "" && in.AllowedAccess != nil {
+		in.AllowedAccess = unionTokens(in.AllowedAccess, []string{in.AssertedBy})
+	}
+	return in
+}
+
+// LatestBySlugAnyState returns the slug's newest version whether or not it is
+// archived. ErrNotFound when the slug has never had a version.
+func (s *Store) LatestBySlugAnyState(ctx context.Context, slug string) (sqlc.Artifact, error) {
+	row, err := s.q.GetLatestArtifactBySlugAnyState(ctx, &slug)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.Artifact{}, ErrNotFound
+	}
+	return row, err
 }

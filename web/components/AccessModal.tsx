@@ -324,7 +324,7 @@ export default function AccessModal({
 
   const body = (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
       onMouseDown={() => {
         // A click outside discards staged edits, so only honour it while there
         // is nothing to lose. Otherwise the user goes through Cancel/Confirm.

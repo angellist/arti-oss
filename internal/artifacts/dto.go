@@ -33,11 +33,14 @@ type ArtifactInfo struct {
 	// is the owner's name for it where one exists. Both are nil on documents
 	// written before attribution shipped, so the viewer must render their
 	// absence as "unknown", never as "a person in a browser".
-	WrittenVia     *string  `json:"written_via"`
-	WrittenViaName *string  `json:"written_via_name"`
-	Scopes         []string `json:"scopes"`
-	Labels         []string `json:"labels"`
-	AllowedAccess  []string `json:"allowed_access"`
+	WrittenVia     *string `json:"written_via"`
+	WrittenViaName *string `json:"written_via_name"`
+	// AssertedBy is the service principal that wrote this version for Creator;
+	// such a version gives its creator no edit or archive authority.
+	AssertedBy    *string  `json:"asserted_by,omitempty"`
+	Scopes        []string `json:"scopes"`
+	Labels        []string `json:"labels"`
+	AllowedAccess []string `json:"allowed_access"`
 	// AllowedWrite is the write-access list. nil → write follows read (the
 	// back-compat default, serialized as JSON null); non-nil (incl. empty) is
 	// authoritative, empty ([]) == creator-only. The nil-vs-empty distinction
@@ -68,10 +71,14 @@ type ArtifactInfo struct {
 	CanManageComments *bool `json:"can_manage_comments,omitempty"`
 	// CanEditMetadata reports whether the requesting caller may edit title,
 	// description, labels or scopes — the exact predicate UpdateMetadata
-	// enforces (admin, this version's creator, or the document's owner, minus
-	// the kind:skill write-guard). Pointer + omitempty like CanWrite: set only
+	// enforces (admin, this version's creator, or the document's owner).
+	// Pointer + omitempty like CanWrite: set only
 	// on the single-artifact viewer paths.
 	CanEditMetadata *bool `json:"can_edit_metadata,omitempty"`
+	// CanArchive reports whether the requesting caller may archive or unarchive
+	// this version — CanArchiveID's verdict. Set only on the single-artifact
+	// viewer paths.
+	CanArchive *bool `json:"can_archive,omitempty"`
 	// CanShare reports whether the requesting caller may mint an external
 	// share link: the same authority as CanManageComments (the slug's OWNER or
 	// an admin), computed server-side so the viewer never re-derives it. The
@@ -157,10 +164,11 @@ func ToInfo(row sqlc.Artifact, baseURL string) ArtifactInfo {
 		Creator:         row.Creator,
 		WrittenVia:      row.WrittenVia,
 		WrittenViaName:  row.WrittenViaName,
+		AssertedBy:      row.AssertedBy,
 		Scopes:          scopes,
 		Labels:          labels,
 		AllowedAccess:   access,
-		AllowedWrite:    row.AllowedWrite, // nil stays nil (mirror) — do NOT normalize
+		AllowedWrite:    effectiveWrite(row),
 		CommentsEnabled: row.CommentsEnabled,
 		Metadata:        meta,
 		CreatedAt:       row.CreatedAt.Time,
@@ -279,4 +287,14 @@ type PackageEntry struct {
 type Error struct {
 	Detail string `json:"detail"`
 	Code   string `json:"code"`
+}
+
+// effectiveWrite keeps a nil write list nil (writers follow readers), except on a
+// skill, where nil means owner-only and is reported as [] so no client shows or
+// saves its readers as writers.
+func effectiveWrite(row sqlc.Artifact) []string {
+	if row.AllowedWrite == nil && pgstore.IsSkill(row.Labels) {
+		return []string{}
+	}
+	return row.AllowedWrite
 }

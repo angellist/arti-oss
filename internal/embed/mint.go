@@ -86,6 +86,10 @@ type UserTokenMinter interface {
 	// MintEmbedViewerToken mints the short-TTL, embed-viewer-marked document
 	// token the gate page reloads itself with.
 	MintEmbedViewerToken(ctx context.Context, artifactID, email string) (string, error)
+	// MintEmbedHostToken mints email's app token for the latest APP version of
+	// slug that email can read, returning the UUID and version it is scoped to.
+	// Read denials are errors.
+	MintEmbedHostToken(ctx context.Context, slug, email string) (token, appID string, version int32, err error)
 }
 
 // MintConfig wires the handshake endpoint's dependencies.

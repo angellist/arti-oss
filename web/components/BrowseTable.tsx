@@ -14,6 +14,7 @@ const FACETS: { value: BrowseFacet; label: string }[] = [
   { value: "scope", label: "Scope" },
   { value: "content_type", label: "Content Type" },
   { value: "owner", label: "Owner" },
+  { value: "creator", label: "Creator" },
 ];
 
 type SortKey = "count" | "name";
@@ -26,6 +27,7 @@ export default function BrowseTable({
   page,
   sort,
   dir,
+  versions,
 }: {
   facet: BrowseFacet;
   values: BrowseValueCount[];
@@ -33,6 +35,7 @@ export default function BrowseTable({
   page: number; // 1-indexed
   sort: SortKey;
   dir: SortDir;
+  versions: "latest" | "all";
 }) {
   const router = useRouter();
   const sp = useSearchParams();
@@ -81,6 +84,14 @@ export default function BrowseTable({
     });
   }
 
+  function versionsHref(v: "latest" | "all"): string {
+    return withParams((next) => {
+      if (v === "all") next.set("versions", "all");
+      else next.delete("versions");
+      next.delete("page");
+    });
+  }
+
   function pageHref(p: number): string {
     return withParams((next) => {
       if (p <= 1) next.delete("page");
@@ -119,16 +130,36 @@ export default function BrowseTable({
         })}
       </div>
 
-      {facet === "owner" ? (
+      {facet === "owner" || facet === "creator" ? (
         <div className="border-b border-amber-100 bg-amber-50 px-6 py-2 text-[12px] text-amber-800">
-          <span className="font-medium">Note:</span> counts reflect every
-          artifact the owner has created, including private ones. Clicking
-          through shows only the artifacts you have access to — private
-          artifacts and internal system items (e.g.{" "}
+          <span className="font-medium">Note:</span>{" "}
+          {facet === "owner"
+            ? "counts the documents each person or service owns, "
+            : "counts the documents each person or service wrote, "}
+          including private ones. Clicking through shows only the artifacts you
+          have access to — private artifacts and internal system items (e.g.{" "}
           <code className="rounded bg-amber-100 px-0.5">scope:app:couch</code>)
           are hidden from the catalog view.
         </div>
       ) : null}
+
+      <div className="flex items-center gap-2 border-b border-neutral-200 bg-white px-6 py-2 text-[12px] text-neutral-500">
+        <span>count:</span>
+        {(["latest", "all"] as const).map((v) => (
+          <Link
+            key={v}
+            href={versionsHref(v)}
+            className={
+              "rounded-full px-2 py-0.5 transition " +
+              (versions === v
+                ? "bg-neutral-800 text-white"
+                : "border border-neutral-200 text-neutral-600 hover:bg-neutral-50")
+            }
+          >
+            {v === "latest" ? "latest version of each document" : "every version"}
+          </Link>
+        ))}
+      </div>
 
       <div className="border-b border-neutral-200 bg-white px-6 py-2">
         <input

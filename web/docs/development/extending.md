@@ -16,20 +16,21 @@ The REST API is hand-written — there is no spec-to-handler codegen
 ([Code generation](codegen.md)). Four steps:
 
 1. **Service method.** Add the logic to the `Service` in
-   `internal/artifacts/service.go` (or the relevant package). REST and MCP both
+   `internal/artifacts/` (the type is declared in `server.go`; methods are spread
+   across the package's files), or to the relevant package. REST and MCP both
    call the same `Service`, so put business logic here, not in the handler.
 2. **Handler + route.** Add an `httpXxx` handler method in
    `internal/artifacts/server.go` and register it in `Mount`
-   (`internal/artifacts/server.go:764`), e.g.
+   (`func Mount` in `internal/artifacts/server.go`), e.g.
    `r.Get("/api/artifacts/{id}/whatever", svc.httpWhatever)`. Match the existing
    handlers' shape: parse params, call the service, encode JSON, map errors to
    status codes.
 3. **Mount point + auth.** `Mount` is already called inside the authed group in
-   `cmd/arti-server/cmd_serve.go:496`, so a route added there inherits
+   `cmd/arti-server/cmd_serve.go`, so a route added there inherits
    `RequireAuth` + upload-scope enforcement. If your route needs a *different*
    auth model (public, embed-token, app-token), mount it in the matching group
    in `cmd_serve.go` instead — see how the comments embed and apps proxy are
-   mounted (`cmd_serve.go:299`, `:472`).
+   mounted (`commentsSvc.MountEmbed(root)`, `appsSvc.MountProxy(root)`).
 4. **Spec.** Hand-edit `cmd/arti-server/openapi.yaml` to add the path, params,
    and response schema. It's embedded and served at `/openapi.yaml`; keep it in
    sync with the handler. Document it in the
@@ -43,15 +44,18 @@ The MCP server (`internal/mcp/server.go`) is a hand-rolled JSON-RPC 2.0 server
 that wraps the same `artifacts.Service`. Adding a tool is two edits in that file
 plus an implementation:
 
-1. **Declare it** in the `tools/list` response — append a tool descriptor (name,
-   `Description`, `InputSchema`) to the slice built under the `case "tools/list":`
-   block (`internal/mcp/server.go:81`). Copy the shape of `add_artifact` /
-   `get_artifact` (`server.go:122` onward); the description is the model-facing
-   doc, so write it carefully.
-2. **Dispatch it** in the `tools/call` switch (`server.go:289`) — add a
-   `case "your_tool": return s.toolYour(ctx, p.Arguments)`.
-3. **Implement** `toolYour` as a method that unmarshals the arguments, calls the
-   `Service`, and returns `toolReply(payload)`. Follow `toolGet` / `toolList`.
+1. **Declare it** in `toolSpecs()`, which builds the `tools/list` response —
+   append a `toolSpec` (`Name`, `Description`, `InputSchema`). Copy the shape of
+   `add_artifact` / `get_artifact`; the description is the model-facing doc, so
+   write it carefully.
+2. **Dispatch it** in the `switch name` in `dispatch()` — add a
+   `case "your_tool": return s.toolYour(ctx, args)`. `dispatch` serves both
+   `tools/call` and in-process calls (`CallToolInProcess`, used by APP
+   artifacts' `arti` server).
+3. **Implement** `toolYour(ctx context.Context, raw json.RawMessage) (any, error)`
+   as a method that unmarshals the arguments, calls the `Service`, and returns
+   `toolReply(payload)`. Follow `toolGet` / `toolList`. The MAP tools live in
+   `internal/mcp/map_tools.go`.
 
 Keep parity with REST: a tool should call the same `Service` method the
 equivalent REST handler does. See the [MCP tools reference](../reference/mcp-tools.md).
@@ -99,12 +103,14 @@ Migrations live in `db/migrations/` and run with goose ([Code generation](codege
 [Data model](../architecture/data-model.md)).
 
 1. **Create the file** with the next sequence number and a short slug:
-   `db/migrations/0014_my_change.sql`. Numbering is strictly sequential —
-   `0001_baseline.sql` … `0013_device_token_unique_active.sql` today.
+   `db/migrations/0043_my_change.sql`. Take the number after the highest one —
+   `0001_baseline.sql` … `0042_read_org_shared.sql` today (`0022` is unused; do
+   not fill it). If a rebase brings in a migration with your number, renumber
+   yours.
 2. **Write both directions** using goose pragmas:
 
    ```sql
-   -- 0014_my_change.sql
+   -- 0043_my_change.sql
    -- Why this change exists (one or two lines).
 
    -- +goose Up
@@ -165,5 +171,7 @@ browser. Prefer committed SVGs for help docs: they are server-rendered and
 work without JavaScript.
 
 `make docs-check` (part of `make lint`) fails if any `.mmd` lacks a committed
-`.svg`, so diagrams can't silently rot — see
+`.svg` or the `.svg` is older than its source (`make docs-diagrams` records each
+source's hash in `web/public/help-diagrams/.sources`; commit that file too), so
+diagrams can't silently rot — see
 [Build & test](build-test.md#help-diagrams-docs-diagrams-docs-check).

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	sqlc "github.com/angellist/arti-oss/gen/sqlc"
 	"github.com/angellist/arti-oss/internal/artifacts"
 	"github.com/angellist/arti-oss/internal/store/blob"
 	"github.com/angellist/arti-oss/internal/store/pgstore"
@@ -177,5 +178,50 @@ func TestUpdateMetadataEditsDescription(t *testing.T) {
 	newTitle := "Title Only"
 	if _, err := svc.UpdateMetadata(ctx, id, artifacts.UpdateMetadataRequest{Title: &newTitle}, "alice@example.com"); err != nil {
 		t.Fatalf("title-only after clear: %v", err)
+	}
+}
+
+// A legacy skill (no write list) is owner-only; a reader who pushed its latest
+// version must not lift that by stripping the skill label.
+func TestUpdateMetadataSkillLabelStripNeedsWriteAccess(t *testing.T) {
+	ctx := context.Background()
+	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
+	svc := artifacts.NewService(st, "http://localhost", nil, nil)
+
+	slug := uniqueSlug("legacy-skill")
+	put := func(creator string, labels []string, inherit bool) sqlc.Artifact {
+		in := pgstore.PutInput{ArtifactType: pgstore.TypeText, NamedSlug: &slug, Title: "s", ContentType: "text/markdown",
+			Content: []byte("body"), Creator: creator, Labels: labels, AllowedAccess: []string{"*"}}
+		if inherit {
+			in.InheritAccess, in.InheritWrite = true, true
+		}
+		row, err := st.Put(ctx, in)
+		if err != nil {
+			t.Fatalf("put as %s: %v", creator, err)
+		}
+		return row
+	}
+	put("alice@example.com", []string{"notes"}, false)
+	v2 := pgstore.UUIDFromPG(put("bob@example.com", []string{"skill"}, true).ArtifactID)
+
+	got, err := svc.Get(ctx, v2, "bob@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AllowedWrite == nil || len(got.AllowedWrite) != 0 {
+		t.Errorf("allowed_write = %v, want [] (a skill with no write list is owner-only)", got.AllowedWrite)
+	}
+
+	title := "hijacked"
+	_, err = svc.UpdateMetadata(ctx, v2, artifacts.UpdateMetadataRequest{Title: &title, Labels: &[]string{"notes"}}, "bob@example.com")
+	if !artifacts.IsForbidden(err) {
+		t.Fatalf("bob stripping the skill label: err = %v, want forbidden", err)
+	}
+	if after, _ := svc.Get(ctx, v2, "bob@example.com"); after.Title == title || len(after.Labels) != 1 || after.Labels[0] != "skill" {
+		t.Errorf("refused edit changed the row: title=%q labels=%v", after.Title, after.Labels)
+	}
+
+	if _, err := svc.UpdateMetadata(ctx, v2, artifacts.UpdateMetadataRequest{Labels: &[]string{"notes"}}, "alice@example.com"); err != nil {
+		t.Errorf("the owner may remove the skill label: %v", err)
 	}
 }

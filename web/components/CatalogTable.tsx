@@ -154,7 +154,7 @@ export default function CatalogTable({
 
   // Archive/unarchive is creator-or-admin, mirroring the API's enforcement.
   const canActOn = (row: ArtifactInfo) =>
-    !!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(row.creator, me.email));
+    !!me && (hasPerm(me, "MANAGE_ARTIFACTS") || (!row.asserted_by && sameEmail(row.creator, me.email)));
 
   const doArchive = async (row: ArtifactInfo) => {
     if (!canActOn(row)) return;

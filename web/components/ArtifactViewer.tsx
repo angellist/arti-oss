@@ -13,9 +13,9 @@ import { isEditableArtifact } from "@/lib/edit";
 import { isComparableArtifact } from "@/lib/diff";
 import MarkdownBody from "./MarkdownBody";
 import { LabelEditor, ScopeEditor } from "./ChipEditors";
-import { archiveArtifact, encodeFilePath, fetchPackageFile, hasPerm, latestVersionForSlug, listShares, sameEmail, snapshotMap, unarchiveArtifact, updateArtifactCommentsEnabled, updateArtifactTitle } from "@/lib/arti";
+import { archiveArtifact, encodeFilePath, fetchPackageFile, hasPerm, latestVersionForSlug, sameEmail, snapshotMap, unarchiveArtifact, updateArtifactCommentsEnabled, updateArtifactTitle } from "@/lib/arti";
 import ViewerToolbar, { RawToggle, TEXT_SCALE, WIDTH_CLASS, useViewerPrefs, type Width } from "./ViewerToolbar";
-import AccessModal from "./AccessModal";
+import AccessButton from "./AccessButton";
 import CommentsLayer from "./CommentsLayer";
 import CommentsMenuItem from "./CommentsMenuItem";
 import { MENU_ROW, MENU_SVG, MenuIcon } from "./MenuRow";
@@ -29,6 +29,7 @@ import DiagramArtifactEditor from "./DiagramArtifactEditor";
 import { isDiagramContentType } from "@/lib/diagram";
 import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
 import { useAppConsentMessage } from "@/lib/useAppConsentMessage";
+import { useDictationBridge } from "@/lib/useDictationBridge";
 import ViewTracker from "./ViewTracker";
 import BookmarkButton from "./BookmarkButton";
 import { useUpload } from "@/lib/upload-context";
@@ -106,6 +107,12 @@ function isPlainCode(ct: string) {
 }
 function isImage(ct: string) {
   return ct.startsWith("image/");
+}
+function isVideo(ct: string) {
+  return ct.startsWith("video/");
+}
+function isAudio(ct: string) {
+  return ct.startsWith("audio/");
 }
 function isPDF(ct: string) {
   return ct.split(";")[0].trim().toLowerCase() === "application/pdf";
@@ -326,140 +333,6 @@ function SlugChip({ slug, version }: { slug: string; version: number | null }) {
         </a>
       ) : null}
     </span>
-  );
-}
-
-// AccessSummary returns a (color, label, tooltip) tuple describing the
-// effective read-access for the artifact. Tier classification:
-//   - public      array contains '*'  (anyone authenticated)
-//   - domain      every pattern is a `*@something` glob — show the domain(s)
-//   - restricted  specific emails (and/or empty array == creator-only)
-function accessTier(patterns: string[]): {
-  tier: "public" | "domain" | "restricted";
-  label: string;
-  tooltip: string;
-} {
-  if (patterns.length === 0) {
-    return { tier: "restricted", label: "private", tooltip: "creator and admins only" };
-  }
-  if (patterns.includes("*")) {
-    return { tier: "public", label: "public", tooltip: "any authenticated user" };
-  }
-  const allDomain = patterns.every((p) => /^\*@[^*?]+$/.test(p));
-  if (allDomain) {
-    const domains = patterns.map((p) => p.slice(2)).join(", ");
-    return { tier: "domain", label: domains, tooltip: `restricted to: ${domains}` };
-  }
-  return {
-    tier: "restricted",
-    label: patterns.length === 1 ? patterns[0] : `${patterns.length} entries`,
-    tooltip: `restricted to: ${patterns.join(", ")}`,
-  };
-}
-
-// AccessButton renders the "Edit Access" trigger in the controls row.
-// Clicking it opens the centered AccessModal. Readers see the same button
-// labeled "Access" with a view-only modal.
-function AccessButton({
-  artifactID,
-  access,
-  write,
-  hasOtherVersions,
-  canShare,
-  slug,
-  owner,
-  isOwner,
-  actorIsOwner,
-  onSaved,
-}: {
-  artifactID: string;
-  access: string[];
-  write?: string[] | null;
-  hasOtherVersions: boolean;
-  // Changing access and transferring both need owner authority on the server,
-  // so one flag gates the editor, the button's label and the Transfer control
-  // alike. A version's creator who does not own the document would otherwise
-  // get an editable dialog whose Confirm returns 403.
-  slug?: string | null;
-  owner?: string;
-  isOwner: boolean;
-  actorIsOwner: boolean;
-  // The server's `can_share`. Gates the live-link count, which is owner-only
-  // information and is not worth a request otherwise.
-  canShare: boolean;
-  onSaved: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  // Live external links on this document, counted only when the modal opens:
-  // it is owner-only information and nobody pays for it on page load.
-  const [liveShares, setLiveShares] = useState(0);
-
-  // Reset on a document switch. Without this the count survives: the effect
-  // below returns early when the new document is not shareable, so a previous
-  // document's non-zero count would keep rendering AccessModal's amber "N live
-  // external links" warning against a document that has none.
-  const [countedFor, setCountedFor] = useState(artifactID);
-  if (artifactID !== countedFor) {
-    setCountedFor(artifactID);
-    setLiveShares(0);
-  }
-
-  useEffect(() => {
-    if (!open || !canShare) return;
-    let cancelled = false;
-    void listShares(artifactID)
-      .then((rows) => {
-        if (cancelled) return;
-        const now = Date.now();
-        setLiveShares(
-          rows.filter((l) => !l.revoked_at && new Date(l.expires_at).getTime() > now).length,
-        );
-      })
-      // A failed count must not break the access editor; the notice is an
-      // extra warning, not a precondition for editing.
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [open, canShare, artifactID]);
-
-  const tier = accessTier(access);
-  const dot =
-    tier.tier === "public"
-      ? "bg-emerald-400"
-      : tier.tier === "domain"
-      ? "bg-amber-400"
-      : "bg-rose-500";
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-haspopup="dialog"
-        title={tier.tooltip}
-        className="inline-flex items-center gap-1.5 rounded-md border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 transition hover:bg-neutral-50"
-      >
-        <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden="true" />
-        {isOwner ? "Edit Access" : "Access"}
-      </button>
-      {open ? (
-        <AccessModal
-          artifactID={artifactID}
-          access={access}
-          write={write}
-          hasOtherVersions={hasOtherVersions}
-          canEdit={isOwner}
-          slug={slug}
-          owner={owner}
-          isOwner={isOwner}
-          actorIsOwner={actorIsOwner}
-          liveShareLinks={liveShares}
-          onClose={() => setOpen(false)}
-          onSaved={onSaved}
-        />
-      ) : null}
-    </>
   );
 }
 
@@ -793,6 +666,7 @@ function RenderedBody({ body, ct, src, allowPopups, docKey, zoom = 1 }: { body: 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   useExternalLinkMessage(iframeRef);
   useAppConsentMessage(iframeRef);
+  useDictationBridge(iframeRef);
   if (isMarkdown(ct)) return <MarkdownBody body={body} docKey={docKey} />;
   if (isHTML(ct)) {
     // When `src` is provided (a single HTML file inside a PACKAGE, or a
@@ -922,6 +796,20 @@ function NonTextBody({
       />
     );
   }
+  if (isVideo(ct)) {
+    return (
+      <video
+        src={src}
+        controls
+        playsInline
+        preload="metadata"
+        className="mx-auto max-h-[80vh] max-w-full rounded border border-neutral-200 bg-black"
+      />
+    );
+  }
+  if (isAudio(ct)) {
+    return <audio src={src} controls preload="metadata" className="mx-auto block w-full max-w-xl" />;
+  }
   return <AttachmentDownload href={src} name={name} contentType={ct} size={size} />;
 }
 
@@ -1019,18 +907,17 @@ export default function ArtifactViewer({
     return () => clearTarget(uploadTarget);
   }, [uploadTarget, setTarget, clearTarget]);
   // The server's own verdict on metadata editing (admin, this version's
-  // creator, or the document's owner, minus the kind:skill guard). Falls back
+  // creator, or the document's owner). Falls back
   // to the old client re-derivation only where the field is absent, in
   // non-viewer contexts: `creator` names whoever pushed this version, so on a
   // transferred document it answers for the wrong person in both directions.
   const canEdit =
     info.can_edit_metadata ??
     (!!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(me.email, info.creator)));
-  // Archive and unarchive keep their own rule — "only the creator or an admin"
-  // (httpArchive / httpUnarchive). That is this predicate exactly rather than an
-  // approximation, so it needs no server flag; it is simply not canEdit, which
-  // now also answers yes for a document's owner.
-  const canArchive = !!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(me.email, info.creator));
+  // Archive and unarchive keep their own rule (CanArchiveID: admin, creator or
+  // owner, plus write access for a skill). The fallback is the older creator rule.
+  const canArchive =
+    info.can_archive ?? (!!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(me.email, info.creator)));
   const isArchived = !!info.deleted_at;
   // Comments only attach to documents you can annotate: TEXT with textual
   // content, or a PACKAGE (its HTML files get the in-page overlay). Never for
@@ -1209,7 +1096,7 @@ export default function ArtifactViewer({
     effectiveFullHref = undefined;
   } else if (isPackage && selectedInPkg) {
     effectiveFullHref = `?v=full&file=${encodeURIComponent(selectedInPkg)}`;
-  } else if (!isPackage && (isFullPageable(info.content_type) || isPDF(info.content_type) || isImage(info.content_type))) {
+  } else if (!isPackage && (isFullPageable(info.content_type) || isPDF(info.content_type) || isImage(info.content_type) || isVideo(info.content_type) || isAudio(info.content_type))) {
     effectiveFullHref = `?v=full`;
   }
 

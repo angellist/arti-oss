@@ -5,6 +5,7 @@ package pgstore_test
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/angellist/arti-oss/internal/store/blob"
@@ -194,5 +195,69 @@ func TestBrowseAggregates_UnknownFacet(t *testing.T) {
 	_, err := st.BrowseAggregates(ctx, pgstore.BrowseAggregatesInput{Facet: "bogus", Limit: 10})
 	if err == nil {
 		t.Fatal("expected an error for an unknown facet")
+	}
+}
+
+func browseCount(t *testing.T, st *pgstore.Store, facet, value string, all bool) int64 {
+	t.Helper()
+	for offset := int32(0); ; offset += 500 {
+		res, err := st.BrowseAggregates(context.Background(), pgstore.BrowseAggregatesInput{
+			Facet: facet, Sort: "name", Dir: "asc", Limit: 500, Offset: offset, AllVersions: all,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range res.Values {
+			if v.Value == value {
+				return v.Count
+			}
+		}
+		if len(res.Values) < 500 {
+			return 0
+		}
+	}
+}
+
+// The owner facet counts what a person owns, the creator facet what they
+// wrote; after a transfer they name different people for the same document.
+func TestBrowseAggregates_OwnerFollowsTransferAndVersionsCountOnRequest(t *testing.T) {
+	ctx := context.Background()
+	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
+	writer, owner := unique("writer")+"@example.com", unique("owner")+"@example.com"
+	slug := unique("owned-doc")
+	for i := 0; i < 2; i++ {
+		if _, err := st.Put(ctx, pgstore.PutInput{
+			ArtifactType: pgstore.TypeText, NamedSlug: &slug, Title: slug, ContentType: "text/plain",
+			Content: []byte("v"), Creator: writer,
+		}); err != nil {
+			t.Fatalf("put v%d: %v", i+1, err)
+		}
+	}
+	if _, err := st.TransferSlugOwner(ctx, slug, owner, writer, true, func(string) error { return nil }); err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+
+	if got := browseCount(t, st, "owner", owner, false); got != 1 {
+		t.Errorf("owner facet for the new owner = %d, want 1", got)
+	}
+	if got := browseCount(t, st, "owner", writer, false); got != 0 {
+		t.Errorf("owner facet for the writer = %d, want 0 after the transfer", got)
+	}
+	if got := browseCount(t, st, "creator", writer, false); got != 1 {
+		t.Errorf("creator facet, latest versions = %d, want 1", got)
+	}
+	if got := browseCount(t, st, "creator", writer, true); got != 2 {
+		t.Errorf("creator facet, every version = %d, want 2", got)
+	}
+
+	for who, want := range map[string]int{owner: 1, strings.ToUpper(owner): 1, writer: 0} {
+		w := who
+		res, err := st.List(ctx, pgstore.ListInput{Owner: &w, Limit: 50, LatestPerSlug: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Rows) != want {
+			t.Errorf("List owner=%s returned %d rows, want %d", who, len(res.Rows), want)
+		}
 	}
 }

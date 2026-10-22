@@ -71,6 +71,10 @@ type APIKeyAuthenticator interface {
 // to that allowlist, so a leaked 30-day bearer can never delete or reach admin.
 const UploadScope = "upload"
 
+// ServiceScope is the scope of a key an admin mints for a service principal: a
+// full bearer for that principal, which can hold no other kind of key.
+const ServiceScope = "service"
+
 // Token flow types (Claims.Typ) bind a refresh token to the flow that issued
 // it, so a refresh token minted at one endpoint can't be redeemed at another —
 // e.g. a device-flow upload refresh token laundered into a full `user` session
