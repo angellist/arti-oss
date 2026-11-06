@@ -18,9 +18,18 @@ const deactivationCacheTTL = 15 * time.Second
 
 type deactivationCache struct {
 	mu         sync.Mutex
-	emails     map[string]struct{}
+	snap       userGateSnap
 	loadedAt   time.Time
 	generation uint64
+}
+
+// userGateSnap is the users table as auth.IsAllowed reads it: who is
+// deactivated, and who holds an account. An account is a login row or an
+// admin row someone added; a backfilled row, or one only a deactivation
+// created (no added_by), is a record, not an account.
+type userGateSnap struct {
+	deactivated map[string]struct{}
+	accounts    map[string]bool // email → added by an admin (vs. recorded at login)
 }
 
 func (c *deactivationCache) invalidate() {
@@ -30,33 +39,40 @@ func (c *deactivationCache) invalidate() {
 	c.mu.Unlock()
 }
 
-func (s *Store) deactivationSnap(ctx context.Context) (map[string]struct{}, error) {
+func (s *Store) userGateSnap(ctx context.Context) (userGateSnap, error) {
 	for {
 		s.deactivations.mu.Lock()
 		if s.authzCacheHealthy() && !s.deactivations.loadedAt.IsZero() && time.Since(s.deactivations.loadedAt) < deactivationCacheTTL {
-			set := s.deactivations.emails
+			snap := s.deactivations.snap
 			s.deactivations.mu.Unlock()
-			return set, nil
+			return snap, nil
 		}
 		generation := s.deactivations.generation
 		s.deactivations.mu.Unlock()
 
-		rows, err := s.pool.Query(ctx, `SELECT lower(email) FROM users WHERE deactivated_at IS NOT NULL`)
+		rows, err := s.pool.Query(ctx, `
+			SELECT lower(email), deactivated_at IS NOT NULL, source = 'admin' FROM users
+			 WHERE deactivated_at IS NOT NULL OR source = 'login' OR (source = 'admin' AND added_by <> '')`)
 		if err != nil {
-			return nil, fmt.Errorf("pgstore: deactivations: %w", err)
+			return userGateSnap{}, fmt.Errorf("pgstore: deactivations: %w", err)
 		}
-		set := map[string]struct{}{}
+		snap := userGateSnap{deactivated: map[string]struct{}{}, accounts: map[string]bool{}}
 		for rows.Next() {
 			var e string
-			if err := rows.Scan(&e); err != nil {
+			var off, added bool
+			if err := rows.Scan(&e, &off, &added); err != nil {
 				rows.Close()
-				return nil, fmt.Errorf("pgstore: deactivations scan: %w", err)
+				return userGateSnap{}, fmt.Errorf("pgstore: deactivations scan: %w", err)
 			}
-			set[e] = struct{}{}
+			if off {
+				snap.deactivated[e] = struct{}{}
+			} else {
+				snap.accounts[e] = added
+			}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("pgstore: deactivations iter: %w", err)
+			return userGateSnap{}, fmt.Errorf("pgstore: deactivations iter: %w", err)
 		}
 
 		s.deactivations.mu.Lock()
@@ -65,10 +81,10 @@ func (s *Store) deactivationSnap(ctx context.Context) (map[string]struct{}, erro
 			continue
 		}
 		if s.authzCacheHealthy() {
-			s.deactivations.emails, s.deactivations.loadedAt = set, time.Now()
+			s.deactivations.snap, s.deactivations.loadedAt = snap, time.Now()
 		}
 		s.deactivations.mu.Unlock()
-		return set, nil
+		return snap, nil
 	}
 }
 
@@ -77,13 +93,34 @@ func (s *Store) deactivationSnap(ctx context.Context) (map[string]struct{}, erro
 func (s *Store) IsDeactivated(email string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	set, err := s.deactivationSnap(ctx)
+	snap, err := s.userGateSnap(ctx)
 	if err != nil {
 		slog.Default().Warn("pgstore: deactivation check failed; denying", "err", err)
 		return true
 	}
-	_, ok := set[strings.ToLower(strings.TrimSpace(email))]
+	_, ok := snap.deactivated[strings.ToLower(strings.TrimSpace(email))]
 	return ok
+}
+
+// Account is the auth.SetAccountCheck hook: whether email holds an account,
+// and whether an admin added it (rather than a login recording it). It fails
+// closed: if the table cannot be read, nobody holds an account.
+func (s *Store) Account(email string) (has, added bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	snap, err := s.userGateSnap(ctx)
+	if err != nil {
+		slog.Default().Warn("pgstore: account check failed; denying", "err", err)
+		return false, false
+	}
+	added, has = snap.accounts[strings.ToLower(strings.TrimSpace(email))]
+	return has, added
+}
+
+// HasAccount reports whether email holds an account of either kind.
+func (s *Store) HasAccount(email string) bool {
+	has, _ := s.Account(email)
+	return has
 }
 
 // DeactivateUser is idempotent: deactivating an already-deactivated email

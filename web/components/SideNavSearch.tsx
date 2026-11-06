@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getAggregates, getMe } from "@/lib/arti";
+import { ATTACHMENTS_KEY } from "@/lib/catalog";
 import { catalogURL, useOpenSearch, useStickyFilter } from "@/lib/catalog-nav";
 import type { AggregatesResponse, Me } from "@/lib/types";
 import NewMenu from "./NewMenu";
@@ -11,10 +12,11 @@ import SideNavSettings from "./SideNavSettings";
 import { SearchIcon } from "./SearchIcon";
 
 const TOP_LABELS = 30;
+const TOP_MY_LABELS = 20;
 const TOP_SCOPES = 6;
 const TOP_CONTENT_TYPES = 10;
 
-// The active catalog filter (type + q) is sticky: the rail stays mounted
+// The active catalog filter (type + q + attachments) is sticky: the rail stays mounted
 // when you open a doc (/s/…, /a/…) whose URL carries no filter, so without
 // this the chips would snap back to "all" the moment you enter a doc view.
 // The last catalog filter is persisted to localStorage (see catalog-nav) and
@@ -87,7 +89,7 @@ function FilterRow({
   onClick,
 }: {
   label: string;
-  count: number;
+  count?: number;
   state: Tri;
   onClick: () => void;
 }) {
@@ -126,7 +128,9 @@ function FilterRow({
           </span>
           <span className="truncate">{label}</span>
         </span>
-        <span className={"shrink-0 text-[11px] " + countTone}>{count}</span>
+        {count === undefined ? null : (
+          <span className={"shrink-0 text-[11px] " + countTone}>{count}</span>
+        )}
       </button>
     </li>
   );
@@ -137,17 +141,21 @@ function FilterRow({
 function CollapsibleSection({
   title,
   storageKey,
+  defaultCollapsed = false,
   children,
 }: {
   title: string;
   storageKey: string;
+  defaultCollapsed?: boolean;
   children: React.ReactNode;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
 
   useEffect(() => {
     try {
-      if (window.localStorage.getItem(storageKey) === "1") setCollapsed(true);
+      const stored = window.localStorage.getItem(storageKey);
+      if (stored === "1") setCollapsed(true);
+      else if (stored === "0") setCollapsed(false);
     } catch {
       // ignore
     }
@@ -195,7 +203,7 @@ export default function SideNavSearch() {
   const sp = useSearchParams();
   const pathname = usePathname();
   const onCatalog = pathname === "/";
-  const { type: currentType, q: currentQ } = useStickyFilter();
+  const { type: currentType, q: currentQ, att: currentAtt = "" } = useStickyFilter();
 
   const [agg, setAgg] = useState<AggregatesResponse | null>(null);
   useEffect(() => {
@@ -232,7 +240,7 @@ export default function SideNavSearch() {
 
   // TODO(arti#56): the sticky store only carries type+q, so toggling a chip
   // from a doc view returns to the catalog with default sort.
-  const current = { type: currentType, q: currentQ };
+  const current = { type: currentType, q: currentQ, att: currentAtt };
   const navigate = (params: Record<string, string | null>) => {
     router.push(catalogURL(onCatalog ? sp : null, current, params));
   };
@@ -243,6 +251,15 @@ export default function SideNavSearch() {
 
   const setType = (t: string) => {
     navigate({ type: currentType === t ? null : t });
+  };
+
+  // ATTACHMENT is an include/exclude toggle, not a type filter: the catalog
+  // hides attachments unless `att=1`. A legacy `type=ATTACHMENT` URL counts
+  // as included, and clicking clears it back to the hidden default.
+  const attachmentsShown = currentAtt === "1" || currentType === "ATTACHMENT";
+  const toggleAttachments = () => {
+    if (currentType === "ATTACHMENT") navigate({ type: null, [ATTACHMENTS_KEY]: null });
+    else navigate({ [ATTACHMENTS_KEY]: attachmentsShown ? null : "1" });
   };
 
   // Toggle a field:value token in `q` — present? remove. absent? append.
@@ -289,7 +306,7 @@ export default function SideNavSearch() {
           gap but still breathing.
           The pl-2 puts each row's 12px icon on the same vertical centerline as
           the 28px arti logo above it (rail padding 16 + 8 + 6 = 30 = 16 + 14),
-          so the rail reads as one column of glyphs the way couch's does. */}
+          so the rail reads as one column of glyphs the way a compact icon rail does. */}
       <nav className="space-y-2.5 pl-2">
         {/* SEARCH reveals the full-width search bar at the top of the listing
             (CatalogTable) rather than living in the rail. */}
@@ -327,9 +344,32 @@ export default function SideNavSearch() {
           filters
         </h3>
         <div className="flex flex-wrap gap-1.5">
-          {/* Attachments are visible to everyone now; only couch's private
+          {/* Attachments are visible to everyone now; only private
               app:couch-scoped rows are hidden from non-admins (server side). */}
           {TYPES.map((t) => {
+            if (t.value === "ATTACHMENT") {
+              return (
+                <button
+                  key={t.value}
+                  type="button"
+                  onClick={toggleAttachments}
+                  aria-pressed={attachmentsShown}
+                  title={
+                    attachmentsShown
+                      ? "attachments shown — click to hide"
+                      : "attachments hidden — click to show"
+                  }
+                  className={
+                    "rounded-md border px-2.5 py-0.5 text-[11px] transition " +
+                    (attachmentsShown
+                      ? "border-neutral-200 text-neutral-600 hover:bg-neutral-50"
+                      : "border-dashed border-neutral-200 text-neutral-300 hover:text-neutral-500")
+                  }
+                >
+                  {t.label}
+                </button>
+              );
+            }
             const active = currentType === t.value;
             return (
               <button
@@ -396,7 +436,35 @@ export default function SideNavSearch() {
         </div>
       </section>
 
-      <CollapsibleSection title="popular labels" storageKey="arti.rail.labels">
+      {me?.email ? (
+        <CollapsibleSection title="my popular labels" storageKey="arti.rail.my_labels">
+          {agg === null ? (
+            <p className="text-[11px] italic text-neutral-400">loading…</p>
+          ) : !agg.my_labels?.length ? (
+            <p className="text-[11px] italic text-neutral-400">none yet</p>
+          ) : (
+            <ul className="space-y-0.5">
+              {agg.my_labels.slice(0, TOP_MY_LABELS).map((l) => {
+                const token = `label:${l.label}`;
+                return (
+                  <FilterRow
+                    key={l.label}
+                    label={l.label}
+                    state={tokenState(token)}
+                    onClick={() => cycleToken(token)}
+                  />
+                );
+              })}
+            </ul>
+          )}
+        </CollapsibleSection>
+      ) : null}
+
+      <CollapsibleSection
+        title="popular labels"
+        storageKey="arti.rail.labels.v2"
+        defaultCollapsed
+      >
         {agg === null ? (
           <p className="text-[11px] italic text-neutral-400">loading…</p>
         ) : agg.labels.length === 0 ? (
@@ -465,7 +533,7 @@ export default function SideNavSearch() {
         )}
       </CollapsibleSection>
 
-      {(currentQ || currentType) && (
+      {(currentQ || currentType || currentAtt) && (
         <div className="pt-2">
           <Link
             href="/"

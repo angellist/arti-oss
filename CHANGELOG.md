@@ -8,6 +8,30 @@ and PATCH otherwise.
 Sections are generated from the commit subjects of the changes in each snapshot;
 entries describe only what ships in this repository.
 
+## 0.2.2 — 2026-11-06
+
+### Features
+
+- apps: owner-toggled comments on APP artifacts (DB migrate 0044)
+- artifacts: keep a named slug on ATTACHMENT uploads from service credentials
+- audit: record every document access with actor, surface and decision
+- auth: request-only domains, hand-added accounts, access-request queue (DB migrate 0045)
+- mcpclient: also send the calling app as X-Snowflake-Consumer on tools/call
+- viewer: edit HTML artifact text in place, save as a new version
+- web: add 'my popular labels'; collapse popular labels by default
+- web: comment dictation strip inside the box, caret to end, insertion marker
+- web: edit MAP entries in place from the table; smaller table text
+- web: embedded viewer reports its version to the host
+- web: hide ATTACHMENT rows from the catalog by default
+- web: move full-page corner controls to the top left, add version link
+- web: render diff code blocks with added/removed line styling
+
+### Fixes
+
+- apps: keep APP run consent server-side, expire the arti_app_ok_* cookies (DB migrate 0043)
+- mcp: append_artifact accepts ident as an alias for slug
+- web: pass the page's #fragment into the full-page HTML frame
+
 ## 0.2.1 — 2026-10-22
 
 ### Features

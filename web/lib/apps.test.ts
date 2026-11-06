@@ -57,11 +57,11 @@ describe("selectApps", () => {
   it("matches the filter against everything the card shows, plus the owner", () => {
     const set = [
       app({ named_slug: "a", title: "Budget vs Actuals", creator: "gina@example.com" }),
-      app({ named_slug: "couch-probe", title: "Probe", labels: ["dry-run"] }),
+      app({ named_slug: "probe-app", title: "Probe", labels: ["dry-run"] }),
     ];
     expect(selectApps(set, { query: "gina" }).map((a) => a.named_slug)).toEqual(["a"]);
-    expect(selectApps(set, { query: "COUCH" }).map((a) => a.named_slug)).toEqual(["couch-probe"]);
-    expect(selectApps(set, { query: "dry-run" }).map((a) => a.named_slug)).toEqual(["couch-probe"]);
+    expect(selectApps(set, { query: "PROBE" }).map((a) => a.named_slug)).toEqual(["probe-app"]);
+    expect(selectApps(set, { query: "dry-run" }).map((a) => a.named_slug)).toEqual(["probe-app"]);
     expect(selectApps(set, { query: "actuals" }).map((a) => a.named_slug)).toEqual(["a"]);
   });
 

@@ -167,7 +167,7 @@ jq -n --arg c "$(base64 < report.html)" \
 
 ## Device flow (headless agents)
 
-When a human needs to vouch for a browserless agent — a couch sandbox, a Runlayer
+When a human needs to vouch for a browserless agent — an agent sandbox, a hosted
 task — arti implements the [RFC 8628 device authorization grant](../recipes/agent.md):
 the agent prints a short code, a human approves it once through SSO, and the agent
 polls for an upload-scoped `ARTI_TOKEN`. It's the right choice when the identity

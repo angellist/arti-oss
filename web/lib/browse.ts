@@ -1,3 +1,4 @@
+import { ATTACHMENTS_KEY } from "./catalog";
 import type { BrowseFacet, BrowseValueCount } from "./types";
 
 // browseRowHref builds the main-catalog URL a Browse-page row links to. The
@@ -8,11 +9,9 @@ export function browseRowHref(facet: BrowseFacet, value: string): string {
   if (facet === "type") {
     return `/?type=${encodeURIComponent(value)}`;
   }
+  // Browse counts include attachments, so the link shows them too (att=1).
   // "owner" is the document owner; "creator" is whoever wrote each version.
-  if (facet === "owner" || facet === "creator") {
-    return `/?q=${encodeURIComponent(`${facet}:${value}`)}`;
-  }
-  return `/?q=${encodeURIComponent(`${facet}:${value}`)}`;
+  return `/?q=${encodeURIComponent(`${facet}:${value}`)}&${ATTACHMENTS_KEY}=1`;
 }
 
 // matchScore ranks how well `value` matches the Browse page's instant-search

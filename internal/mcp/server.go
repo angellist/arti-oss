@@ -20,6 +20,7 @@ import (
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
 	"github.com/angellist/arti-oss/internal/artifacts"
+	"github.com/angellist/arti-oss/internal/audit"
 	"github.com/angellist/arti-oss/internal/auth"
 	"github.com/angellist/arti-oss/internal/comments"
 	"github.com/angellist/arti-oss/internal/rbac"
@@ -158,12 +159,13 @@ func toolSpecs() []toolSpec {
 		},
 		{
 			Name:        "append_artifact",
-			Description: "Append text content to an existing slug as a new version, atomically (body = prior || separator || content). Auto-creates v1 if the slug doesn't exist (title + content_type required in that path; optional overrides after). Pass idempotency_key (a stable hash of the logical event) to make retries safe — the server caches the response for 24h per (key, creator) and replays it on repeat. Binary content_types are rejected; use add_artifact with artifact_type=ATTACHMENT for those.",
+			Description: "Append text content to an existing slug (pass it as `slug`; `ident` is accepted as an alias) as a new version, atomically (body = prior || separator || content). Auto-creates v1 if the slug doesn't exist (title + content_type required in that path; optional overrides after). Pass idempotency_key (a stable hash of the logical event) to make retries safe — the server caches the response for 24h per (key, creator) and replays it on repeat. Binary content_types are rejected; use add_artifact with artifact_type=ATTACHMENT for those.",
 			InputSchema: map[string]any{
 				"type":     "object",
-				"required": []string{"slug", "content"},
+				"required": []string{"content"},
 				"properties": map[string]any{
 					"slug":            str(),
+					"ident":           map[string]any{"type": "string", "description": "Alias for slug, for parity with the other artifact tools. Send slug or ident."},
 					"content":         str(),
 					"separator":       str(),
 					"idempotency_key": str(),
@@ -464,7 +466,8 @@ func softMiss(raw json.RawMessage, err error) (any, bool) {
 // dispatch routes a single tool call by name; args is the raw JSON each tool
 // unmarshals into its own struct. Split out of callTool so it can also be
 // invoked in-process (see CallToolInProcess).
-func (s *Server) dispatch(ctx context.Context, name string, args json.RawMessage) (any, error) {
+func (s *Server) dispatch(ctx context.Context, name string, args json.RawMessage) (out any, err error) {
+	defer func() { noteToolCall(ctx, name, args, err) }()
 	switch name {
 	case "add_artifact":
 		return s.toolAdd(ctx, args)
@@ -576,13 +579,30 @@ func (s *Server) toolAdd(ctx context.Context, raw json.RawMessage) (any, error) 
 func (s *Server) toolAppend(ctx context.Context, raw json.RawMessage) (any, error) {
 	var args struct {
 		Slug string `json:"slug"`
+		// Ident is accepted as an alias for slug: every other artifact tool
+		// names its target `ident`, and agents carry that over to append.
+		Ident string `json:"ident"`
 		artifacts.AppendRequest
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, err
 	}
+	if args.Slug != "" && args.Ident != "" && args.Slug != args.Ident {
+		// Two different targets: appending to either would be a guess, and the
+		// audit (noteToolCall) records ident first, so it would also log the
+		// wrong document. Refuse.
+		return nil, fmt.Errorf("append_artifact got slug %q and ident %q; send one of them", args.Slug, args.Ident)
+	}
+	if args.Slug == "" && args.Ident != "" {
+		// Append versions a named document, so a version id has nothing to
+		// append to. Say which argument to send instead of guessing a slug.
+		if _, err := uuid.Parse(args.Ident); err == nil {
+			return nil, fmt.Errorf("append_artifact needs the document's slug; ident %q is an artifact id", args.Ident)
+		}
+		args.Slug = args.Ident
+	}
 	if args.Slug == "" {
-		return nil, fmt.Errorf("slug is required")
+		return nil, fmt.Errorf("slug is required (append_artifact takes `slug`, the document's named slug)")
 	}
 	email := auth.EmailFromContext(ctx)
 	info, replayed, err := s.svc.Append(ctx, args.Slug, args.AppendRequest, email)
@@ -1106,4 +1126,38 @@ func trimPartialRune(b []byte) []byte {
 		b = b[:len(b)-1]
 	}
 	return b
+}
+
+// noteToolCall records one tool invocation in the request's audit entry.
+func noteToolCall(ctx context.Context, name string, args json.RawMessage, err error) {
+	e := audit.From(ctx)
+	if e == nil {
+		return
+	}
+	var a struct {
+		Ident     string `json:"ident"`
+		Slug      string `json:"slug"`
+		NamedSlug string `json:"named_slug"`
+		ID        string `json:"artifact_id"`
+	}
+	_ = json.Unmarshal(args, &a)
+	ident := a.Ident
+	if ident == "" {
+		ident = a.Slug
+	}
+	if ident == "" {
+		ident = a.NamedSlug
+	}
+	if ident == "" {
+		ident = a.ID
+	}
+	outcome := "allowed"
+	switch {
+	case err == nil:
+	case errors.Is(err, pgstore.ErrNotFound) || artifacts.IsForbidden(err):
+		outcome = "denied"
+	default:
+		outcome = "error"
+	}
+	e.AddTool(audit.ToolCall{Name: name, Ident: ident, Outcome: outcome})
 }

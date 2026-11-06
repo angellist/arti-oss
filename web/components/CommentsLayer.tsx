@@ -12,8 +12,8 @@ import type { Me } from "@/lib/types";
 // sandboxed iframe loaded via `src` from arti-server, whose served page gets
 // the overlay INJECTED in-page (the comments-embed bundle). That injected
 // overlay does full text-select + pin commenting inside the iframe. The outer
-// overlay can't reach across the opaque-iframe boundary, so for HTML and
-// packages we suppress it — otherwise you'd get two sets of controls.
+// overlay can't reach across the opaque-iframe boundary, so for HTML,
+// packages and apps we suppress it — otherwise you'd get two sets of controls.
 //
 // Known limitation: a PACKAGE whose viewed file is markdown/plain (rendered in
 // React via PackageBody, not an iframe) gets no overlay at all — it's
@@ -35,7 +35,7 @@ export default function CommentsLayer({
   fullPageHref?: string;
 }) {
   const isHTML = !!contentType && contentType.startsWith("text/html");
-  const suppressed = isHTML || artifactType === "PACKAGE"; // injected in-page overlay handles these
+  const suppressed = isHTML || artifactType === "PACKAGE" || artifactType === "APP"; // injected in-page overlay handles these
 
   useEffect(() => {
     if (suppressed) return;

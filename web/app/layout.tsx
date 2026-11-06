@@ -5,6 +5,8 @@ import SideNav from "@/components/SideNav";
 import { RailModeShell } from "@/lib/rail-context";
 import { UploadProvider } from "@/lib/upload-context";
 import { themeBootstrapScript } from "@/lib/appearance";
+import { diffViewBootstrapScript } from "@/lib/diffView";
+import DiffViewToggle from "@/components/DiffViewToggle";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -41,9 +43,10 @@ export default function RootLayout({
       className={`${geistSans.variable} ${petrona.variable} h-full antialiased`}
     >
       <head>
-        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript() }} />
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript() + ";" + diffViewBootstrapScript() }} />
       </head>
       <body className="min-h-full bg-neutral-50">
+        <DiffViewToggle />
         <RailModeShell>
           <UploadProvider>
             <div className="flex min-h-screen">

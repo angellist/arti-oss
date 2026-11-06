@@ -113,10 +113,8 @@ func (cfg MCPOAuthConfig) allowCaller(r *http.Request, caller mcpCaller) *oauthE
 	if !IsAllowed(caller.Email) {
 		return &oauthErr{http.StatusForbidden, "access_denied", "email domain not allowed"}
 	}
-	if caller.FromProxy && len(cfg.RequiredGroups) > 0 {
-		if !anyMatch(splitGroups(r.Header.Get(IngressGroupsHeader)), cfg.RequiredGroups) {
-			return &oauthErr{http.StatusForbidden, "access_denied", "user not in a required group"}
-		}
+	if caller.FromProxy && !passesGroupGate(caller.Email, splitGroups(r.Header.Get(IngressGroupsHeader)), cfg.RequiredGroups) {
+		return &oauthErr{http.StatusForbidden, "access_denied", "user not in a required group"}
 	}
 	return nil
 }

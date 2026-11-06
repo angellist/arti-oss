@@ -57,11 +57,11 @@ describe("FullPageAccess", () => {
     return container.querySelector("button");
   };
 
-  it("sits immediately left of the ✕ at the same size", () => {
+  it("sits immediately right of the ✕ at the same size", () => {
     const btn = render(info())!;
     expect(btn.style.width).toBe("18px");
     expect(btn.style.height).toBe("18px");
-    expect(btn.style.right).toBe("18px");
+    expect(btn.style.left).toBe("18px");
     expect(btn.style.top).toBe("var(--arti-top-strip, 0px)");
   });
 

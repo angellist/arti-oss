@@ -155,7 +155,7 @@ func TestList_FilterScopeLabel(t *testing.T) {
 }
 
 // Attachments are visible in the catalog by default; only rows scoped
-// app:couch (the couch app's private state) are hidden, and only when
+// app:couch (an app's private state) are hidden, and only when
 // HideAppCouch is set (the non-admin catalog path). Admins never set the
 // flag, so they still find everything. Access is held constant here (the
 // owner can see both rows) so the test isolates the scope filter, not the
@@ -165,7 +165,7 @@ func TestList_HideAppCouch(t *testing.T) {
 	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
 
 	owner := "alice@example.com"
-	label := unique("couch-vis")
+	label := unique("app-vis")
 
 	// A normal attachment (no app:couch scope) — must stay visible.
 	if _, err := st.Put(ctx, pgstore.PutInput{
@@ -174,9 +174,9 @@ func TestList_HideAppCouch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// A couch-private attachment (app:couch scope) — hidden from non-admins.
+	// An app-private attachment (app:couch scope) — hidden from non-admins.
 	if _, err := st.Put(ctx, pgstore.PutInput{
-		ArtifactType: pgstore.TypeAttachment, Title: "couch-state.bin", ContentType: "application/octet-stream",
+		ArtifactType: pgstore.TypeAttachment, Title: "app-state.bin", ContentType: "application/octet-stream",
 		Content: []byte("state"), Creator: owner, Labels: []string{label},
 		Scopes: []string{pgstore.ScopeAppCouch},
 	}); err != nil {
@@ -840,5 +840,42 @@ func TestSearch_AllTokensRequired(t *testing.T) {
 	}
 	if res.Total != 1 || len(res.Rows) != 1 || res.Rows[0].ArtifactID != want.ArtifactID {
 		t.Fatalf(`"vc agent" must match only "vc-agent", not "agent-smith": got total=%d rows=%d`, res.Total, len(res.Rows))
+	}
+}
+
+func TestCreatorLabels(t *testing.T) {
+	ctx := context.Background()
+	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
+
+	me := unique("me") + "@example.com"
+	other := unique("other") + "@example.com"
+	mine := unique("my-label")
+	theirs := unique("their-label")
+	for _, c := range []struct {
+		creator string
+		labels  []string
+	}{
+		{me, []string{mine}},
+		{me, []string{mine}},
+		{other, []string{mine, theirs}},
+	} {
+		if _, err := st.Put(ctx, pgstore.PutInput{
+			ArtifactType: pgstore.TypeText,
+			Title:        unique("mylabels"),
+			ContentType:  "text/plain",
+			Content:      []byte("x"),
+			Creator:      c.creator,
+			Labels:       c.labels,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.CreatorLabels(ctx, strings.ToUpper(me), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Label != mine || got[0].Count != 2 {
+		t.Fatalf("CreatorLabels = %+v, want [{%s 2}]", got, mine)
 	}
 }

@@ -50,7 +50,7 @@ A surface is a JSON object in the `ARTI_EMBED_SURFACES` map, validated at startu
 | field | required | role |
 |---|---|---|
 | `secret` | service, user | shared secret, compared constant-time against `?auth_secret=`. Optional in `viewer` mode, where it protects nothing; if left set there it is still compared, so migrating a surface is a deliberate two-step |
-| `origin` | yes | host(s) allowed to frame this surface (`frame-ancestors`). A single string or a list — a **nested** topology (e.g. Front ▸ couch ▸ arti) must enumerate *every* ancestor origin |
+| `origin` | yes | host(s) allowed to frame this surface (`frame-ancestors`). A single string or a list — a **nested** topology (e.g. Front ▸ host app ▸ arti) must enumerate *every* ancestor origin |
 | `identity` | no | `"service"` (default), `"user"` or `"viewer"` — see [modes](#embed-surfaces) |
 | `email` | service only | identity artifacts resolve as — the read-scope gate. **Required** in service mode; **rejected** in user and viewer mode (the real viewer decides, so a fixed identity would be a footgun) |
 | `slug_allow` | yes | patterns (exact or `*` glob) the requested slug must match; `["*"]` = any |

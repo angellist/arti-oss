@@ -28,7 +28,7 @@ func newActingRig(t *testing.T) actingRig {
 	t.Helper()
 	ctx := context.Background()
 	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
-	principal := strings.ToLower(uniqueSlug("couch")) + "@sa.arti.invalid"
+	principal := strings.ToLower(uniqueSlug("svc")) + "@sa.arti.invalid"
 	if _, err := st.AddUser(ctx, principal, pgstore.UserKindService, "test principal", "admin@example.com"); err != nil {
 		t.Fatalf("add principal: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestActingForCreditsThePersonAndKeepsThePrincipalInCharge(t *testing.T) {
 }
 
 // Credit is not authority: the person can read their version but not edit or
-// archive it, so they cannot forge a record couch keeps.
+// archive it, so they cannot forge a record the principal keeps.
 func TestCreditedPersonCannotEditOrArchiveTheVersion(t *testing.T) {
 	r := newActingRig(t)
 	ctx := context.Background()
@@ -176,7 +176,7 @@ func TestActingForNeverBorrowsThePersonsRoles(t *testing.T) {
 }
 
 // A slugless upload the principal stores for a person keeps the readers it was
-// given plus the principal, so couch can read it back without admin rights.
+// given plus the principal, so the principal can read it back without admin rights.
 func TestActingForAttachmentIsReadableByThePrincipal(t *testing.T) {
 	r := newActingRig(t)
 	ctx := auth.WithTestActingFor(context.Background(), "alice@example.com")

@@ -43,8 +43,10 @@ app's `arti-app.json` declares, grouped by server, and labels each one read,
 write or llm — arti's own tools from a fixed table, other servers by the verb in
 the tool name, with an unrecognized verb treated as a write.
 
-A yes is stored as a signed cookie for that (viewer, version) pair, sealed under
-its own HMAC domain so the record never parses as a session or bridge token. A
+A yes is stored server-side in `app_consents` for that (viewer, version) pair,
+for 30 days, so it follows the viewer across browsers. It is not a cookie: one
+cookie per approved app once pushed the Cookie header past the auth proxy's
+header limit, so arti now expires any legacy `arti_app_ok_*` cookie it sees. A
 new version is a new artifact id, so a republish asks again. The viewer may also
 tick **trust every version of this slug**, which stores a second record bound to
 the slug, the publisher and a digest of the declared tools: later versions run
@@ -52,14 +54,14 @@ without asking while all three hold, and a version from a different publisher or
 with a different tool set asks again.
 
 Two paths need care. Inside the viewer's sandboxed preview frame the consent page
-cannot set a cookie for arti's origin, so it relays the click to the parent
+cannot post with arti's session cookie, so it relays the click to the parent
 window, which grants only when the app id in the message matches the artifact
 UUID in the frame `src` it set itself. Once consent holds, a further grant
 through that relay returns early: the frame is running the app's own code by
 then, so it must not be able to widen itself to slug scope.
 
-The gate fails closed: an arti with a bridge-token minter but no consent verifier
-refuses every APP document load.
+The gate fails closed: an arti with a bridge-token minter but no consent store
+refuses every APP document load, and so does a failed consent lookup.
 
 ## Request flow
 

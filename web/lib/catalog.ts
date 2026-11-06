@@ -18,6 +18,28 @@ export const SHOW_ARCHIVED_KEY = "arch";
 // catalog link stays clean.
 export const SEARCH_OPEN_KEY = "find";
 
+// URL key for the rail's ATTACHMENT chip. ATTACHMENT rows are hidden from the
+// catalog unless `att=1`; omitted at that default.
+export const ATTACHMENTS_KEY = "att";
+const EXCLUDE_ATTACHMENTS = "-type:ATTACHMENT";
+
+// hidesAttachments reports whether the catalog query should leave ATTACHMENT
+// rows out. A type chip, a slug drill-in or a positive type:/content_type:
+// token already says what the user wants, so the default steps aside.
+export function hidesAttachments(get: (key: string) => string | null | undefined): boolean {
+  if (get(ATTACHMENTS_KEY) === "1" || get("type") || get("slug")) return false;
+  const tokens = (get("q") ?? "").split(/\s+/);
+  return !tokens.some((t) => t.startsWith("type:") || t.startsWith("content_type:"));
+}
+
+// catalogQuery is the `q` the catalog sends to the API: the user's query plus
+// the ATTACHMENT exclusion when hidesAttachments says so.
+export function catalogQuery(get: (key: string) => string | null | undefined): string | undefined {
+  const q = get("q") ?? "";
+  if (!hidesAttachments(get)) return q || undefined;
+  return q ? `${q} ${EXCLUDE_ATTACHMENTS}` : EXCLUDE_ATTACHMENTS;
+}
+
 export interface CatalogView {
   // A single slug is in focus via the dedicated `slug` URL param — a
   // deterministic drill-in (e.g. clicking a slug chip). The catalog then shows
@@ -73,6 +95,7 @@ export const ROW_SET_KEYS = [
   "page",
   ALL_VERSIONS_KEY,
   SHOW_ARCHIVED_KEY,
+  ATTACHMENTS_KEY,
 ] as const;
 
 /** A value that changes exactly when the catalog's row set does. */

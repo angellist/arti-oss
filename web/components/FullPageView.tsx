@@ -1,6 +1,7 @@
 import CommentsLayer from "./CommentsLayer";
 import FullPageAccess from "./FullPageAccess";
 import FullPageExit from "./FullPageExit";
+import FullPageVersion from "./FullPageVersion";
 import FullPageHtmlFrame from "./FullPageHtmlFrame";
 import DiagramFigure from "./DiagramSvg";
 import { parseDiagram, type DiagramDoc } from "@/lib/diagram";
@@ -53,13 +54,13 @@ export default function FullPageView({
   entries?: Array<{ path: string; content_type: string }>;
   entryPoint?: string | null;
   me?: Me | null;
-  // Present → the access dot beside the ✕.
+  // Present → the access dot and version link beside the ✕.
   info?: ArtifactInfo;
   // Text scale multiplier — applied to text/markdown and text/plain views by
   // setting --arti-text-scale on the container, and to HTML bodies as a `zoom`
   // on the iframe element (see the html branch). Mirrors ArtifactViewer's
   // text-size control; the caller passes it from the ?ts= URL param so the
-  // couch side-panel can sync it to the user's chat font-size preference.
+  // embedding host can sync it to the user's own font-size preference.
   textScale?: number;
   // The owner's per-doc comment switch. false → no overlay here, and none
   // injected into the served HTML either (arti-server enforces the same flag),
@@ -84,6 +85,7 @@ export default function FullPageView({
     <>
       {info ? <FullPageAccess key={`access:${docKey}`} info={info} me={me} /> : null}
       <FullPageExit key={docKey} />
+      {info ? <FullPageVersion key={`version:${docKey}`} info={info} /> : null}
     </>
   );
   const kind = fullPageKind(contentType);

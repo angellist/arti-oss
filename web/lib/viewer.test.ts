@@ -162,7 +162,7 @@ describe("fileParamSearch", () => {
   });
 });
 
-// ?ts= is how an embedder (couch's artifact side panel) syncs the reader's own
+// ?ts= is how an embedder (e.g. a side panel) syncs the reader's own
 // font-size preference into the chrome-less viewer. Unknown values must land on
 // 1 — a stale or hand-typed link should render at today's size, not a surprise.
 describe("textScaleFromParam", () => {
@@ -211,7 +211,7 @@ describe("exitFullPageSearch", () => {
   });
 });
 
-// The full-page view is iframed by embedders (couch's side panel), where the
+// The full-page view is iframed by embedders (e.g. a side panel), where the
 // host owns the chrome. A cross-origin `top` access throws, which is itself
 // proof of being framed — so the throwing case must read as framed, not crash.
 describe("isTopLevelWindow", () => {

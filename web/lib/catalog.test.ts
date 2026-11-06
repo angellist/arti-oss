@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { catalogView, rowSetKey, ALL_VERSIONS_KEY, SHOW_ARCHIVED_KEY, SEARCH_OPEN_KEY } from "./catalog";
+import { catalogQuery, catalogView, rowSetKey, ALL_VERSIONS_KEY, ATTACHMENTS_KEY, SHOW_ARCHIVED_KEY, SEARCH_OPEN_KEY } from "./catalog";
 
 const view = (params: Record<string, string>) => catalogView((k) => params[k]);
 
@@ -77,5 +77,30 @@ describe("rowSetKey", () => {
 
   it("does not collide across params", () => {
     expect(of("q=a")).not.toBe(of("type=a"));
+  });
+});
+
+describe("catalogQuery", () => {
+  const q = (params: Record<string, string>) => catalogQuery((k) => params[k]);
+
+  it("hides ATTACHMENT rows by default", () => {
+    expect(q({})).toBe("-type:ATTACHMENT");
+    expect(q({ q: "label:x memo" })).toBe("label:x memo -type:ATTACHMENT");
+  });
+
+  it("includes them when att=1", () => {
+    expect(q({ [ATTACHMENTS_KEY]: "1" })).toBeUndefined();
+    expect(q({ [ATTACHMENTS_KEY]: "1", q: "memo" })).toBe("memo");
+  });
+
+  it("steps aside for a type chip, a slug drill-in or a positive type token", () => {
+    expect(q({ type: "IMAGE" })).toBeUndefined();
+    expect(q({ slug: "s" })).toBeUndefined();
+    expect(q({ q: "type:ATTACHMENT" })).toBe("type:ATTACHMENT");
+    expect(q({ q: "content_type:image/png" })).toBe("content_type:image/png");
+  });
+
+  it("still hides them under a negated type token", () => {
+    expect(q({ q: "-type:APP" })).toBe("-type:APP -type:ATTACHMENT");
   });
 });

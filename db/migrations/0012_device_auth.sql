@@ -1,5 +1,5 @@
 -- 0012_device_auth.sql
--- RFC 8628 Device Authorization Grant for headless agents (couch sandboxes).
+-- RFC 8628 Device Authorization Grant for headless agents (agent sandboxes).
 -- Postgres-backed (not in-mem) because the code → approve → poll steps can
 -- each land on a different replica under the HPA.
 

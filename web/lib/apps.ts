@@ -9,7 +9,7 @@ export const APP_SORTS: ReadonlyArray<{ value: AppSort; label: string }> = [
 ];
 
 // What the portal's instant filter box matches against: everything visible on
-// the card plus the owner, so "tian", "dashboard" and "couch-" all find the
+// the card plus the owner, so "alice", "dashboard" and "probe-" all find the
 // apps a person would expect from what they can see.
 function haystack(a: ArtifactInfo): string {
   return [a.title, a.named_slug ?? "", a.creator, ...a.labels].join(" ").toLowerCase();

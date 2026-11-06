@@ -9,12 +9,10 @@ import { useTopLevelWindow } from "@/lib/useViewport";
 export const EXIT_SIZE = 18;
 
 // The way out of the chrome-less ?v=full view: a small square ✕ wedged into
-// the top-right corner with no inset, so it takes as little of the content as
-// a control can. Its top offset clears --arti-top-strip, which a stale-version
-// banner occupies. Flush right means it overlaps the top of a classic
-// (non-overlay) scrollbar on the content frame below.
+// the top-left corner with no inset, first in the strip of corner controls.
+// Its top offset clears --arti-top-strip, which a stale-version banner occupies.
 export default function FullPageExit() {
-  // Not rendered inside an embed: couch's side panel iframes this view, owns
+  // Not rendered inside an embed: the host's side panel iframes this view, owns
   // its own chrome, and has no normal view to return to.
   const topLevel = useTopLevelWindow();
   const dark = useHostTheme();
@@ -31,7 +29,7 @@ export default function FullPageExit() {
       aria-label="back to normal view"
       style={{
         top: "var(--arti-top-strip, 0px)",
-        right: 0,
+        left: 0,
         width: EXIT_SIZE,
         height: EXIT_SIZE,
       }}
@@ -56,7 +54,7 @@ export default function FullPageExit() {
 // The surface both corner controls share, so they read as one strip.
 export function cornerButtonClass(dark: boolean): string {
   return (
-    "fixed z-[60] grid place-items-center border-b border-l text-[#9b9b95] opacity-70 " +
+    "fixed z-[60] grid place-items-center border-b border-r text-[#9b9b95] opacity-70 " +
     "backdrop-blur-[12px] transition hover:opacity-100 " +
     (dark
       ? "border-[rgba(255,255,255,.14)] bg-[rgba(32,32,30,.78)] hover:bg-[rgba(255,255,255,.08)] hover:text-[#f2f1ee]"

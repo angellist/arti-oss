@@ -34,7 +34,7 @@ func tokenPath() (string, error) {
 }
 
 func loadToken() (Token, error) {
-	// An injected bearer (e.g. a couch sandbox's device-flow upload token)
+	// An injected bearer (e.g. an agent sandbox's device-flow upload token)
 	// takes precedence over the on-disk login — no `arti login` needed.
 	if env := strings.TrimSpace(os.Getenv("ARTI_TOKEN")); env != "" {
 		return Token{AccessToken: env}, nil

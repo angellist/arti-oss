@@ -7,8 +7,8 @@ import (
 )
 
 // An oversized limit used to fall back to Default, so a client asking for 1000
-// rows got 50 and no signal that it had asked for something impossible. couch's
-// skill catalog read one 500-row page as the whole set for that reason.
+// rows got 50 and no signal that it had asked for something impossible, and a
+// client could read one truncated page as the whole set.
 func TestClampLimit(t *testing.T) {
 	for _, tc := range []struct {
 		in, want int32

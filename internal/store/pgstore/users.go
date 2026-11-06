@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/angellist/arti-oss/internal/rbac"
 )
 
@@ -17,9 +19,10 @@ import (
 // The roster is a projection, never an authority. It reads the same
 // knownPrincipalsCTE the access-editor typeahead reads (people.go), so the two
 // surfaces cannot disagree about who exists, and it resolves roles and group
-// membership through the same code the access checks use. One exception decides
+// membership through the same code the access checks use. Two exceptions decide
 // access: IsActiveServicePrincipal, which lets an admin-added `kind: service` row
-// under the reserved .invalid TLD hold a key that skips the email allowlist.
+// under the reserved .invalid TLD hold a key that skips the email allowlist, and
+// HasAccount, which admits an admin-added or login row outside the allowlist.
 
 // HeldRole is one role a principal holds and where it came from: "baseline"
 // (the implicit USER role), "direct" (assigned to their email), or
@@ -352,16 +355,28 @@ func (s *Store) AddUser(ctx context.Context, email, kind, note, addedBy string) 
 	default:
 		return RosterUser{}, fmt.Errorf("%w: kind must be %q or %q", ErrInvalidInput, UserKindHuman, UserKindService)
 	}
-	if _, err := s.pool.Exec(ctx, `
+	if err := upsertAdminUser(ctx, s.pool, email, kind, note, addedBy); err != nil {
+		return RosterUser{}, err
+	}
+	s.invalidateDeactivations(ctx)
+	return s.GetRosterUser(ctx, email)
+}
+
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// upsertAdminUser is AddUser's write, shared with access-request approval so
+// both produce the same account row.
+func upsertAdminUser(ctx context.Context, ex execer, email, kind, note, addedBy string) error {
+	_, err := ex.Exec(ctx, `
 		INSERT INTO users (email, kind, note, added_by)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (email) DO UPDATE
 		   SET kind = EXCLUDED.kind, note = EXCLUDED.note, added_by = EXCLUDED.added_by,
 		       source = 'admin'`,
-		email, kind, strings.TrimSpace(note), strings.ToLower(strings.TrimSpace(addedBy))); err != nil {
-		return RosterUser{}, err
-	}
-	return s.GetRosterUser(ctx, email)
+		email, kind, strings.TrimSpace(note), strings.ToLower(strings.TrimSpace(addedBy)))
+	return err
 }
 
 // GetRosterUser returns one principal's roster row, composed the same way

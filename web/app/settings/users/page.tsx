@@ -1,5 +1,5 @@
 import { headers } from "next/headers";
-import { getMe, listGroups, listPermissions, listUsers } from "@/lib/arti";
+import { getMe, listAccessRequests, listGroups, listPermissions, listUsers } from "@/lib/arti";
 import UsersManager from "@/components/UsersManager";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +18,7 @@ export default async function SettingsUsersPage() {
   // /api/groups returns only the groups this caller may manage.
   const groups = canManage ? await listGroups(cookie).catch(() => []) : [];
   const permissions = canManage ? await listPermissions(cookie).catch(() => []) : [];
+  const requests = canManage ? await listAccessRequests(cookie).catch(() => []) : [];
 
   return (
     <div>
@@ -28,6 +29,7 @@ export default async function SettingsUsersPage() {
           currentEmail={me.email}
           manageableGroups={groups.map((g) => ({ name: g.name, members: g.members }))}
           permissions={permissions}
+          initialRequests={requests}
         />
       ) : (
         <div className="px-6 py-10 text-sm text-neutral-500">

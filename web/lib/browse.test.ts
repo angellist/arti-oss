@@ -11,25 +11,25 @@ describe("browseRowHref", () => {
   });
   it("label facet uses a label: token in q", () => {
     expect(browseRowHref("label", "quarterly-report")).toBe(
-      `/?q=${encodeURIComponent("label:quarterly-report")}`,
+      `/?q=${encodeURIComponent("label:quarterly-report")}&att=1`,
     );
   });
   it("scope facet uses a scope: token in q, preserving internal colons", () => {
     expect(browseRowHref("scope", "topic:funds")).toBe(
-      `/?q=${encodeURIComponent("scope:topic:funds")}`,
+      `/?q=${encodeURIComponent("scope:topic:funds")}&att=1`,
     );
   });
   it("content_type facet uses a content_type: token in q", () => {
     expect(browseRowHref("content_type", "text/markdown")).toBe(
-      `/?q=${encodeURIComponent("content_type:text/markdown")}`,
+      `/?q=${encodeURIComponent("content_type:text/markdown")}&att=1`,
     );
   });
   it("owner opens the documents a person owns, creator the ones they wrote", () => {
     expect(browseRowHref("owner", "alice@example.com")).toBe(
-      `/?q=${encodeURIComponent("owner:alice@example.com")}`,
+      `/?q=${encodeURIComponent("owner:alice@example.com")}&att=1`,
     );
     expect(browseRowHref("creator", "alice@example.com")).toBe(
-      `/?q=${encodeURIComponent("creator:alice@example.com")}`,
+      `/?q=${encodeURIComponent("creator:alice@example.com")}&att=1`,
     );
   });
 });

@@ -19,6 +19,8 @@ import type { ReactElement } from "react";
 import { Marked, type TokenizerThis, type Tokens } from "marked";
 import DOMPurify from "isomorphic-dompurify";
 
+import { renderDiffBlock } from "./markdownDiff";
+
 // GFM strikethrough, strictly double-tilde ("~~struck~~").
 //
 // marked's stock `del` tokenizer (like goldmark's — see the Go twin in
@@ -46,12 +48,18 @@ md.use({
   },
   renderer: {
     code({ text, lang }: Tokens.Code): string | false {
-      if (lang?.trim().split(/\s+/, 1)[0].toLowerCase() !== "mermaid") return false;
-      const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const kind = lang?.trim().split(/\s+/, 1)[0].toLowerCase();
+      if (kind === "diff" || kind === "patch") return renderDiffBlock(text);
+      if (kind !== "mermaid") return false;
+      const escaped = escapeHtml(text);
       return `<div class="mermaid not-prose my-3 overflow-x-auto rounded-md border border-neutral-200 bg-neutral-50" data-arti-zoom data-mermaid-placeholder><pre class="m-0 whitespace-pre-wrap px-3 py-2 font-mono text-[12px] leading-relaxed text-neutral-700">${escaped}</pre></div>\n`;
     },
   },
 });
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 
 export type SplitMarkdown = { frontmatter: string | null; body: string };
 

@@ -8,7 +8,7 @@ import (
 	"github.com/angellist/arti-oss/internal/auth"
 )
 
-const servicePrincipal = "couch@sa.arti.invalid"
+const servicePrincipal = "svc@sa.arti.invalid"
 
 // A service principal cannot log in, so its key is minted by an admin from a
 // browser session; the key is the service scope's only source, and it records
@@ -16,7 +16,7 @@ const servicePrincipal = "couch@sa.arti.invalid"
 func TestAdminMintsAServicePrincipalKey(t *testing.T) {
 	store := &fakeServiceStore{services: map[string]bool{servicePrincipal: true}}
 	r := newRouter(store, 365*24*time.Hour)
-	body := `{"owner_email":"COUCH@sa.arti.invalid","name":"couch-prod"}`
+	body := `{"owner_email":"SVC@sa.arti.invalid","name":"svc-prod"}`
 
 	if w := do(t, r, "alice@example.com", "POST", "/api/admin/service-keys", body); w.Code != http.StatusForbidden {
 		t.Fatalf("non-admin mint: %d, want 403", w.Code)

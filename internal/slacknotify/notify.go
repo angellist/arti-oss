@@ -340,3 +340,15 @@ func (n *Notifier) NotifyOwnerTransfer(ctx context.Context, ev OwnerTransfer) {
 		n.log.Warn("slacknotify: owner-transfer DM failed", "email", ev.Recipient, "err", err)
 	}
 }
+
+// PostToChannel posts text to a channel the bot can write to. It skips the
+// per-recipient gate: the caller's own configuration decides whether to post.
+func (n *Notifier) PostToChannel(ctx context.Context, channel, text string) error {
+	if n == nil {
+		return errors.New("slacknotify: notifier disabled")
+	}
+	return n.client.PostDM(ctx, channel, text)
+}
+
+// Escape escapes Slack mrkdwn control characters in label or body text.
+func Escape(s string) string { return slackEscape(s) }

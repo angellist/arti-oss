@@ -35,6 +35,9 @@ current state with a green (allowed) or grey (off) dot.
   versioning reassigns that field, so a delegated writer could otherwise push a
   content-only version and take over the switch. The DTO carries
   the server's own verdict as `can_manage_comments`, so the UI never re-derives it.
+- **APPs start off.** A new APP document starts with commenting off, since the
+  overlay sits on top of a live interactive page; its owner turns it on from the
+  same ⋮ menu. Every other type starts on.
 - **Off means gone, not hidden.** The viewer mounts no overlay, arti-server stops
   injecting the overlay into served HTML, the list endpoints (REST and MCP) report
   zero threads, and every mutating endpoint returns 403. Existing threads stay in
@@ -85,6 +88,9 @@ it a scoped credential:
   bundle. It no-ops on non-HTML or unauthenticated requests.
 - The token is a **comment-embed** scoped JWT, short-lived (12h) and authorizing
   commenting on exactly that one artifact.
+- An APP page carries this token alongside its app-bridge token, on arti's own
+  `/app/` and file routes only. Embed surfaces (an APP framed inside another
+  product) get no overlay.
 - The injected bundle calls the **embed comment API** — the same handlers, but
   mounted with CORS and Bearer auth instead of the cookie. That middleware verifies
   the token and pins the request to its one artifact, refusing any other id.

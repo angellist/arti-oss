@@ -1367,18 +1367,79 @@ describe("comments overlay dictation", () => {
     dispose();
   });
 
-  it("shows the recording clock, and warns in the last twenty seconds", async () => {
+  it("shows the recording clock in the box's strip, and warns in the last twenty seconds", async () => {
     const d = fakeDictation();
     const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
     openCard("a");
-    const mic = () => card("a").querySelector<HTMLButtonElement>(".ac-mic")!;
-    mic().click();
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    const strip = () => card("a").querySelector<HTMLButtonElement>(".ac-reply > .ac-strip")!;
     d.h!.onSeconds!(42);
-    expect(mic().querySelector(".ac-rectime")!.textContent).toBe("0:42");
-    expect(mic().hasAttribute("data-warn")).toBe(false);
+    expect(strip().querySelector(".ac-rectime")!.textContent).toBe("0:42");
+    expect(strip().hasAttribute("data-warn")).toBe(false);
     d.h!.onSeconds!(MAX_SECONDS - 14);
-    expect(mic().querySelector(".ac-rectime")!.textContent).toBe("4:46 · 14s left");
-    expect(mic().hasAttribute("data-warn")).toBe(true);
+    expect(strip().querySelector(".ac-rectime")!.textContent).toBe("4:46 · 14s left");
+    expect(strip().hasAttribute("data-warn")).toBe(true);
+    dispose();
+  });
+
+  it("keeps the strip in the box from start to transcript, and stops from it", async () => {
+    const d = fakeDictation();
+    d.start.mockImplementation((h: DictationHandlers) => { d.h = h; });
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    const box = card("a").querySelector<HTMLElement>(".ac-reply")!;
+    const strip = () => box.querySelector<HTMLButtonElement>(":scope > .ac-strip");
+    expect(strip()).toBeNull();
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    expect(strip()!.dataset.state).toBe("starting");
+    d.h!.onState("recording");
+    expect(strip()!.dataset.state).toBe("recording");
+    expect(card("a").querySelector<HTMLButtonElement>(".ac-mic")!.dataset.state).toBe("recording");
+    strip()!.click();
+    expect(d.stop).toHaveBeenCalledTimes(1);
+    d.h!.onState("working");
+    expect(strip()!.dataset.state).toBe("working");
+    expect(strip()!.disabled).toBe(true);
+    expect(strip()!.querySelector(".ac-rectime")!.textContent).toBe("Transcribing…");
+    d.h!.onText("ship it");
+    d.h!.onState("idle");
+    expect(strip()).toBeNull();
+    dispose();
+  });
+
+  it("moves the caret to the end when a clip starts", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    const ta = card("a").querySelector<HTMLTextAreaElement>("[data-reply]")!;
+    ta.value = "first line\nsecond line";
+    ta.focus();
+    ta.setSelectionRange(2, 2);
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    expect(document.activeElement).toBe(ta);
+    expect(ta.selectionStart).toBe(ta.value.length);
+    d.h!.onState("working");
+    d.h!.onText("then rebase");
+    d.h!.onState("idle");
+    expect(ta.value).toBe("first line\nsecond line then rebase");
+    dispose();
+  });
+
+  it("marks where the text will land, then tints the words that arrive", async () => {
+    const d = fakeDictation();
+    const dispose = await mount(d, [thread({ type: "text", quote: "First quote" }, "a")]);
+    openCard("a");
+    const ta = card("a").querySelector<HTMLTextAreaElement>("[data-reply]")!;
+    ta.value = "looks good";
+    card("a").querySelector<HTMLButtonElement>(".ac-mic")!.click();
+    const mark = () => card("a").querySelector<HTMLElement>(".ac-reply > .ac-mark");
+    expect(mark()!.dataset.state).toBe("recording");
+    d.h!.onState("working");
+    expect(mark()!.dataset.state).toBe("working");
+    d.h!.onText("ship it");
+    d.h!.onState("idle");
+    expect(mark()).toBeNull();
+    expect(card("a").querySelector(".ac-reply > .ac-landed mark")!.textContent).toBe("ship it");
     dispose();
   });
 
@@ -1454,6 +1515,7 @@ describe("comments overlay dictation", () => {
     expect(draft.querySelector(".ac-q")!.textContent).toContain("First quote");
     expect(d.start).toHaveBeenCalledTimes(1);
     expect(draft.querySelector<HTMLButtonElement>(".ac-mic")!.dataset.state).toBe("recording");
+    expect(draft.querySelector<HTMLButtonElement>(".ac-reply > .ac-strip")!.dataset.state).toBe("recording");
 
     d.h!.onText("needs a source");
     d.h!.onState("idle");
@@ -1498,6 +1560,39 @@ describe("comments overlay dictation", () => {
     const dispose = await mount(undefined as unknown as Dictation, [thread({ type: "text", quote: "First quote" }, "a")]);
     openCard("a");
     expect(document.querySelector(".ac-mic")).toBeNull();
+    dispose();
+  });
+});
+
+describe("comments overlay folded diff rows", () => {
+  afterEach(() => {
+    document.documentElement.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  it("opens a collapsed details that holds a seeded highlight", async () => {
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    const doc = document.createElement("article");
+    doc.dataset.artiDoc = "";
+    doc.innerHTML = "<details class=\"arti-diff-fold\"><summary>⋯ 4 unchanged lines</summary><div>Quoted text</div></details>";
+    document.body.append(doc);
+    const api: CommentsApi = {
+      list: async () => ({ threads: [thread({ type: "text", quote: "Quoted text" }, "text-thread")] }),
+      create: vi.fn(),
+      reply: vi.fn(),
+      resolve: vi.fn(),
+      reopen: vi.fn(),
+      del: vi.fn(),
+      edit: vi.fn(),
+    };
+    const dispose = mountCommentsOverlay({
+      container: doc,
+      artifactId: "artifact",
+      me: { email: "test@example.com", name: "Test", is_admin: false },
+      api,
+    });
+    await vi.waitFor(() => expect(doc.querySelector("mark.ac-hl")).not.toBeNull());
+    expect(doc.querySelector("details")!.open).toBe(true);
     dispose();
   });
 });

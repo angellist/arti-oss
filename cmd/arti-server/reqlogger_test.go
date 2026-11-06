@@ -21,7 +21,7 @@ import (
 func TestReqLoggerSkipsHealthz(t *testing.T) {
 	var buf bytes.Buffer
 	l := slog.New(slog.NewTextHandler(&buf, nil))
-	h := reqLogger(l)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := reqLogger(l, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -54,7 +54,7 @@ func TestReqLoggerSkipsHealthz(t *testing.T) {
 func TestReqLoggerRecordsClientDisconnectAs499(t *testing.T) {
 	var buf bytes.Buffer
 	l := slog.New(slog.NewTextHandler(&buf, nil))
-	h := reqLogger(l)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := reqLogger(l, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 
@@ -73,7 +73,7 @@ func TestReqLoggerRecordsClientDisconnectAs499(t *testing.T) {
 func TestReqLoggerKeeps500WhenClientIsStillConnected(t *testing.T) {
 	var buf bytes.Buffer
 	l := slog.New(slog.NewTextHandler(&buf, nil))
-	h := reqLogger(l)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := reqLogger(l, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 
@@ -90,7 +90,7 @@ func TestReqLoggerKeeps500WhenClientIsStillConnected(t *testing.T) {
 func TestReqLoggerKeepsSuccessStatusOnClientDisconnect(t *testing.T) {
 	var buf bytes.Buffer
 	l := slog.New(slog.NewTextHandler(&buf, nil))
-	h := reqLogger(l)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := reqLogger(l, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -115,7 +115,7 @@ func TestReqLoggerKeeps500OverRealConnection(t *testing.T) {
 	var buf bytes.Buffer
 	l := slog.New(slog.NewTextHandler(&syncWriter{mu: &mu, w: &buf}, nil))
 
-	srv := httptest.NewServer(reqLogger(l)(http.HandlerFunc(
+	srv := httptest.NewServer(reqLogger(l, nil)(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "boom", http.StatusInternalServerError)
 		})))
@@ -145,7 +145,7 @@ func TestReqLoggerRecords499OverRealConnection(t *testing.T) {
 	l := slog.New(slog.NewTextHandler(&syncWriter{mu: &mu, w: &buf}, nil))
 
 	gone := make(chan struct{})
-	srv := httptest.NewServer(reqLogger(l)(http.HandlerFunc(
+	srv := httptest.NewServer(reqLogger(l, nil)(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			<-gone               // wait until the client has hung up
 			<-r.Context().Done() // ...and until the server has noticed

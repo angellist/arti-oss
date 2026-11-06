@@ -33,7 +33,7 @@ func TestIngressCapturesIdPGroups(t *testing.T) {
 	cap := &fakeCapturer{}
 	signer := NewJWTSigner([]byte("testkey"))
 	handler := IngressLoginHandler(nil, signer, NewInMemPairStore(), newFakeStore(),
-		7*24*time.Hour, false, cap)
+		7*24*time.Hour, false, cap, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/google/login", nil)
 	req.Header.Set(IngressEmailHeader, "dev@example.com")
@@ -61,7 +61,7 @@ func TestIngressCaptureErrorDoesNotBlockLogin(t *testing.T) {
 	cap := &fakeCapturer{err: errors.New("db down")}
 	signer := NewJWTSigner([]byte("testkey"))
 	handler := IngressLoginHandler(nil, signer, NewInMemPairStore(), newFakeStore(),
-		7*24*time.Hour, false, cap)
+		7*24*time.Hour, false, cap, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/google/login", nil)
 	req.Header.Set(IngressEmailHeader, "dev@example.com")

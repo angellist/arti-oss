@@ -131,7 +131,7 @@ func TestOrgSharedReadSeesOrgWideDocsOnly(t *testing.T) {
 }
 
 // The doc's write list follows its read list, so a read grant that leaked into
-// the write check would let couch-sa rewrite every org-wide doc.
+// the write check would let the service principal rewrite every org-wide doc.
 func TestOrgSharedReadGrantsNoWrite(t *testing.T) {
 	r := newOrgReadRig(t)
 	ctx := context.Background()

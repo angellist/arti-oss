@@ -3,7 +3,7 @@
 -- "ADMIN holds every permission" invariant stays true now that MANAGE_SKILLS
 -- exists (rbac.AllPermissions). MANAGE_SKILLS gates writes to kind:skill
 -- artifacts and exempts holders from the app:couch List/Search hide; it is
--- granted to app service identities (e.g. couch's service@) via a role
+-- granted to app service identities (e.g. an app's service@) via a role
 -- assignment done out-of-band. Idempotent.
 
 -- +goose Up

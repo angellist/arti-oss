@@ -14,7 +14,7 @@ import (
 const (
 	CookieName = "arti_session"
 
-	// ACE-style header for service-to-service callers (e.g. couch FE proxy).
+	// ACE-style header for service-to-service callers (e.g. a frontend proxy).
 	APISecretHeader = "X-Arti-Service-Secret"
 
 	// oauth2-proxy injects the upstream OIDC token here when running
@@ -73,7 +73,44 @@ func SetAllowedEmails(entries []string) {
 	allowedEmails = cleaned
 }
 
-var deactivationCheck atomic.Pointer[func(email string) bool]
+var (
+	deactivationCheck atomic.Pointer[func(email string) bool]
+	accountCheck      atomic.Pointer[func(email string) (has, added bool)]
+)
+
+// acceptedDomains may request an account (AUTH_ACCEPTED_DOMAINS); they are
+// not admitted until one exists.
+var (
+	acceptedDomainsMu sync.RWMutex
+	acceptedDomains   []string
+)
+
+// SetAcceptedDomains replaces the request-access domain list. Entries are
+// normalized like the allowlist.
+func SetAcceptedDomains(entries []string) {
+	cleaned := NormalizeAllowlist(entries)
+	acceptedDomainsMu.Lock()
+	defer acceptedDomainsMu.Unlock()
+	acceptedDomains = cleaned
+}
+
+// AcceptedDomains returns a copy of the request-access domain list.
+func AcceptedDomains() []string {
+	acceptedDomainsMu.RLock()
+	defer acceptedDomainsMu.RUnlock()
+	return append([]string(nil), acceptedDomains...)
+}
+
+// SetAccountCheck installs the lookup that reports whether an email holds an
+// account, and whether an admin added it (vs. a login recording it). Any
+// account admits its holder outside the allowlist. nil removes it.
+func SetAccountCheck(fn func(email string) (has, added bool)) {
+	if fn == nil {
+		accountCheck.Store(nil)
+		return
+	}
+	accountCheck.Store(&fn)
+}
 
 // SetDeactivationCheck installs the predicate IsAllowed uses to refuse a
 // deactivated email. nil removes it.
@@ -147,7 +184,8 @@ func WithTestClaims(ctx context.Context, c Claims) context.Context {
 // (case-insensitive) — either as a full address or by its domain. Full
 // addresses matter for anyone hosting against a consumer IdP, where the
 // only expressible domain (say gmail.com) would otherwise admit every
-// account at that provider. A deactivated email is refused even when it
+// account at that provider. An email holding an account (SetAccountCheck) is
+// admitted outside the allowlist. A deactivated email is refused even when it
 // matches. It does NOT check email_verified — that's the OIDC issuer's
 // responsibility.
 func IsAllowed(email string) bool {
@@ -166,13 +204,69 @@ func IsAllowed(email string) bool {
 	if strings.HasSuffix(strings.ToLower(email[at+1:]), ".invalid") {
 		return false
 	}
-	if !matchesAllowlist(email, email[at+1:]) {
+	if !matchesAllowlist(email, email[at+1:]) && !hasAccount(email) {
 		return false
 	}
-	if fn := deactivationCheck.Load(); fn != nil && (*fn)(email) {
+	return !isDeactivated(email)
+}
+
+func isDeactivated(email string) bool {
+	fn := deactivationCheck.Load()
+	return fn != nil && (*fn)(email)
+}
+
+func account(email string) (has, added bool) {
+	if fn := accountCheck.Load(); fn != nil {
+		return (*fn)(email)
+	}
+	return false, false
+}
+
+func hasAccount(email string) bool {
+	has, _ := account(email)
+	return has
+}
+
+// addedOutsideAllowlist reports whether email is outside the allowlist and an
+// admin added it. Such a person was let in deliberately, so the required-groups
+// gate (meant for the auto-admitted domains) does not apply to them. A login
+// row is not deliberate and keeps the group gate.
+func addedOutsideAllowlist(email string) bool {
+	email = strings.TrimSpace(email)
+	at := strings.LastIndex(email, "@")
+	if at < 0 || matchesAllowlist(email, email[at+1:]) {
 		return false
 	}
-	return true
+	has, added := account(email)
+	return has && added
+}
+
+// passesGroupGate is the AUTH_REQUIRED_GROUPS check every front door shares.
+func passesGroupGate(email string, have, required []string) bool {
+	return len(required) == 0 || addedOutsideAllowlist(email) || anyMatch(have, required)
+}
+
+// CanRequestAccess reports whether email is refused today but may ask for an
+// account: its domain is accepted, it is not a service address, and it has
+// not been deactivated.
+func CanRequestAccess(email string) bool {
+	email = strings.TrimSpace(email)
+	at := strings.LastIndex(email, "@")
+	if at < 0 || IsAllowed(email) || isDeactivated(email) {
+		return false
+	}
+	dom := email[at+1:]
+	if strings.HasSuffix(strings.ToLower(dom), ".invalid") {
+		return false
+	}
+	acceptedDomainsMu.RLock()
+	defer acceptedDomainsMu.RUnlock()
+	for _, d := range acceptedDomains {
+		if strings.EqualFold(dom, d) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesAllowlist(email, dom string) bool {

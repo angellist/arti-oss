@@ -95,7 +95,7 @@ const (
 
 func mintSurfaces() map[string]Surface {
 	return map[string]Surface{
-		"panel": {Secret: mintSurfSc, Origin: OriginList{"https://app.frontapp.com", "https://couch.internal"},
+		"panel": {Secret: mintSurfSc, Origin: OriginList{"https://app.frontapp.com", "https://host.internal"},
 			Identity: "user", SlugAllow: []string{"lp-*"}},
 		"svc": {Secret: "S", Origin: OriginList{"https://dash.x"}, Email: "svc@example.com", SlugAllow: []string{"*"}},
 	}

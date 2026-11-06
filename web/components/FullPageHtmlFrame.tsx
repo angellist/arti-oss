@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { fileParamSearch, resolvePackageEntry } from "@/lib/viewer";
 import { useHtmlFitZoom } from "@/lib/useViewport";
 import { useExternalLinkMessage } from "@/lib/useExternalLinkMessage";
@@ -20,6 +20,9 @@ import { useDictationBridge } from "@/lib/useDictationBridge";
 // iframe — the iframe already navigated itself — so there's no reload/flash.
 //
 // Sandbox rationale lives in FullPageView (the parent) — kept identical here.
+const noSubscribe = () => () => {};
+const noHash = () => null;
+
 export default function FullPageHtmlFrame({
   src,
   srcDoc,
@@ -49,6 +52,16 @@ export default function FullPageHtmlFrame({
   useExternalLinkMessage(iframeRef);
   useAppConsentMessage(iframeRef);
   useDictationBridge(iframeRef);
+
+  // The page's #fragment (a deck slide) is for the framed document, which cannot
+  // read our URL. Server HTML carries no src, so the one load includes it; it is
+  // read once, so it never sends in-content navigation back to the entry file.
+  const firstHash = useRef<string | null>(null);
+  const hash = useSyncExternalStore(
+    noSubscribe,
+    () => (firstHash.current ??= window.location.hash),
+    noHash,
+  );
 
   // Fit-to-width on a narrow viewport (see htmlFitZoom). 1 on the server, so
   // the SSR markup is the desktop one and only the client ever scales down.
@@ -103,7 +116,8 @@ export default function FullPageHtmlFrame({
       <iframe
         ref={iframeRef}
         sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-downloads"
-        {...(src ? { src } : { srcDoc })}
+        data-src={src}
+        {...(src ? (hash === null ? {} : { src: src + hash }) : { srcDoc })}
         title={title}
         className="block h-full w-full border-0 bg-white"
         // The reader's text scale and the fit-to-width factor are one zoom:

@@ -29,9 +29,9 @@ func TestServicePrincipalKeyPassesWithoutTheAllowlist(t *testing.T) {
 	auth.SetAllowedEmails([]string{"example.com"})
 
 	cfg := auth.NewConfig(nil, nil, "", nil)
-	cfg.ServicePrincipal = func(_ context.Context, email string) bool { return email == "couch@sa.arti.invalid" }
+	cfg.ServicePrincipal = func(_ context.Context, email string) bool { return email == "svc@sa.arti.invalid" }
 
-	if got := apiKeyStatus(t, cfg, "couch@sa.arti.invalid"); got != http.StatusOK {
+	if got := apiKeyStatus(t, cfg, "svc@sa.arti.invalid"); got != http.StatusOK {
 		t.Fatalf("active service principal key: %d, want 200", got)
 	}
 	if got := apiKeyStatus(t, cfg, "other@sa.arti.invalid"); got != http.StatusUnauthorized {
@@ -47,8 +47,8 @@ func TestServicePrincipalKeyPassesWithoutTheAllowlist(t *testing.T) {
 func TestIsAllowedNeverAdmitsInvalidAddresses(t *testing.T) {
 	prev := auth.AllowedEmails()
 	t.Cleanup(func() { auth.SetAllowedEmails(prev) })
-	auth.SetAllowedEmails([]string{"sa.arti.invalid", "couch@sa.arti.invalid"})
-	if auth.IsAllowed("couch@sa.arti.invalid") {
+	auth.SetAllowedEmails([]string{"sa.arti.invalid", "svc@sa.arti.invalid"})
+	if auth.IsAllowed("svc@sa.arti.invalid") {
 		t.Fatal("IsAllowed admitted a .invalid address")
 	}
 }

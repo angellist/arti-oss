@@ -57,10 +57,16 @@ type brandAction struct {
 	Method string
 	URL    string
 	Hidden []brandField
+	Input  *brandInput // one required text field above the button
 	Submit string
 }
 
 type brandField struct{ Name, Value string }
+
+type brandInput struct {
+	Name, Label string
+	MaxLen      int
+}
 
 // Initials is the 1–2 letter avatar for the identity chip: "ada.lovelace@…" → AL.
 func (p brandPage) Initials() string {
@@ -143,6 +149,10 @@ h1{font-size:20px;font-weight:600;letter-spacing:-.02em;margin:0 0 6px}
  font-size:14.5px;font-weight:600;padding:12px;cursor:pointer;box-shadow:0 1px 2px rgba(6,142,136,.35)}
 .btn:hover{background:var(--teal-700)}
 .btn:focus-visible{outline:2px solid var(--teal-700);outline-offset:2px}
+.field{display:block;text-align:left;font-size:12.5px;color:var(--n700);margin-bottom:16px}
+.field input{display:block;width:100%;margin-top:6px;border:1px solid var(--n200);border-radius:8px;padding:10px 12px;
+ font-family:inherit;font-size:14px;color:var(--ink)}
+.field input:focus-visible{outline:2px solid var(--teal-700);outline-offset:1px}
 .cancel{display:inline-block;margin-top:12px;font-size:12.5px;color:var(--n500);text-decoration:none}
 .cancel:hover{color:var(--n700);text-decoration:underline}
 .foot{margin-top:24px;padding-top:16px;border-top:1px solid var(--n100);font-size:11.5px;color:var(--n400);line-height:1.5}
@@ -158,6 +168,7 @@ h1{font-size:20px;font-weight:600;letter-spacing:-.02em;margin:0 0 6px}
 {{if .Note}}<p class="hint">{{.Note}}</p>{{end}}
 {{with .Action}}<form method="{{.Method}}" action="{{.URL}}">
 {{range .Hidden}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+{{end}}{{with .Input}}<label class="field">{{.Label}}<input name="{{.Name}}" required maxlength="{{.MaxLen}}" autocomplete="name" autofocus></label>
 {{end}}<button class="btn" type="submit">{{.Submit}}</button></form>{{end}}
 {{if .Cancel}}<a class="cancel" href="{{.Cancel}}">Cancel</a>{{end}}
 {{if .Footer}}<p class="foot">{{.Footer}}</p>{{end}}

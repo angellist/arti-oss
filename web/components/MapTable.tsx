@@ -1,15 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { browseMap, getMapEntry, type MapBrowseResponse, type MapSortKey } from "@/lib/arti";
+import { browseMap, getMapEntry, putMapEntry, type MapBrowseResponse, type MapSortKey } from "@/lib/arti";
 
 const PAGE_SIZE = 50;
 
 const COLUMNS: { key: MapSortKey; label: string; className: string }[] = [
-  { key: "key", label: "Key", className: "w-[26%] py-2 pl-6 pr-4 font-bold" },
-  { key: "size", label: "Value", className: "py-2 pr-4 font-bold" },
-  { key: "rev", label: "Rev", className: "w-14 py-2 pr-4 text-right font-bold" },
-  { key: "updated", label: "Updated", className: "w-40 py-2 pr-6 font-bold" },
+  { key: "key", label: "Key", className: "w-[26%] py-1.5 pl-6 pr-4 font-bold" },
+  { key: "size", label: "Value", className: "py-1.5 pr-4 font-bold" },
+  { key: "rev", label: "Rev", className: "w-12 py-1.5 pr-4 text-right font-bold" },
+  { key: "updated", label: "Updated", className: "w-36 py-1.5 pr-6 font-bold" },
 ];
 
 function humanBytes(n: number): string {
@@ -21,7 +21,25 @@ function humanBytes(n: number): string {
 // MapTable shows a MAP's LIVE HEAD, not the artifact body. /s/<slug> serves
 // the latest frozen snapshot; head is what a reader means by "what is in this
 // map", so the header says which one this is rather than leaving it implicit.
-export default function MapTable({ slug, snapshotBytes }: { slug: string; snapshotBytes: number | null }) {
+type Detail = {
+  key: string;
+  status: "loading" | "ready" | "error";
+  text: string;
+  rev: number;
+  draft: string;
+  saving: boolean;
+  saveError: string | null;
+};
+
+export default function MapTable({
+  slug,
+  snapshotBytes,
+  canWrite = false,
+}: {
+  slug: string;
+  snapshotBytes: number | null;
+  canWrite?: boolean;
+}) {
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   const [sort, setSort] = useState<MapSortKey>("key");
@@ -29,7 +47,8 @@ export default function MapTable({ slug, snapshotBytes }: { slug: string; snapsh
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<MapBrowseResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [detail, setDetail] = useState<{ key: string; text: string } | null>(null);
+  const [detail, setDetail] = useState<Detail | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   // Debounce the search so a typed word is one request, not one per keystroke.
   useEffect(() => {
@@ -69,7 +88,7 @@ export default function MapTable({ slug, snapshotBytes }: { slug: string; snapsh
   // "Loading" is the gap between the page the reader asked for and the page
   // that came back, not a flag an effect sets — setting one synchronously in
   // the effect body is what react-hooks/set-state-in-effect forbids.
-  const reqKey = `${slug}\u0000${debouncedQ}\u0000${sort}\u0000${dir}\u0000${offset}`;
+  const reqKey = `${slug}\u0000${debouncedQ}\u0000${sort}\u0000${dir}\u0000${offset}\u0000${reloadTick}`;
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const loading = loadedKey !== reqKey;
 
@@ -108,27 +127,92 @@ export default function MapTable({ slug, snapshotBytes }: { slug: string; snapsh
   // quick clicks are two in-flight reads, and the slower one must not land on
   // top of the row the reader is actually looking at.
   const detailReq = useRef(0);
-  const showValue = async (key: string) => {
+  const opener = useRef<HTMLElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const showValue = async (key: string, from: HTMLElement) => {
     const req = ++detailReq.current;
-    setDetail({ key, text: "loading…" });
+    opener.current = from;
+    setDetail({ key, status: "loading", text: "loading…", rev: 0, draft: "", saving: false, saveError: null });
     try {
       const e = await getMapEntry(slug, key);
-      if (detailReq.current === req) setDetail({ key, text: JSON.stringify(e.value, null, 2) });
+      const text = JSON.stringify(e.value, null, 2);
+      if (detailReq.current === req) {
+        setDetail({ key, status: "ready", text, rev: e.rev, draft: text, saving: false, saveError: null });
+      }
     } catch (err) {
-      if (detailReq.current === req) setDetail({ key, text: `could not load: ${(err as Error).message}` });
+      if (detailReq.current === req) {
+        setDetail({ key, status: "error", text: `could not load: ${(err as Error).message}`, rev: 0, draft: "", saving: false, saveError: null });
+      }
+    }
+  };
+
+  const dirty = !!detail && detail.status === "ready" && detail.draft !== detail.text;
+  const draftError = (() => {
+    if (!dirty || !detail) return null;
+    try {
+      JSON.parse(detail.draft);
+      return null;
+    } catch (e) {
+      return `Not valid JSON: ${(e as Error).message}`;
+    }
+  })();
+
+  const saving = !!detail?.saving;
+  const closeDetail = useCallback(() => {
+    if (saving) return;
+    if (dirty && !window.confirm("Discard your unsaved edit?")) return;
+    detailReq.current++;
+    setDetail(null);
+    opener.current?.focus();
+  }, [dirty, saving]);
+
+  const save = async () => {
+    if (!detail || !dirty || draftError || detail.saving) return;
+    const { key, rev, draft } = detail;
+    setDetail({ ...detail, saving: true, saveError: null });
+    try {
+      await putMapEntry(slug, key, JSON.parse(draft), rev);
+      setDetail(null);
+      setReloadTick((t) => t + 1);
+      opener.current?.focus();
+    } catch (e) {
+      setDetail((d) => (d && d.key === key ? { ...d, saving: false, saveError: (e as Error).message } : d));
     }
   };
 
   // Escape closes the value dialog — a modal that only a mouse can dismiss is
   // a trap for anyone on a keyboard.
+  const open = !!detail;
   useEffect(() => {
-    if (!detail) return;
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setDetail(null);
+      if (e.key === "Escape") closeDetail();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [detail]);
+  }, [open, closeDetail]);
+
+  useEffect(() => {
+    const d = dialogRef.current;
+    if (open) (d?.querySelector<HTMLElement>("textarea") ?? d?.querySelector<HTMLElement>("button"))?.focus();
+  }, [open, detail?.status]);
+
+  const trapTab = (e: React.KeyboardEvent) => {
+    if (e.key !== "Tab" || !dialogRef.current) return;
+    const items = Array.from(
+      dialogRef.current.querySelectorAll<HTMLElement>("button:not(:disabled), textarea:not(:disabled)"),
+    );
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
 
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
@@ -174,8 +258,8 @@ export default function MapTable({ slug, snapshotBytes }: { slug: string; snapsh
         <div className="px-6 py-12 text-center text-[12px] text-neutral-400">{error}</div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full table-fixed bg-white text-[13px] leading-snug">
-            <thead className="border-b border-neutral-200 bg-neutral-50 text-left text-[12px] text-neutral-700">
+          <table className="w-full table-fixed bg-white text-[11px] leading-snug">
+            <thead className="border-b border-neutral-200 bg-neutral-50 text-left text-[11px] text-neutral-700">
               <tr>
                 {COLUMNS.map((c) => (
                   <th key={c.key} className={c.className}>
@@ -189,33 +273,33 @@ export default function MapTable({ slug, snapshotBytes }: { slug: string; snapsh
                     </button>
                   </th>
                 ))}
-                <th className="w-40 py-2 pr-6 font-bold">By</th>
+                <th className="w-36 py-1.5 pr-6 font-bold">By</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.key} className="border-b border-neutral-100 align-top transition hover:bg-neutral-50/70">
-                  <td className="max-w-0 truncate py-1.5 pl-6 pr-4 font-mono text-[12px] text-neutral-900" title={r.key}>{r.key}</td>
-                  <td className="py-1.5 pr-4 font-mono text-[12px] text-neutral-600">
+                  <td className="max-w-0 truncate py-1 pl-6 pr-4 font-mono text-[11px] text-neutral-900" title={r.key}>{r.key}</td>
+                  <td className="py-1 pr-4 font-mono text-[11px] text-neutral-600">
                     {/* Clamped rather than clipped to one line: a JSON object
                         cut at the column edge shows only its first field. Three
                         lines keep the table scannable; the whole value is one
                         click away. */}
                     <button
                       type="button"
-                      onClick={() => showValue(r.key)}
-                      title="Show formatted JSON"
+                      onClick={(e) => showValue(r.key, e.currentTarget)}
+                      title={canWrite ? "Show or edit the value" : "Show formatted JSON"}
                       className="line-clamp-3 w-full cursor-pointer break-all text-left hover:text-neutral-900"
                     >
                       {r.value}
                     </button>
                     {r.truncated ? (
-                      <span className="text-[11px] text-neutral-400">{humanBytes(r.size_bytes)} · show all</span>
+                      <span className="text-[10px] text-neutral-400">{humanBytes(r.size_bytes)} · show all</span>
                     ) : null}
                   </td>
-                  <td className="py-1.5 pr-4 text-right tabular-nums text-neutral-500">{r.rev}</td>
-                  <td className="py-1.5 pr-6 text-[12px] text-neutral-500">{r.updated_at.replace("T", " ").replace(".000Z", "")}</td>
-                  <td className="max-w-0 truncate py-1.5 pr-6 text-[12px] text-neutral-500" title={r.updated_by}>{r.updated_by}</td>
+                  <td className="py-1 pr-4 text-right tabular-nums text-neutral-500">{r.rev}</td>
+                  <td className="py-1 pr-6 text-neutral-500">{r.updated_at.replace("T", " ").replace(".000Z", "")}</td>
+                  <td className="max-w-0 truncate py-1 pr-6 text-neutral-500" title={r.updated_by}>{r.updated_by}</td>
                 </tr>
               ))}
               {rows.length === 0 && !loading ? (
@@ -262,26 +346,69 @@ export default function MapTable({ slug, snapshotBytes }: { slug: string; snapsh
           role="dialog"
           aria-modal="true"
           aria-label={`Value of ${detail.key}`}
-          onClick={() => setDetail(null)}
+          onClick={closeDetail}
           className="fixed inset-0 z-50 flex items-center justify-center bg-neutral-900/40 p-6"
         >
           <div
+            ref={dialogRef}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={trapTab}
             className="flex max-h-[80vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-neutral-200 bg-white shadow-xl"
           >
             <div className="flex items-center justify-between gap-4 border-b border-neutral-200 px-4 py-2">
               <span className="truncate font-mono text-[12px] text-neutral-900">{detail.key}</span>
-              <button
-                type="button"
-                onClick={() => setDetail(null)}
-                className="shrink-0 text-[12px] text-neutral-500 hover:text-neutral-900"
-              >
-                close
-              </button>
+              <span className="flex shrink-0 items-center gap-3 text-[12px]">
+                {canWrite && detail.status === "ready" ? (
+                  <button
+                    type="button"
+                    onClick={save}
+                    disabled={!dirty || !!draftError || detail.saving}
+                    className="rounded-md bg-neutral-900 px-2.5 py-1 font-medium text-white hover:bg-neutral-700 disabled:bg-neutral-300"
+                  >
+                    {detail.saving ? "saving…" : "save in place"}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={closeDetail}
+                  disabled={detail.saving}
+                  className="text-neutral-500 hover:text-neutral-900 disabled:text-neutral-300"
+                >
+                  close
+                </button>
+              </span>
             </div>
-            <pre className="overflow-auto whitespace-pre-wrap break-all p-4 font-mono text-[12px] text-neutral-800">
-              {detail.text}
-            </pre>
+            {canWrite && detail.status === "ready" ? (
+              <>
+                <div role="note" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-[12px] text-amber-800">
+                  Saving overwrites this entry in the live head. It does not create a new version, and the old value
+                  is kept only if an earlier snapshot holds it.
+                </div>
+                <textarea
+                  value={detail.draft}
+                  onChange={(e) => setDetail({ ...detail, draft: e.target.value, saveError: null })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      save();
+                    }
+                  }}
+                  aria-label={`Edit value of ${detail.key}`}
+                  spellCheck={false}
+                  disabled={detail.saving}
+                  className="min-h-[40vh] flex-1 resize-none p-4 font-mono text-[12px] text-neutral-800 focus:outline-none"
+                />
+                {draftError || detail.saveError ? (
+                  <div role="alert" className="border-t border-neutral-200 px-4 py-2 text-[12px] text-red-700">
+                    {detail.saveError ?? draftError}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <pre className="overflow-auto whitespace-pre-wrap break-all p-4 font-mono text-[12px] text-neutral-800">
+                {detail.text}
+              </pre>
+            )}
           </div>
         </div>
       ) : null}

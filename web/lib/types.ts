@@ -118,6 +118,8 @@ export interface AggregatesResponse {
   scopes: ScopeCount[];
   labels: LabelCount[];
   content_types: ContentTypeCount[];
+  // Top labels on artifacts the signed-in user created. Absent from older servers.
+  my_labels?: LabelCount[];
 }
 
 // BrowseFacet is one of the Browse page's four facets — the value each maps
@@ -234,6 +236,8 @@ export interface Me {
   share_links_enabled?: boolean;
   // Whether POST /api/dictate has a provider key (OPENAI_API_KEY).
   dictation_enabled?: boolean;
+  // Whether in-place text editing of HTML artifacts is on (ARTI_HTML_EDIT_ENABLED).
+  html_edit_enabled?: boolean;
 }
 
 // ShareLink is one external timed link as its owner sees it. There is

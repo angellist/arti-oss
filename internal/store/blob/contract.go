@@ -28,7 +28,7 @@ func RunContractSuite(t *testing.T, s Store) {
 func contractPutGet(t *testing.T, s Store) {
 	ctx := t.Context()
 	key := "ct/putget/" + uniq() + ".txt"
-	body := []byte("hello couch")
+	body := []byte("hello blob")
 	res, err := s.Put(ctx, key, bytes.NewReader(body), PutOpts{ContentType: "text/plain"})
 	if err != nil {
 		t.Fatalf("Put: %v", err)

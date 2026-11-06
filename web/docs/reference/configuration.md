@@ -58,6 +58,7 @@ tokens. See the [auth architecture](../architecture/auth.md).
 | `AUTH_REQUIRED_GROUPS` | `""` | Comma-separated groups a user must belong to. Empty → no group requirement. |
 | `ARTI_IDP_GROUPS_MAX_AGE` | `336h` | How long a login-captured IdP group snapshot stays valid for `idp:<name>` access grants. Each interactive login (oidc or proxy) refreshes the snapshot; grants stop resolving once it ages past this bound (fail closed), so **`idp:` grants require an interactive login at least this often**. `0` disables `idp:` resolution entirely. |
 | `AUTH_ALLOWED_EMAILS` | `""` | Comma-separated email allowlist; applied on every auth path (OIDC, proxy, test-mode, device, OBO re-check). Each entry is either a **bare domain** (`example.com`, admitting everyone there) or a **full address** (`you@gmail.com`, admitting exactly that person) — mix freely. **Empty admits nobody** (fail closed; the server still starts, but no interactive login can succeed — `doctor` says so). Against a consumer IdP, always list addresses: a bare `gmail.com` admits every Google account on the internet. **Renamed from `AUTH_ALLOWED_DOMAINS`** when the list stopped being domain-only; the old name is refused at startup with a pointer to this one, rather than being ignored into an empty (admit-nobody) allowlist. |
+| `AUTH_ACCEPTED_DOMAINS` | `""` | Comma-separated domains whose people may **request** an account at login instead of being refused (proxy auth mode only). A request posts to `ACCESS_REQUEST_SLACK_CHANNEL` and waits on Settings → Users, where an admin approves or declines it. Approving adds the person to Users; from then on that row admits them like an allowlist entry and they skip `AUTH_REQUIRED_GROUPS`. Any admin-added Users row works the same way. A login-recorded row also admits its holder but keeps the group gate; backfilled rows, and rows only a deactivation created, admit nobody. |
 | `ARTI_ADMIN_EMAILS` | `""` | Comma-separated; the lockout-proof `ADMIN` floor (re-asserted on boot). Gates hard-delete and cross-creator archive. Empty → no administrators until configured. |
 | `ARTI_SERVICE_SECRET` | `""` | Optional service-to-service shared secret (sent as `X-Arti-Service-Secret`). Empty → s2s auth off. |
 | `ARTI_SERVICE_EMAIL` | `service@arti.invalid` | The identity attributed to callers that authenticate with `ARTI_SERVICE_SECRET`. |
@@ -106,6 +107,17 @@ Real S3 in prod, RustFS in dev. An empty `S3_ENDPOINT` targets AWS.
 | `S3_USE_SSL` | `true` | Use TLS to reach the endpoint. Set `false` only for a local plaintext store such as dev RustFS. |
 | `AWS_ACCESS_KEY_ID` | `""` | Access key (RustFS: `admin` in dev). Empty → the AWS SDK's ambient credential chain (instance or pod role, shared credentials file). |
 | `AWS_SECRET_ACCESS_KEY` | `""` | Secret key. |
+
+## Access audit {#audit}
+
+Every request except the `/healthz` probe writes one `audit` log line: the caller, credential, surface (web, API key, CLI, MCP, app, embed, share link), the documents it addressed or was checked against with an allowed/denied decision per document, any MCP tool calls, and the HTTP outcome. Share and file tokens are redacted from the path. With a bucket set, the same events are also written to S3 as gzipped JSON lines under `events/dt=YYYY-MM-DD/hour=HH/`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ARTI_AUDIT_BUCKET` | — | S3 bucket for the audit archive. Unset → events go to the log only. |
+| `ARTI_AUDIT_REGION` | `S3_REGION` | Region of the audit bucket. |
+| `ARTI_AUDIT_ENDPOINT` | `S3_ENDPOINT` | S3 endpoint for the audit bucket. Always uses TLS and the AWS credential chain (environment, shared credentials file, then the pod role). |
+| `ARTI_AUDIT_FLUSH_INTERVAL` | `1m` | How often buffered events are uploaded. A batch also uploads at 5,000 events, and pending events flush on shutdown. |
 
 ## Search (OpenSearch)
 
@@ -193,6 +205,7 @@ shared secrets. Empty disables the `/embed/*` routes. See
 | `ARTI_SHARE_OPEN_RPM` | `120` | Per-IP rate limit (requests/min) on opening share links. `0` disables. |
 | `ARTI_SHARE_MINT_RPM` | `30` | Per-IP rate limit (requests/min) on the share-link mint routes. `0` disables. |
 | `ARTI_MAP_ARTIFACTS` | `false` | Turn on the MAP artifact type (a keyed key/value store per slug). Off → the map routes refuse; stored entries are kept. |
+| `ARTI_HTML_EDIT_ENABLED` | `false` | Turn on in-place text editing of HTML artifacts in the viewer (`?edit=1` and `POST /api/artifacts/{id}/html-text-edits`). Off → the edit route 404s and `?edit=1` serves the normal page. |
 | `ARTI_COMMENTS_GLOBAL_RPM` | `30` | Comment writes per minute for one caller, across all artifacts. Keyed by principal, not IP. `0` disables. |
 | `ARTI_COMMENTS_ARTIFACT_RPM` | `10` | Comment writes per minute for one caller on one artifact. `0` disables. |
 
@@ -201,6 +214,8 @@ shared secrets. Empty disables the `/embed/*` routes. See
 | Variable | Default | Meaning |
 |---|---|---|
 | `ARTI_SLACK_BOT_TOKEN` | `""` | Bot user OAuth token (`xoxb-…`) for the "Arti" Slack app; empty → no DMs at all. Requires bot scopes `users:read.email`, `chat:write`, `im:write`. The token makes notifications **possible**; each person then chooses what they receive in Settings → Notifications (comment mentions default on, credential notifications default off), under one admin switch that can stop everything. |
+| `ACCESS_REQUEST_SLACK_CHANNEL` | `""` | Channel ID that new access requests post to; empty → requests are recorded but not announced. The bot needs `chat:write` and must be in the channel (or hold `chat:write.public`). |
+| `ACCESS_REQUEST_SLACK_MENTION` | `""` | Slack user ID tagged in each access-request post. |
 
 ## Web frontend (Next.js)
 

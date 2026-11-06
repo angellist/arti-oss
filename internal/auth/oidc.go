@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -78,7 +77,7 @@ func (v *OIDCVerifier) Verify(ctx context.Context, raw string) (Claims, error) {
 	if !IsAllowed(inner.Email) {
 		return Claims{}, ErrForbidden
 	}
-	if len(v.required) > 0 && !hasAnyGroup(inner.Groups, v.required) {
+	if !passesGroupGate(inner.Email, inner.Groups, v.required) {
 		return Claims{}, ErrForbidden
 	}
 	return Claims{
@@ -88,17 +87,6 @@ func (v *OIDCVerifier) Verify(ctx context.Context, raw string) (Claims, error) {
 		Picture: inner.Picture,
 		Scopes:  inner.Groups, // ace uses groups as "scopes" downstream
 	}, nil
-}
-
-func hasAnyGroup(have, required []string) bool {
-	for _, g := range required {
-		for _, h := range have {
-			if strings.EqualFold(g, h) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // HashEqual compares a runtime-provided string to a pre-computed SHA-256

@@ -213,7 +213,7 @@ func (l *OIDCLogin) CallbackHandler() http.HandlerFunc {
 			return
 		}
 		groups := claimGroups(claims[l.groupsClaim])
-		if len(l.required) > 0 && !anyMatch(groups, l.required) {
+		if !passesGroupGate(email, groups, l.required) {
 			http.Error(w, "user not in a required group (have: ["+strings.Join(groups, ", ")+
 				"]; need one of: ["+strings.Join(l.required, ", ")+"])", http.StatusForbidden)
 			return

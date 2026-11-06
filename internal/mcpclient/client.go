@@ -41,6 +41,22 @@ func New() *Client { return &Client{httpc: &http.Client{}} }
 
 const protocolVersion = "2025-06-18"
 
+// ConsumerHeader carries the calling app on tools/call requests; snowflake-mcp
+// reads it as a fallback when params._meta does not reach the server.
+const ConsumerHeader = "X-Snowflake-Consumer"
+
+// validHeaderValue reports whether s can be sent as an HTTP header field value
+// (no control bytes). The consumer comes from a stored slug, so a bad value
+// must only cost the header, never the call.
+func validHeaderValue(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      int    `json:"id,omitempty"`
@@ -67,8 +83,9 @@ func (e *RPCError) Error() string { return fmt.Sprintf("mcp error %d: %s", e.Cod
 // CallTool runs initialize (+ initialized when the server is stateful) then
 // tools/call, returning the raw JSON-RPC `result` (an MCP tool result with a
 // `content` array and optional `structuredContent`). bearer may be "".
-// consumer, when non-empty, is sent as params._meta.consumer so upstreams can
-// attribute the call to the calling app (e.g. "arti:<slug>").
+// consumer, when non-empty, is sent both as params._meta.consumer and as the
+// X-Snowflake-Consumer header so upstreams can attribute the call to the
+// calling app (e.g. "arti:<slug>") whichever of the two survives the proxy.
 func (c *Client) CallTool(ctx context.Context, endpoint, bearer, tool string, args map[string]any, consumer string) (json.RawMessage, error) {
 	if args == nil {
 		args = map[string]any{}
@@ -81,13 +98,13 @@ func (c *Client) CallTool(ctx context.Context, endpoint, bearer, tool string, ar
 	// id) expect the initialized notification; arti's own stateless /mcp does
 	// not, so we skip it there.
 	if sess != "" {
-		_, _, _ = c.do(ctx, endpoint, bearer, sess, rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
+		_, _, _ = c.do(ctx, endpoint, bearer, sess, "", rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
 	}
 	params := map[string]any{"name": tool, "arguments": args}
 	if consumer != "" {
 		params["_meta"] = map[string]any{"consumer": consumer}
 	}
-	resp, _, err := c.do(ctx, endpoint, bearer, sess, rpcRequest{
+	resp, _, err := c.do(ctx, endpoint, bearer, sess, consumer, rpcRequest{
 		JSONRPC: "2.0", ID: 2, Method: "tools/call",
 		Params: params,
 	})
@@ -101,7 +118,7 @@ func (c *Client) CallTool(ctx context.Context, endpoint, bearer, tool string, ar
 }
 
 func (c *Client) initialize(ctx context.Context, endpoint, bearer string) (string, error) {
-	resp, sess, err := c.do(ctx, endpoint, bearer, "", rpcRequest{
+	resp, sess, err := c.do(ctx, endpoint, bearer, "", "", rpcRequest{
 		JSONRPC: "2.0", ID: 1, Method: "initialize",
 		Params: map[string]any{
 			"protocolVersion": protocolVersion,
@@ -121,7 +138,7 @@ func (c *Client) initialize(ctx context.Context, endpoint, bearer string) (strin
 // do posts one JSON-RPC message and returns the parsed response plus any
 // Mcp-Session-Id header. A 401 maps to ErrUnauthorized; other 4xx/5xx to a
 // descriptive error. Notifications (no id) tolerate an empty/202 body.
-func (c *Client) do(ctx context.Context, endpoint, bearer, sess string, req rpcRequest) (rpcResponse, string, error) {
+func (c *Client) do(ctx context.Context, endpoint, bearer, sess, consumer string, req rpcRequest) (rpcResponse, string, error) {
 	body, _ := json.Marshal(req)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -134,6 +151,9 @@ func (c *Client) do(ctx context.Context, endpoint, bearer, sess string, req rpcR
 	}
 	if sess != "" {
 		httpReq.Header.Set("Mcp-Session-Id", sess)
+	}
+	if consumer != "" && validHeaderValue(consumer) {
+		httpReq.Header.Set(ConsumerHeader, consumer)
 	}
 	res, err := c.httpc.Do(httpReq)
 	if err != nil {

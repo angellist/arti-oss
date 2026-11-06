@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import ArtifactViewer from "@/components/ArtifactViewer";
 import FullPageView from "@/components/FullPageView";
 import StaleVersionBanner from "@/components/StaleVersionBanner";
+import EmbedViewerReport from "@/components/EmbedViewerReport";
 import { ArtiError, fetchContent, fetchPackageFile, getBySlug, getMe, listPackageFiles } from "@/lib/arti";
 import { fullPageKind, isFullPageView, isTextualContentType, resolvePackageEntry, textScaleFromParam } from "@/lib/viewer";
 import { PackageRailProvider, SearchRailProvider } from "@/lib/rail-context";
@@ -122,6 +123,7 @@ export default async function BySlugVersion({
     return (
       <>
         {staleBanner}
+        <EmbedViewerReport slug={slug} id={info.artifact_id} version={info.version} latestVersion={latest?.version} />
         <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} info={info} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />
       </>
     );

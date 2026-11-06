@@ -28,7 +28,7 @@ The shape that matters conceptually:
   in `inline_content`; everything else lives in S3 and `blob_ref` holds the object
   key (with `sha256` + `size_bytes` alongside it).
 - **`scopes` / `labels`** — free-form *organizational tags* you search and filter
-  by (e.g. `topic:platform:auth`, `app:couch`).
+  by (e.g. `topic:platform:auth`, `app:my-agent`).
 - **`metadata`** — schema-less JSONB; holds the PACKAGE manifest, declared APP
   params, and the like.
 - **`allowed_access`** — the read-access ACL: `['*']` = everyone authenticated,

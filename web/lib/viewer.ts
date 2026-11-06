@@ -26,8 +26,13 @@ export function exitFullPageSearch(currentSearch: string): string {
   return qs ? `?${qs}` : "";
 }
 
+// The catalog drilled into one slug, newest version first.
+export function slugVersionsHref(slug: string): string {
+  return `/?slug=${encodeURIComponent(slug)}&order_by=version&order_dir=desc`;
+}
+
 // isTopLevelWindow reports whether this window is the outermost one. The
-// full-page view is also IFRAMED by embedders (couch's artifact side panel),
+// full-page view is also IFRAMED by embedders (e.g. a host app's side panel),
 // where the host owns the chrome and there is no normal view to return to —
 // so page-level affordances check this first. A cross-origin `window.top`
 // access throws, which is itself proof of being framed.
@@ -167,8 +172,8 @@ export function resolvePackageEntry(
 // TEXT_SCALE_PARAM maps the `?ts=` URL param to a body text-scale multiplier.
 // `sm`/`md`/`lg` mirror ViewerToolbar's TEXT_SCALE (the in-viewer control), so a
 // link carrying the reader's own preference renders identically. `xs` is a
-// param-only extra step below the toolbar's smallest, for EMBEDDERS: couch's
-// artifact side panel is a ~420px column, where the toolbar's `md` baseline
+// param-only extra step below the toolbar's smallest, for EMBEDDERS: a
+// side panel is a ~420px column, where the toolbar's `md` baseline
 // (tuned for a full page) reads a step too large. Keep the shared keys in sync
 // with TEXT_SCALE.
 export const TEXT_SCALE_PARAM: Record<string, number> = {

@@ -138,12 +138,12 @@ describe("BlocksManager", () => {
   });
 
   it("lists what a pattern hides on demand, linking each document to its review page", async () => {
-    render([block("mem--couch--*")]);
+    render([block("mem--some-agent--*")]);
     expect(calls.matched).toEqual([]);
 
-    await click(byText("mem--couch--*"));
+    await click(byText("mem--some-agent--*"));
 
-    expect(calls.matched).toEqual(["mem--couch--*"]);
+    expect(calls.matched).toEqual(["mem--some-agent--*"]);
     expect(container.textContent).toContain("Q3 board deck");
     const link = container.querySelector("a[href^='/admin/blocked/']");
     expect(link?.getAttribute("href")).toBe("/admin/blocked/q3-board-deck");

@@ -29,7 +29,7 @@ export async function handleAppConsentMessage(
   if (!framed || framed.toLowerCase() !== data.appId.toLowerCase()) return false;
   const res = await post(`/app/${framed}/consent`, scope);
   if (!res.ok) return false;
-  // Same URL, fresh navigation: the consent cookie now rides along.
+  // Same URL, fresh navigation: the server now holds the consent record.
   frame.src = frame.src;
   return true;
 }

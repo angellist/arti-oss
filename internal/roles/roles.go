@@ -40,6 +40,9 @@ func (s *Service) Mount(r chi.Router) {
 	r.Post("/api/users/reactivate", s.reactivateUser)
 	r.Get("/api/users/access", s.userAccess)
 	r.Post("/api/users/access/revoke", s.revokeUserCredential)
+	r.Get("/api/access-requests", s.listAccessRequests)
+	r.Post("/api/access-requests/approve", s.approveAccessRequest)
+	r.Post("/api/access-requests/decline", s.declineAccessRequest)
 }
 
 // ─── DTOs ────────────────────────────────────────────────────────────

@@ -1038,6 +1038,30 @@ export async function setUserActive(email: string, active: boolean): Promise<Ros
   return resp.json();
 }
 
+export interface AccessRequest {
+  email: string;
+  name: string;
+  requested_at: string;
+}
+
+// listAccessRequests returns the pending requests for an account. MANAGE_ROLES only.
+export async function listAccessRequests(cookie?: string): Promise<AccessRequest[]> {
+  return (await http<{ requests: AccessRequest[] }>("/api/access-requests", undefined, cookie)).requests;
+}
+
+// decideAccessRequest approves (adds the person to Users) or declines a pending request.
+export async function decideAccessRequest(email: string, approve: boolean): Promise<void> {
+  const resp = await fetch(`/api/access-requests/${approve ? "approve" : "decline"}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!resp.ok) {
+    throw await errorFrom(resp);
+  }
+}
+
 export async function getCredentialAudit(email: string): Promise<CredentialAudit> {
   return http<CredentialAudit>(`/api/users/access?email=${encodeURIComponent(email)}`);
 }
@@ -1237,6 +1261,30 @@ export async function getMapEntry(slug: string, key: string): Promise<{ key: str
   );
   if (!resp.ok) throw new ArtiError(resp.status, `get map entry: ${resp.status}`);
   return resp.json();
+}
+
+// putMapEntry overwrites one entry of live head in place; no version is
+// written. ifRev makes it a compare-and-set, answered with 409 when lost.
+export async function putMapEntry(
+  slug: string,
+  key: string,
+  value: unknown,
+  ifRev?: number,
+): Promise<void> {
+  const qs = ifRev != null ? `?if_rev=${ifRev}` : "";
+  const resp = await fetch(
+    `/api/artifacts/by-slug/${encodeURIComponent(slug)}/map/keys/${encodeURIComponent(key)}${qs}`,
+    {
+      method: "PUT",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(value),
+    },
+  );
+  if (resp.status === 409) {
+    throw new ArtiError(409, "This entry changed since you opened it. Close and reopen it to edit the latest value.", "conflict");
+  }
+  if (!resp.ok) throw await errorFrom(resp);
 }
 
 // snapshotMap freezes the map's live head as a new NDJSON version. Returns

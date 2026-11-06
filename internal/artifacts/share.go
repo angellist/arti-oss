@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/audit"
 	"github.com/angellist/arti-oss/internal/store/pgstore"
 )
 
@@ -526,6 +527,8 @@ func (s *Service) ResolveShare(ctx context.Context, token string) (sqlc.Artifact
 			return zero, noLink, pgstore.ErrNotFound
 		}
 	}
+	pgstore.NoteAccess(ctx, row, "allowed")
+	audit.From(ctx).SetShare(pgstore.UUIDFromPG(link.ID).String())
 	return row, link.ID, nil
 }
 

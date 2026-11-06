@@ -4,7 +4,7 @@ import FullPageView from "./FullPageView";
 
 // Regression guard for the bug where the chrome-less full-page view (?v=full)
 // of an image attachment dumped raw PNG bytes into a <pre> instead of rendering
-// the image. The embedder (couch's artifact side panel) iframes this view, so
+// the image. The embedder (e.g. a host app's side panel) iframes this view, so
 // the user saw a wall of "?PNG …" noise. The fix: non-text content renders
 // from the raw same-origin bytes URL, never from `body`.
 const ID = "921bad68-9612-420a-8ce9-e8609ff17950";

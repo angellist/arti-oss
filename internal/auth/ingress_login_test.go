@@ -28,7 +28,7 @@ func seedGrant(ds *fakeDeviceStore, userCode string) {
 func newIngressHandler(ds *fakeDeviceStore) http.HandlerFunc {
 	signer := NewJWTSigner([]byte("testkey"))
 	pairs := NewInMemPairStore()
-	return IngressLoginHandler(nil, signer, pairs, ds, 7*24*time.Hour, false, nil)
+	return IngressLoginHandler(nil, signer, pairs, ds, 7*24*time.Hour, false, nil, nil)
 }
 
 func confirmationState(body string) string {

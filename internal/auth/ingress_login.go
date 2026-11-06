@@ -46,11 +46,23 @@ const (
 //	           POST /auth/cli/exchange).
 //	return_to  if cli_code is absent, redirect here after setting the
 //	           cookie (defaults to "/", must be a relative path).
-func IngressLoginHandler(requiredGroups []string, signer *JWTSigner, pairs PairStore, deviceStore DeviceStore, accessTTL time.Duration, cookieSecure bool, capturer GroupCapturer) http.HandlerFunc {
+//
+// A POST is accepted only from someone CanRequestAccess admits: it submits
+// the request-access form that page renders instead of a 403. requests may be
+// nil, which turns that page off.
+func IngressLoginHandler(requiredGroups []string, signer *JWTSigner, pairs PairStore, deviceStore DeviceStore, accessTTL time.Duration, cookieSecure bool, capturer GroupCapturer, requests AccessRequester) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		email := strings.TrimSpace(r.Header.Get(IngressEmailHeader))
 		if email == "" {
 			http.Error(w, "no "+IngressEmailHeader+" header — is oauth2-proxy in front?", http.StatusUnauthorized)
+			return
+		}
+		if requests != nil && CanRequestAccess(email) {
+			serveAccessRequest(w, r, email, requests)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		if !IsAllowed(email) {
@@ -60,11 +72,9 @@ func IngressLoginHandler(requiredGroups []string, signer *JWTSigner, pairs PairS
 		// Computed once, above the gate, so it's available for both the
 		// required-groups check and the login-time IdP-group capture in finish().
 		groups := splitGroups(r.Header.Get(IngressGroupsHeader))
-		if len(requiredGroups) > 0 {
-			if !anyMatch(groups, requiredGroups) {
-				http.Error(w, "user not in a required group (have: ["+strings.Join(groups, ", ")+"]; need one of: ["+strings.Join(requiredGroups, ", ")+"])", http.StatusForbidden)
-				return
-			}
+		if !passesGroupGate(email, groups, requiredGroups) {
+			http.Error(w, "user not in a required group (have: ["+strings.Join(groups, ", ")+"]; need one of: ["+strings.Join(requiredGroups, ", ")+"])", http.StatusForbidden)
+			return
 		}
 
 		// Try to extract profile info (name, picture) from the forwarded
@@ -387,8 +397,7 @@ func splitGroups(raw string) []string {
 	return out
 }
 
-// anyMatch is case-insensitive, matching the bearer path's hasAnyGroup
-// semantics so the same IdP groups pass every auth front door identically.
+// anyMatch is case-insensitive so the same IdP groups pass every auth front door identically.
 func anyMatch(have, want []string) bool {
 	for _, h := range have {
 		for _, w := range want {

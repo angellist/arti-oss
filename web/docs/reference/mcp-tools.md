@@ -99,7 +99,8 @@ caches the response 24h per `(key, creator)` and replays it.
 
 | Param | Type | Required | Notes |
 |---|---|---|---|
-| `slug` | string | yes | |
+| `slug` | string | yes* | the document's named slug |
+| `ident` | string | yes* | alias for `slug`, matching the other tools; an artifact id is refused. *Send one of the two. |
 | `content` | string | yes | text to append |
 | `separator` | string | no | default `"\n\n"` |
 | `idempotency_key` | string | no | stable hash of the logical event |

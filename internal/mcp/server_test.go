@@ -523,3 +523,33 @@ func TestSearchEmptyScopeIsNotAFilter(t *testing.T) {
 		t.Fatalf("expected error: empty scope must not satisfy the filter requirement")
 	}
 }
+
+// append_artifact takes `slug`, but every other artifact tool names its target
+// `ident`, and agents carry that over. ident is accepted as an alias; an
+// artifact id passed as ident is refused with a message naming the fix.
+func TestAppendArtifactAcceptsIdentAlias(t *testing.T) {
+	st := pgstore.New(newPool(t), blob.NewInMemory(), pgstore.Config{})
+	h := mcp.NewServer(artifacts.NewService(st, "http://localhost", nil, nil), nil).Handler()
+
+	slug := uniqueSlug("append-ident")
+	seedText(t, st, slug, "first")
+
+	callToolResult(t, h, "alice@example.com", "append_artifact", map[string]any{
+		"ident": slug, "content": "second", "separator": "\n",
+	})
+	res := callToolResult(t, h, "alice@example.com", "read_artifact", map[string]any{"ident": slug})
+	if txt := firstText(t, res); txt != "first\nsecond" {
+		t.Errorf("after append via ident, body = %q, want %q", txt, "first\nsecond")
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": "append_artifact", "arguments": map[string]any{
+			"ident": "6f1c2b8e-1d2a-4c3b-9e8f-0a1b2c3d4e5f", "content": "x",
+		}},
+	})
+	rr := rpcCall(t, h, "alice@example.com", string(payload))
+	if !strings.Contains(rr.Body.String(), "needs the document's slug") {
+		t.Errorf("an artifact id as ident should be refused naming the slug; got %s", rr.Body.String())
+	}
+}

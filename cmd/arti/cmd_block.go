@@ -13,7 +13,7 @@ import (
 //
 //	arti block ls
 //	arti block add leaked-doc --reason "shared externally"
-//	arti block add 'mem--couch--*'
+//	arti block add 'mem--some-agent--*'
 //	arti block rm leaked-doc
 //
 // A pattern matches a slug (or the artifact id of a slug-less artifact), with

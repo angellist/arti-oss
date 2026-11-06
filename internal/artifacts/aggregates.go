@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/angellist/arti-oss/internal/auth"
 	"github.com/angellist/arti-oss/internal/store/pgstore"
 )
 
@@ -41,6 +42,7 @@ type AggregatesResponse struct {
 	Scopes       []ScopeCount       `json:"scopes"`
 	Labels       []LabelCount       `json:"labels"`
 	ContentTypes []ContentTypeCount `json:"content_types"`
+	MyLabels     []LabelCount       `json:"my_labels"`
 }
 
 // aggregatesCacheTTL is how old an entry may get before a request kicks off
@@ -67,6 +69,10 @@ type aggregatesCache struct {
 }
 
 var aggCache = &aggregatesCache{ttl: aggregatesCacheTTL, entries: map[string]*aggregatesEntry{}}
+
+// myLabelsCache holds only MyLabels, keyed by signed-in email, so the
+// histograms above stay shared across admins.
+var myLabelsCache = &aggregatesCache{ttl: aggregatesCacheTTL, entries: map[string]*aggregatesEntry{}}
 
 // get returns the cached value for caller whenever one exists, however old.
 // A stale entry triggers one background reload; only a caller with no entry
@@ -114,13 +120,44 @@ func (c *aggregatesCache) store(caller string, out AggregatesResponse) {
 	c.mu.Unlock()
 }
 
+// myLabelsLimit is how many of the caller's own labels the sidebar shows.
+const myLabelsLimit = 20
+
 // Aggregates returns label/scope histograms restricted to artifacts
 // `caller` can read. Admins should pass "" so the filter is bypassed
-// and the global histogram is returned.
-func (s *Service) Aggregates(ctx context.Context, caller string) (AggregatesResponse, error) {
-	return aggCache.get(ctx, caller, func(ctx context.Context) (AggregatesResponse, error) {
+// and the global histogram is returned. `me` is the signed-in email and
+// fills MyLabels.
+func (s *Service) Aggregates(ctx context.Context, caller, me string) (AggregatesResponse, error) {
+	out, err := aggCache.get(ctx, caller, func(ctx context.Context) (AggregatesResponse, error) {
 		return s.loadAggregates(ctx, caller)
 	})
+	if err != nil {
+		return AggregatesResponse{}, err
+	}
+	out.MyLabels = []LabelCount{}
+	if me == "" {
+		return out, nil
+	}
+	mine, err := myLabelsCache.get(ctx, me, func(ctx context.Context) (AggregatesResponse, error) {
+		return s.loadMyLabels(ctx, me)
+	})
+	if err != nil {
+		return AggregatesResponse{}, err
+	}
+	out.MyLabels = mine.MyLabels
+	return out, nil
+}
+
+func (s *Service) loadMyLabels(ctx context.Context, me string) (AggregatesResponse, error) {
+	rows, err := s.store.CreatorLabels(ctx, me, myLabelsLimit)
+	if err != nil {
+		return AggregatesResponse{}, err
+	}
+	out := AggregatesResponse{MyLabels: make([]LabelCount, 0, len(rows))}
+	for _, r := range rows {
+		out.MyLabels = append(out.MyLabels, LabelCount{Label: r.Label, Count: r.Count})
+	}
+	return out, nil
 }
 
 func (s *Service) loadAggregates(ctx context.Context, caller string) (AggregatesResponse, error) {
@@ -161,7 +198,7 @@ func (s *Service) httpAggregates(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, r, err)
 		return
 	}
-	res, err := s.Aggregates(r.Context(), caller)
+	res, err := s.Aggregates(r.Context(), caller, auth.EmailFromContext(r.Context()))
 	if err != nil {
 		writeInternal(w, r, err)
 		return

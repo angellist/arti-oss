@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/audit"
 	"github.com/angellist/arti-oss/internal/auth"
 	"github.com/angellist/arti-oss/internal/mdtext"
 	"github.com/angellist/arti-oss/internal/rbac"
@@ -233,6 +234,7 @@ func (s *Service) embedAuth(next http.Handler) http.Handler {
 			return
 		}
 		ctx := auth.WithProfile(auth.WithIdentity(r.Context(), c.Email), c.Name, c.Picture)
+		audit.From(ctx).SetViewer(c.Email)
 		ctx = context.WithValue(ctx, embedArtifactKey{}, aid)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -252,6 +254,11 @@ func (s *Service) canRead(ctx context.Context, artifactID uuid.UUID, caller stri
 	ok, err := s.canReadRow(ctx, row, caller)
 	if err != nil {
 		return sqlc.Artifact{}, false, err
+	}
+	if ok {
+		pgstore.NoteAccess(ctx, row, "allowed")
+	} else {
+		pgstore.NoteAccess(ctx, row, "denied")
 	}
 	return row, ok, nil
 }

@@ -268,7 +268,7 @@ func TestOIDCLogin_RequiredGroupEnforced(t *testing.T) {
 		t.Fatalf("code = %d, want 302 with group present", w.Code)
 	}
 
-	// Group matching is case-insensitive, like the bearer path's hasAnyGroup.
+	// Group matching is case-insensitive, like every other front door.
 	f.groups = []string{"Engineers@example.com"}
 	if w := drive(t, mux, f, "/auth/login"); w.Code != http.StatusFound {
 		t.Fatalf("code = %d, want 302 with differently-cased group", w.Code)

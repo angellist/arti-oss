@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/audit"
 	"github.com/angellist/arti-oss/internal/mdtext"
 	"github.com/angellist/arti-oss/internal/store/pgstore"
 )
@@ -193,6 +194,7 @@ func (s *Service) resolveIdentAny(ctx context.Context, ident string, ver *int32)
 	if row.DeletedAt.Valid {
 		return sqlc.Artifact{}, pgstore.ErrNotFound
 	}
+	pgstore.NoteAccess(ctx, row, "allowed")
 	return row, nil
 }
 
@@ -253,6 +255,8 @@ func (s *Service) serveEmbedFile(w http.ResponseWriter, r *http.Request, artifac
 		}
 	} else if row.DeletedAt.Valid {
 		return false // archived artifacts stay hidden even to a live files token
+	} else {
+		pgstore.NoteAccess(r.Context(), row, "allowed")
 	}
 	body, ct, err := s.ReadPackageFile(r.Context(), row, path)
 	if err != nil {
@@ -290,10 +294,11 @@ func (s *Service) httpFileByToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	audit.From(r.Context()).SetViewer(email)
 	// frame-ancestors: the artifact allowlist, NOT a hardcoded 'self'. This route
 	// backs the <base href> injected into every served PACKAGE page, so an
 	// in-content link click navigates the viewer's content frame HERE. When the
-	// viewer itself is embedded by a trusted internal origin (couch's side panel),
+	// viewer itself is embedded by a trusted internal origin (a host app's side panel),
 	// that frame's ancestor chain includes the embedder — 'self' would block the
 	// second page exactly as X-Frame-Options blocked the first. The embed surfaces
 	// keep their own per-surface lists; they ride /embed/<surface>/_files/, not

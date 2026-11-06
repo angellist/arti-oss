@@ -17,11 +17,15 @@ apply on every path: an **email-domain allowlist** and, when configured,
 
 - **Email allowlist** — the address, or its domain, must be in the allowlist
   config (`AUTH_ALLOWED_EMAILS`; entries are bare domains or full addresses,
-  empty admits nobody). Applied on every path.
+  empty admits nobody). Applied on every path. An admin-added or
+  login-recorded Users row also passes it, so a person added by hand gets in
+  from any domain. People from `AUTH_ACCEPTED_DOMAINS` without a row see a
+  request-access page at login; an admin approves on Settings → Users.
 - **Required groups** — matched against the groups the proxy forwards or the
   OIDC groups claim. Providers that emit groups as `name@domain` (e.g. Dex)
   have the suffix stripped before matching, so the config can stay short
-  (`engineers` matches `engineers@example.com`).
+  (`engineers` matches `engineers@example.com`). Skipped for someone outside
+  the allowlist whom an admin added to Users.
 
 The allowlist check also refuses two kinds of address outright, on every path
 that runs it (all but the service secret; a service principal's key is checked
@@ -38,7 +42,7 @@ deactivation list is cached for at most 15 seconds, and a failed lookup denies.
 The middleware tries credentials in order, admitting on the first that validates:
 
 1. **Service secret** — a shared-secret header (`X-Arti-Service-Secret`) for
-   service-to-service callers (e.g. the couch FE proxy), compared constant-time.
+   service-to-service callers (e.g. a frontend proxy), compared constant-time.
    Identity becomes the configured service email (`ARTI_SERVICE_EMAIL`, default
    `service@arti.invalid`). This is not a roster
    [service principal](#service-principals).
@@ -135,7 +139,7 @@ The `arti` CLI caches a token in the user's config dir. Two ways in:
 
 ## The device flow (RFC 8628) for headless agents
 
-A headless agent (a couch sandbox) can't open a browser, so it uses the Device
+A headless agent (e.g. an agent sandbox) can't open a browser, so it uses the Device
 Authorization Grant. It is Postgres-backed because each step can land on a
 different replica.
 

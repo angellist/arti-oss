@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import AccessDenied from "@/components/AccessDenied";
 import ArtifactViewer from "@/components/ArtifactViewer";
 import FullPageView from "@/components/FullPageView";
+import EmbedViewerReport from "@/components/EmbedViewerReport";
 import { ArtiError, fetchContent, fetchPackageFile, getBySlug, getDenialBySlug, getMe, listPackageFiles } from "@/lib/arti";
 import { fullPageKind, isFullPageView, isTextualContentType, resolvePackageEntry, textScaleFromParam } from "@/lib/viewer";
 import { PackageRailProvider, SearchRailProvider } from "@/lib/rail-context";
@@ -83,7 +84,12 @@ export default async function BySlug({
         : (await fetchContent(info.artifact_id, cookie)).body
       : "";
     const textScale = textScaleFromParam(sp);
-    return <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} info={info} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />;
+    return (
+      <>
+        <EmbedViewerReport slug={slug} id={info.artifact_id} version={info.version} latestVersion={info.version} />
+        <FullPageView body={body} contentType={contentType} filePath={filePath} entries={entries} entryPoint={entryPoint} title={info.title} artifactID={info.artifact_id} me={me} info={info} textScale={textScale} commentsEnabled={info.comments_enabled !== false} />
+      </>
+    );
   }
 
   if (info.artifact_type === "PACKAGE" || info.artifact_type === "APP") {

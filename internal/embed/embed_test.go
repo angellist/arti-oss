@@ -169,15 +169,15 @@ func TestParseSurfaces(t *testing.T) {
 
 	// User mode: email absent is REQUIRED-absent; origin accepts an array (the
 	// nested topology enumerates every ancestor) or the legacy single string.
-	userOK := `{"x":{"secret":"s","origin":["https://app.frontapp.com","https://couch.internal"],"identity":"user","slug_allow":["lp-*"]}}`
+	userOK := `{"x":{"secret":"s","origin":["https://app.frontapp.com","https://host.internal"],"identity":"user","slug_allow":["lp-*"]}}`
 	m, err := ParseSurfaces(userOK)
 	if err != nil {
 		t.Fatalf("valid user-mode surface rejected: %v", err)
 	}
-	if got := m["x"].Origin; len(got) != 2 || got[0] != "https://app.frontapp.com" || got[1] != "https://couch.internal" {
+	if got := m["x"].Origin; len(got) != 2 || got[0] != "https://app.frontapp.com" || got[1] != "https://host.internal" {
 		t.Errorf("origin list = %v", got)
 	}
-	if fa := frameAncestors(m["x"].Origin); fa != "'self' https://app.frontapp.com https://couch.internal" {
+	if fa := frameAncestors(m["x"].Origin); fa != "'self' https://app.frontapp.com https://host.internal" {
 		t.Errorf("frameAncestors = %q — every ancestor must be listed", fa)
 	}
 	svcOK := `{"x":{"secret":"s","origin":"https://one.example","identity":"service","email":"e@x.com","slug_allow":["*"]}}`
@@ -364,7 +364,7 @@ func TestHandleFile_BadToken(t *testing.T) {
 // userRouter mounts a user-mode surface next to the service-mode ones.
 func userRouter(art ArtServer, tok TokenVerifier) chi.Router {
 	surfaces := testSurfaces()
-	surfaces["panel"] = Surface{Secret: "US", Origin: OriginList{"https://app.frontapp.com", "https://couch.internal"},
+	surfaces["panel"] = Surface{Secret: "US", Origin: OriginList{"https://app.frontapp.com", "https://host.internal"},
 		Identity: "user", SlugAllow: []string{"lp-*"}}
 	r := chi.NewRouter()
 	New(surfaces, art, tok).Mount(r)
@@ -380,12 +380,12 @@ func TestHandleDoc_UserModeServesWithoutCaller(t *testing.T) {
 	if art.gotCaller != "<user-mode>" {
 		t.Errorf("caller = %q — user mode must not resolve as any fixed identity", art.gotCaller)
 	}
-	if art.gotFA != "'self' https://app.frontapp.com https://couch.internal" {
+	if art.gotFA != "'self' https://app.frontapp.com https://host.internal" {
 		t.Errorf("frameAncestors = %q — must list every ancestor", art.gotFA)
 	}
 	// The surface's raw origin list must reach the app bridge (the token-relay
 	// postMessage targets) — same set frame-ancestors admits, without 'self'.
-	if len(art.gotOrigins) != 2 || art.gotOrigins[0] != "https://app.frontapp.com" || art.gotOrigins[1] != "https://couch.internal" {
+	if len(art.gotOrigins) != 2 || art.gotOrigins[0] != "https://app.frontapp.com" || art.gotOrigins[1] != "https://host.internal" {
 		t.Errorf("origins = %v — surface origins must be forwarded for the token relay", art.gotOrigins)
 	}
 	// The secret + slug_allow gates still apply in user mode.

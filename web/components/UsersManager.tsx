@@ -4,7 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { RosterRole, RosterUser } from "@/lib/types";
-import { addUser, listUsers, setGroupMember, setUserActive } from "@/lib/arti";
+import { addUser, decideAccessRequest, listUsers, setGroupMember, setUserActive } from "@/lib/arti";
+import type { AccessRequest } from "@/lib/arti";
 import AccessAuditModal from "./AccessAuditModal";
 
 // UsersManager renders the Users roster and the one write it supports.
@@ -174,14 +175,17 @@ export default function UsersManager({
   currentEmail = "",
   manageableGroups = [],
   permissions = [],
+  initialRequests = [],
 }: {
   initialUsers: RosterUser[];
   sources: string[];
   currentEmail?: string;
   manageableGroups?: { name: string; members: string[] }[];
   permissions?: string[];
+  initialRequests?: AccessRequest[];
 }) {
   const [users, setUsers] = useState<RosterUser[]>(initialUsers);
+  const [requests, setRequests] = useState<AccessRequest[]>(initialRequests);
   const [q, setQ] = useState("");
   const [kindF, setKindF] = useState("");
   const [roleF, setRoleF] = useState("");
@@ -279,6 +283,22 @@ export default function UsersManager({
     }
   };
 
+  const decide = async (r: AccessRequest, approve: boolean) => {
+    setErr("");
+    setFlash("");
+    setPending(r.email);
+    try {
+      await decideAccessRequest(r.email, approve);
+      setRequests((prev) => prev.filter((x) => x.email !== r.email));
+      if (approve) await refresh();
+      setFlash(approve ? `${r.email} approved and added.` : `${r.email} declined.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending("");
+    }
+  };
+
   const changeGroup = async (u: RosterUser, group: string, member: boolean) => {
     setErr("");
     setFlash("");
@@ -306,6 +326,42 @@ export default function UsersManager({
         <div className="mb-3 max-w-3xl rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-[12px] text-emerald-700">
           {flash}
         </div>
+      ) : null}
+
+      {requests.length > 0 ? (
+        <section aria-labelledby="access-requests-title" className="mb-6 max-w-3xl">
+          <h2 id="access-requests-title" className="mb-2.5 text-[14px] font-semibold text-neutral-900">
+            Pending requests
+          </h2>
+          <ul className="divide-y divide-neutral-200 rounded-md border border-neutral-200">
+            {requests.map((r) => (
+              <li key={r.email} className="flex items-center gap-3 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[13px] text-neutral-900">{r.name}</div>
+                  <div className="truncate text-[12px] text-neutral-500" title={new Date(r.requested_at).toLocaleString()}>
+                    {r.email} · {relative(r.requested_at).label}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => decide(r, true)}
+                  disabled={pending !== ""}
+                  className="whitespace-nowrap rounded-md border border-neutral-900 bg-neutral-900 px-2 py-1 text-[11px] text-white hover:bg-neutral-800 disabled:opacity-40"
+                >
+                  {pending === r.email ? "…" : "Approve"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => decide(r, false)}
+                  disabled={pending !== ""}
+                  className="whitespace-nowrap rounded-md border border-rose-200 bg-white px-2 py-1 text-[11px] text-rose-700 hover:bg-rose-50 disabled:opacity-40"
+                >
+                  Decline
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
       ) : null}
 
       <div className="mb-2.5 flex items-baseline justify-between gap-3">

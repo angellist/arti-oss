@@ -827,7 +827,7 @@ describe("CatalogTable mobile cards", () => {
 
   it("does not offer archive to a person a service principal credited", () => {
     nav.search = "slug=weekly-report";
-    render([row({ asserted_by: "couch@sa.arti.invalid" })], { email: "sam@example.com", name: "Sam", is_admin: false, permissions: [] });
+    render([row({ asserted_by: "svc@sa.arti.invalid" })], { email: "sam@example.com", name: "Sam", is_admin: false, permissions: [] });
     expect((cards().querySelector("button") as HTMLButtonElement).disabled).toBe(true);
   });
 

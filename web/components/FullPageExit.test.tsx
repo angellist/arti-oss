@@ -51,7 +51,7 @@ describe("FullPageExit", () => {
     const size = Number.parseInt(btn.style.width, 10);
     expect(size).toBeLessThanOrEqual(20);
     expect(btn.style.height).toBe(btn.style.width);
-    expect(btn.style.right, "no inset from the viewport edge").toBe("0px");
+    expect(btn.style.left, "no inset from the viewport edge").toBe("0px");
     expect(btn.style.borderRadius, "square, not a bubble").toBe("");
     expect(btn.style.top).toBe("var(--arti-top-strip, 0px)");
   });

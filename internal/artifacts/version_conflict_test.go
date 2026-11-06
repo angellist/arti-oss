@@ -19,8 +19,7 @@ import (
 )
 
 // postAs posts a JSON create body as `email`, with the claims a real caller of
-// that kind would carry. The claims matter: the ATTACHMENT slug rule keys off
-// them, and auth.WithIdentity alone (no claims) reads as a service credential.
+// that kind would carry.
 func postAs(t *testing.T, r chi.Router, email string, claims auth.Claims, payload map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(payload)
@@ -150,40 +149,48 @@ func TestCreate_TypeChangeNeedsOptIn(t *testing.T) {
 	}
 }
 
-// A person naming a slug on a binary publishes a versioned document; the same
-// request from a service credential is refused rather than silently stripped
-// of its slug, which is what couch's chat uploads relied on.
+// Naming a slug on a binary publishes a versioned document, from a person and
+// from a service credential alike (an agent publishing a screenshot under a
+// stable name). Landing on a TEXT slug is still a type change.
 func TestCreate_SluggedAttachment(t *testing.T) {
 	r := router(t)
 	slug := uniqueSlug("slugged-attachment")
-	body := func() map[string]any {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg=="
+	body := func(s string) map[string]any {
 		return map[string]any{
 			"title":          "Pixel",
-			"named_slug":     slug,
+			"named_slug":     s,
 			"content_type":   "image/png",
 			"artifact_type":  "ATTACHMENT",
-			"content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==",
+			"content_base64": png,
 		}
 	}
 
-	v1 := createdInfo(t, postAs(t, r, "tian@example.com", session(), body()))
+	v1 := createdInfo(t, postAs(t, r, "tian@example.com", session(), body(slug)))
 	if v1.NamedSlug == nil || *v1.NamedSlug != slug {
 		t.Fatalf("interactive caller should keep the slug, got %v", v1.NamedSlug)
 	}
-	v2 := createdInfo(t, postAs(t, r, "tian@example.com", session(), body()))
+	v2 := createdInfo(t, postAs(t, r, "tian@example.com", session(), body(slug)))
 	if v2.Version == nil || *v2.Version != 2 {
 		t.Fatalf("a slugged attachment should version, got %v", v2.Version)
 	}
 
-	rr := postAs(t, r, "svc@example.com", apiKey(), map[string]any{
-		"title":          "Chat file",
-		"named_slug":     "service-" + slug,
-		"content_type":   "image/png",
-		"artifact_type":  "ATTACHMENT",
-		"content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==",
-	})
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("want 400 for a service credential naming a slug, got %d: %s", rr.Code, rr.Body.String())
+	svcSlug := "agent-file-" + slug
+	s1 := createdInfo(t, postAs(t, r, "svc@example.com", apiKey(), body(svcSlug)))
+	if s1.NamedSlug == nil || *s1.NamedSlug != svcSlug {
+		t.Fatalf("a service credential naming a slug should keep it, got %v", s1.NamedSlug)
+	}
+	s2 := createdInfo(t, postAs(t, r, "svc@example.com", apiKey(), body(svcSlug)))
+	if s2.Version == nil || *s2.Version != 2 {
+		t.Fatalf("a service credential's slugged attachment should version, got %v", s2.Version)
+	}
+
+	// An attachment landing on a TEXT document is a type change, not a quiet
+	// takeover of the document's slug.
+	textSlug := uniqueSlug("text-doc")
+	createdInfo(t, postAs(t, r, "svc@example.com", apiKey(), textBody(textSlug, "text/markdown", "# doc", nil)))
+	if rr := postAs(t, r, "svc@example.com", apiKey(), body(textSlug)); rr.Code != http.StatusConflict {
+		t.Fatalf("want 409 for an attachment onto a TEXT slug, got %d: %s", rr.Code, rr.Body.String())
 	}
 
 	// Without a slug it is the chat upload it always was: slugless, creator-only.
@@ -191,7 +198,7 @@ func TestCreate_SluggedAttachment(t *testing.T) {
 		"title":          "Chat file",
 		"content_type":   "image/png",
 		"artifact_type":  "ATTACHMENT",
-		"content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==",
+		"content_base64": png,
 	}))
 	if sl.NamedSlug != nil || len(sl.AllowedAccess) != 0 {
 		t.Fatalf("want slugless + creator-only, got slug=%v access=%v", sl.NamedSlug, sl.AllowedAccess)

@@ -84,7 +84,7 @@ cp .env.example .env
 
 | Key | Dev value | Notes |
 | --- | --- | --- |
-| `ARTI_ADDR` | `:8095` | Where the Go binary listens (`:8090` collides with couch on the dev box). |
+| `ARTI_ADDR` | `:8095` | Where the Go binary listens (`:8090` is often taken by other local services). |
 | `ARTI_BASE_URL` | `http://localhost:3031` | Canonical hostname stamped into emitted URLs, and the CLI's default endpoint. Points at the Next dev server, which forwards `/api/*` + `/auth/*` back to `:8095` (`web/middleware.ts`). |
 | `ARTI_DATABASE_URL` | `postgres://postgres:postgres@localhost:5436/arti_dev?sslmode=disable` | Dev Postgres. |
 | `S3_ENDPOINT` | `http://localhost:9210` | RustFS. Unset in prod to hit AWS S3. |

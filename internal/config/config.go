@@ -32,10 +32,12 @@ type Config struct {
 	Embedding     Embedding     `yaml:"embedding"`
 	Share         Share         `yaml:"share"`
 	Maps          Maps          `yaml:"maps"`
+	HTMLEdit      HTMLEdit      `yaml:"html_edit"`
 	Comments      Comments      `yaml:"comments"`
 	Notifications Notifications `yaml:"notifications"`
 	LLM           LLM           `yaml:"llm"`
 	Dictation     Dictation     `yaml:"dictation"`
+	Audit         Audit         `yaml:"audit"`
 }
 
 // Server holds listener addressing and canonical URLs.
@@ -95,6 +97,8 @@ type Auth struct {
 	GroupsClaim    string   `yaml:"groups_claim"`
 	RequiredGroups []string `yaml:"required_groups"`
 	AllowedEmails  []string `yaml:"allowed_emails"`
+	// AcceptedDomains may request an account at login (AUTH_ACCEPTED_DOMAINS).
+	AcceptedDomains []string `yaml:"accepted_domains"`
 	// IdPGroupsMaxAge bounds how stale a login-captured IdP-group snapshot may
 	// be before its `idp:<name>` access grants stop resolving (fail closed).
 	// `idp:` grants therefore require an interactive login at least this often.
@@ -171,6 +175,12 @@ type Maps struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+// HTMLEdit configures in-place text editing of HTML artifacts in the viewer.
+// Disabled by default; the flag is the feature's backout.
+type HTMLEdit struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // Comments configures comment writes and notifications. RPM knobs are keyed by
 // principal, not client IP, so programmatic callers cannot share an ingress bucket.
 type Comments struct {
@@ -226,6 +236,9 @@ type Embedding struct {
 // Notifications configures outbound notifications.
 type Notifications struct {
 	SlackBotToken string `yaml:"-"` // ARTI_SLACK_BOT_TOKEN
+	// AccessRequestChannel receives new access requests; empty → not announced.
+	AccessRequestChannel string `yaml:"-"` // ACCESS_REQUEST_SLACK_CHANNEL
+	AccessRequestMention string `yaml:"-"` // ACCESS_REQUEST_SLACK_MENTION (Slack user ID)
 }
 
 // LLM configures the built-in llm.complete service.
@@ -249,3 +262,13 @@ type Dictation struct {
 
 // LookupFn abstracts the process environment so Load is testable.
 type LookupFn func(key string) (string, bool)
+
+// Audit configures the access audit archive. Every request is always logged as
+// an "audit" line; with Bucket set, the same events are also written to S3 as
+// gzipped JSONL batches.
+type Audit struct {
+	Bucket        string   `yaml:"bucket"`
+	Region        string   `yaml:"region"`   // empty = storage.region
+	Endpoint      string   `yaml:"endpoint"` // empty = storage.endpoint
+	FlushInterval Duration `yaml:"flush_interval"`
+}

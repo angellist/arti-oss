@@ -2,7 +2,7 @@ import { headers } from "next/headers";
 import CatalogTable from "@/components/CatalogTable";
 import { SearchRailProvider } from "@/lib/rail-context";
 import { getMe, listArtifacts, type SortField, type SortDir } from "@/lib/arti";
-import { catalogView } from "@/lib/catalog";
+import { catalogQuery, catalogView } from "@/lib/catalog";
 import { columnCookieFrom, parseColumnPrefs } from "@/lib/columns";
 import type { Me } from "@/lib/types";
 
@@ -41,7 +41,7 @@ export default async function Home({
 
   const params = {
     type: pick(sp, "type"),
-    q: pick(sp, "q"),
+    q: catalogQuery((k) => pick(sp, k)),
     // The dedicated `slug` param is a deterministic drill-in (see catalogView):
     // it filters to that slug server-side and, via latestPerSlugFor, shows the
     // full version history. A `slug:` token typed in `q` is a search instead.

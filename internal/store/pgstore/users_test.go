@@ -429,7 +429,7 @@ func TestUsers_IsActiveServicePrincipal(t *testing.T) {
 	backfilled := strings.ToLower(unique("bf")) + "@sa.arti.invalid"
 	t.Cleanup(func() { _ = st.ReactivateUser(ctx, svc) })
 
-	if _, err := st.AddUser(ctx, svc, pgstore.UserKindService, "couch", "admin@example.com"); err != nil {
+	if _, err := st.AddUser(ctx, svc, pgstore.UserKindService, "svc", "admin@example.com"); err != nil {
 		t.Fatalf("add service: %v", err)
 	}
 	if _, err := st.AddUser(ctx, person, pgstore.UserKindHuman, "", "admin@example.com"); err != nil {

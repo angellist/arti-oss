@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -24,15 +25,18 @@ import (
 // new artifact_id, so a republish asks again), the document routes serve a
 // consent page instead of the app, and mint nothing.
 
-const appConsentCookiePrefix = "arti_app_ok_"
+// AppConsentCookiePrefix names the per-app consent cookies arti set before
+// consent moved to the app_consents table. They are only ever expired now.
+const AppConsentCookiePrefix = "arti_app_ok_"
+
+const appConsentTTL = 30 * 24 * time.Hour
 
 func isHTMLContentType(ct string) bool { return strings.HasPrefix(strings.ToLower(ct), "text/html") }
 
-// SetAppConsentFns wires the consent-record signer + verifier (from the apps
-// service) and the cookie Secure flag. With a minter wired but no verifier,
+// SetAppConsentFns wires the consent store. With a minter wired but no store,
 // every APP document load is refused — the gate fails closed.
-func (s *Service) SetAppConsentFns(sign func(email, artifactID string) (string, error), verify func(tok string) (email, artifactID string, err error), cookieSecure bool) {
-	s.appConsentSign, s.appConsentVerify, s.appConsentSecure = sign, verify, cookieSecure
+func (s *Service) SetAppConsentFns(has func(ctx context.Context, email string, subjects ...string) (bool, error), grant func(ctx context.Context, email, subject string, until time.Time) error) {
+	s.appConsentHas, s.appConsentGrant = has, grant
 }
 
 // SetAppCallableFn wires the apps proxy's routing check, so the consent page
@@ -44,31 +48,41 @@ func (s *Service) SetAppCallableFn(f func(ctx context.Context, server, tool stri
 // appConsented reports whether caller has recorded consent for row: either
 // for this exact version, or for the slug while the same publisher ships the
 // same declared tools. True when no bridge minter is wired: with no token to
-// protect there is nothing to gate (local dev without the apps service).
+// protect there is nothing to gate (local dev without the apps service). A
+// store error denies.
 func (s *Service) appConsented(r *http.Request, caller string, row sqlc.Artifact) bool {
 	if s.appToken == nil {
 		return true
 	}
-	if s.appConsentVerify == nil || caller == "" {
+	if s.appConsentHas == nil || caller == "" {
 		return false
 	}
-	aid := pgstore.UUIDFromPG(row.ArtifactID).String()
-	if s.consentCookieMatches(r, caller, appConsentCookiePrefix+aid, aid) {
-		return true
+	// The version subject first: the slug subject reads the package manifest.
+	for _, sub := range []func() string{
+		func() string { return pgstore.UUIDFromPG(row.ArtifactID).String() },
+		func() string { return s.slugSubjectOrEmpty(r.Context(), row) },
+	} {
+		subject := sub()
+		if subject == "" {
+			continue
+		}
+		ok, err := s.appConsentHas(r.Context(), caller, subject)
+		if err != nil {
+			slog.Warn("app consent lookup failed", "err", err)
+			return false
+		}
+		if ok {
+			return true
+		}
 	}
-	if row.NamedSlug == nil || *row.NamedSlug == "" {
-		return false
-	}
-	return s.consentCookieMatches(r, caller, slugConsentCookie(*row.NamedSlug), s.slugConsentSubject(r.Context(), row))
+	return false
 }
 
-func (s *Service) consentCookieMatches(r *http.Request, caller, name, subject string) bool {
-	c, err := r.Cookie(name)
-	if err != nil {
-		return false
+func (s *Service) slugSubjectOrEmpty(ctx context.Context, row sqlc.Artifact) string {
+	if row.NamedSlug == nil || *row.NamedSlug == "" {
+		return ""
 	}
-	email, got, err := s.appConsentVerify(c.Value)
-	return err == nil && got == subject && strings.EqualFold(email, caller)
+	return s.slugConsentSubject(ctx, row)
 }
 
 // slugConsentSubject is what a "trust all versions" record binds to: the slug,
@@ -85,50 +99,50 @@ func (s *Service) slugConsentSubject(ctx context.Context, row sqlc.Artifact) str
 	return "slug=" + *row.NamedSlug + "~by=" + strings.ToLower(row.Creator) + "~tools=" + hex.EncodeToString(sum[:8])
 }
 
-// slugConsentCookie names the per-slug record; a slug can carry characters a
-// cookie name cannot, and the digest also keeps it apart from the UUID names.
-func slugConsentCookie(slug string) string {
-	sum := sha256.Sum256([]byte(slug))
-	return appConsentCookiePrefix + "s" + hex.EncodeToString(sum[:8])
-}
-
-// grantAppConsent records the viewer's yes for row as a cookie, and with
-// allVersions also for the slug. Path=/ so the record reaches both /app/… and
-// /api/artifacts/…/files/… document loads.
-func (s *Service) grantAppConsent(w http.ResponseWriter, r *http.Request, row sqlc.Artifact, caller string, allVersions bool) error {
+// grantAppConsent records the viewer's yes for row, and with allVersions also
+// for the slug.
+func (s *Service) grantAppConsent(r *http.Request, row sqlc.Artifact, caller string, allVersions bool) error {
 	// A consented viewer sees the app, never the consent page, so a POST that
 	// arrives with consent already in place came from the app's own code (or a
 	// double submit). It must not widen anything.
 	if s.appConsented(r, caller, row) {
 		return nil
 	}
-	aid := pgstore.UUIDFromPG(row.ArtifactID).String()
-	if err := s.setConsentCookie(w, caller, appConsentCookiePrefix+aid, aid); err != nil {
-		return err
+	if caller == "" {
+		return errBadRequest("no viewer to record consent for")
 	}
-	if allVersions && row.NamedSlug != nil && *row.NamedSlug != "" {
-		return s.setConsentCookie(w, caller, slugConsentCookie(*row.NamedSlug), s.slugConsentSubject(r.Context(), row))
+	subjects := []string{pgstore.UUIDFromPG(row.ArtifactID).String()}
+	if slug := s.slugSubjectOrEmpty(r.Context(), row); allVersions && slug != "" {
+		subjects = append(subjects, slug)
+	}
+	until := time.Now().Add(appConsentTTL)
+	for _, sub := range subjects {
+		if err := s.appConsentGrant(r.Context(), caller, sub, until); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (s *Service) setConsentCookie(w http.ResponseWriter, caller, name, subject string) error {
-	tok, err := s.appConsentSign(caller, subject)
-	if err != nil {
-		return err
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name: name, Value: tok, Path: "/", MaxAge: int((30 * 24 * time.Hour).Seconds()),
-		Secure: s.appConsentSecure, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+// ExpireAppConsentCookies clears any legacy arti_app_ok_* cookie the browser
+// still sends. Every one rides on every request (Path=/), and enough of them
+// push the Cookie header past the auth proxy's header limit.
+func ExpireAppConsentCookies(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, c := range r.Cookies() {
+			if strings.HasPrefix(c.Name, AppConsentCookiePrefix) {
+				http.SetCookie(w, &http.Cookie{Name: c.Name, Value: "", Path: "/", MaxAge: -1})
+			}
+		}
+		next.ServeHTTP(w, r)
 	})
-	return nil
 }
 
 // httpAppConsent is POST /app/{ident}/consent. A form post carries `next`
 // (the document URL to return to); a fetch from the viewer chrome carries
 // none and gets 204.
 func (s *Service) httpAppConsent(w http.ResponseWriter, r *http.Request) {
-	if s.appConsentSign == nil {
+	if s.appConsentGrant == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -141,7 +155,7 @@ func (s *Service) httpAppConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not-found", "not an APP artifact")
 		return
 	}
-	if err := s.grantAppConsent(w, r, row, caller, r.FormValue("scope") == "slug"); err != nil {
+	if err := s.grantAppConsent(r, row, caller, r.FormValue("scope") == "slug"); err != nil {
 		writeBadOrInternal(w, err)
 		return
 	}

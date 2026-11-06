@@ -30,6 +30,7 @@ import (
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
 	"github.com/angellist/arti-oss/internal/artifacts"
+	"github.com/angellist/arti-oss/internal/audit"
 	"github.com/angellist/arti-oss/internal/auth"
 	"github.com/angellist/arti-oss/internal/comments"
 	"github.com/angellist/arti-oss/internal/httperr"
@@ -330,14 +331,6 @@ func appOf(c auth.Claims) string {
 	return ""
 }
 
-// appConsentDomain separates the consent record from every JWT the signer
-// mints: the value never parses as a token, so it cannot stand in for a
-// session or the bridge.
-const (
-	appConsentDomain = "arti-app-consent:"
-	appConsentTTL    = 30 * 24 * time.Hour
-)
-
 // embedViewerSessionDomain seals the viewer-mode embed cookie. A sealed blob
 // never parses as a JWT, so it cannot pass as a bearer or app token.
 const embedViewerSessionDomain = "arti-embed-viewer-session:"
@@ -346,30 +339,6 @@ type viewerSession struct {
 	Email string `json:"e"`
 	Key   string `json:"k"`
 	Exp   int64  `json:"x"`
-}
-
-type appConsent struct {
-	Email string `json:"e"`
-	App   string `json:"a"`
-	Exp   int64  `json:"x"`
-}
-
-// SignAppConsent seals the record that email chose to run artifactID. Wired to
-// artifacts.Service.SetAppConsentFns.
-func (s *Service) SignAppConsent(email, artifactID string) (string, error) {
-	return s.signer.SealBlob(appConsentDomain, appConsent{Email: email, App: artifactID, Exp: time.Now().Add(appConsentTTL).Unix()}), nil
-}
-
-// VerifyAppConsent returns the (email, artifactID) a consent record binds.
-func (s *Service) VerifyAppConsent(value string) (email, artifactID string, err error) {
-	var c appConsent
-	if !s.signer.OpenBlob(appConsentDomain, value, &c) {
-		return "", "", errors.New("not an app consent record")
-	}
-	if c.Email == "" || c.App == "" || time.Now().Unix() > c.Exp {
-		return "", "", errors.New("app consent record expired or incomplete")
-	}
-	return c.Email, c.App, nil
 }
 
 // EmbedUserApp authorizes a user-mode embed mint request: it verifies email
@@ -610,6 +579,8 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	email := claims.Email
 	scopedApp := appOf(claims)
+	audit.From(r.Context()).SetViewer(email)
+	audit.From(r.Context()).SetApp(scopedApp)
 	if email == "" || scopedApp == "" {
 		s.logReject(r, http.StatusUnauthorized, "app token missing scope", email)
 		writeErr(w, http.StatusUnauthorized, "app token missing scope")
@@ -623,7 +594,6 @@ func (s *Service) handleMCP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "not permitted")
 		return
 	}
-
 	var req proxyReq
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxToolCallBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
@@ -889,16 +859,27 @@ func (s *Service) canRead(ctx context.Context, id uuid.UUID, caller string) (sql
 	if ok, err := s.art.HasPermission(ctx, caller, rbac.ManageArtifacts); err != nil {
 		return row, false, err
 	} else if ok {
+		pgstore.NoteAccess(ctx, row, "allowed")
 		return row, true, nil
 	}
 	if row.DeletedAt.Valid && !strings.EqualFold(row.Creator, caller) {
+		pgstore.NoteAccess(ctx, row, "denied")
 		return row, false, nil
 	}
 	groups, err := s.art.CallerGroups(ctx, caller)
 	if err != nil {
 		return row, false, err
 	}
-	return row, pgstore.CanAccess(row, caller, groups), nil
+	ok := pgstore.CanAccess(row, caller, groups)
+	pgstore.NoteAccess(ctx, row, decision(ok))
+	return row, ok, nil
+}
+
+func decision(ok bool) string {
+	if ok {
+		return "allowed"
+	}
+	return "denied"
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/audit"
 	"github.com/angellist/arti-oss/internal/paging"
 	"github.com/angellist/arti-oss/internal/rbac"
 	"github.com/angellist/arti-oss/internal/store/blob"
@@ -139,8 +140,8 @@ type Store struct {
 	// Same cache discipline; see app_mcp_servers.go.
 	connectors connectorCache
 
-	// deactivations caches the deactivated users, read by every auth.IsAllowed
-	// call. Same cache discipline; see deactivations.go.
+	// deactivations caches the deactivated users and account holders, read by
+	// every auth.IsAllowed call. Same cache discipline; see deactivations.go.
 	deactivations deactivationCache
 
 	busMu sync.RWMutex
@@ -215,8 +216,8 @@ type PutInput struct {
 
 	// KeepAttachmentSlug exempts this write from the slugless/creator-only
 	// ATTACHMENT clamp below, for the one case that isn't a chat file: a
-	// person publishing a binary under a slug they named, which is a
-	// versioned document. See applyAttachmentInvariants.
+	// caller publishing a binary under a slug it named, which is a versioned
+	// document. See applyAttachmentInvariants.
 	KeepAttachmentSlug bool
 
 	// NOTE: there is deliberately no CommentsEnabled field. The per-doc comment
@@ -242,10 +243,10 @@ type PutInput struct {
 // creator-only. No-op for other types.
 //
 // KeepAttachmentSlug is the one exemption, and it is a different situation:
-// a person publishing a file under a slug they named is publishing a
-// document, so it versions and carries that document's ACL like any other
-// type. Only the artifacts service sets it, and only for an interactive
-// caller — couch's chat uploads never reach this branch.
+// a caller publishing a file under a slug it named is publishing a document,
+// so it versions and carries that document's ACL like any other type. Only the
+// artifacts service sets it, and only when the request names a slug — chat
+// uploads name none and never reach this branch.
 func applyAttachmentInvariants(in PutInput) PutInput {
 	if in.ArtifactType != TypeAttachment {
 		return in
@@ -407,7 +408,7 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 	// inherit a comment switch or ACL from, and nothing to serialize against.
 	if in.NamedSlug == nil {
 		in = withAsserterReader(in)
-		row, err := s.q.InsertArtifact(ctx, insertParams(nil, finalAccess(in.AllowedAccess, in.AllowedWrite), in.AllowedWrite, true))
+		row, err := s.q.InsertArtifact(ctx, insertParams(nil, finalAccess(in.AllowedAccess, in.AllowedWrite), in.AllowedWrite, in.ArtifactType != TypeApp))
 		if err != nil {
 			return sqlc.Artifact{}, fmt.Errorf("pgstore: insert: %w", err)
 		}
@@ -462,7 +463,9 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 	// caller's access hook, the doc-level comment switch, and the ACL
 	// inherit/fan-out decisions. Never inherited from something a caller
 	// read earlier, which a concurrent owner write could have made stale.
-	commentsEnabled := true // no prior version → comments on, the default
+	// A fresh slug starts with comments on, except an APP: the overlay sits on
+	// a live page, so its owner opts in.
+	commentsEnabled := in.ArtifactType != TypeApp
 	var livePrev *sqlc.Artifact
 	prev, err := qtx.GetLatestArtifactBySlug(ctx, in.NamedSlug)
 	switch {
@@ -476,7 +479,7 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 		// writes every version of the slug — so all rows agree and the
 		// latest live one is as good as any. Inherit it rather than letting
 		// a new version silently re-open comments the owner turned off.
-		commentsEnabled = prev.CommentsEnabled
+		commentsEnabled = inheritComments(prev, in.ArtifactType)
 		livePrev = &prev
 	case errors.Is(err, pgx.ErrNoRows):
 		// No LIVE prior version — either a brand-new slug or one whose
@@ -494,7 +497,7 @@ func (s *Store) Put(ctx context.Context, in PutInput) (sqlc.Artifact, error) {
 		archived, aerr := qtx.GetLatestArtifactBySlugAnyState(ctx, in.NamedSlug)
 		switch {
 		case aerr == nil:
-			commentsEnabled = archived.CommentsEnabled
+			commentsEnabled = inheritComments(archived, in.ArtifactType)
 		case errors.Is(aerr, pgx.ErrNoRows):
 			// Genuinely a fresh slug — keep the default.
 		default:
@@ -1014,12 +1017,21 @@ func (s *Store) GetLatestBySlugForCaller(ctx context.Context, slug, caller strin
 		CallerGroups: groups,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
+		audit.From(ctx).AddTarget(audit.Target{Slug: slug, Decision: "denied"})
 		return sqlc.Artifact{}, ErrNotFound
 	}
 	if err != nil {
 		return sqlc.Artifact{}, err
 	}
-	return s.refuseBlocked(ctx, row)
+	blockedRow := row
+	row, err = s.refuseBlocked(ctx, row)
+	switch {
+	case err == nil:
+		NoteAccess(ctx, row, "allowed")
+	case errors.Is(err, ErrNotFound):
+		NoteAccess(ctx, blockedRow, "denied")
+	}
+	return row, err
 }
 
 // GetBySlug fetches the latest non-deleted version (version==nil) or a
@@ -1128,14 +1140,14 @@ type ListInput struct {
 	CallerGroups []string
 
 	// HideAppCouch drops rows scoped `app:couch` from the result. Set by the
-	// catalog handlers for non-admin callers: that scope marks the couch
+	// catalog handlers for non-admin callers: that scope marks an
 	// app's private state (stored as attachments), which shouldn't clutter
 	// the human catalog. Ordinary attachments are visible. Admins (empty
 	// CallerEmail) never set this, so they can still search everything.
 	HideAppCouch bool
 }
 
-// ScopeAppCouch marks an artifact as the couch app's private data. Rows with
+// ScopeAppCouch marks an artifact as an app's private data. Rows with
 // this scope are hidden from the non-admin catalog (see HideAppCouch).
 const ScopeAppCouch = "app:couch"
 
@@ -1307,7 +1319,7 @@ func buildWhere(in ListInput) (where []string, args []any) {
 		addFilter("artifact_type", *in.ArtifactType)
 	}
 	if in.HideAppCouch {
-		// Hide couch's private app state (scope app:couch) from the catalog.
+		// Hide private app state (scope app:couch) from the catalog.
 		// addArray with negate emits NOT (scopes @> ARRAY['app:couch']),
 		// which keeps every row that lacks the scope (incl. empty arrays).
 		addArray("scopes", ScopeAppCouch, true)
@@ -1599,6 +1611,12 @@ func (s *Store) UpdateAccess(ctx context.Context, id uuid.UUID, access []string,
 		AllowedAccess: access,
 		AllowedWrite:  write,
 	})
+}
+
+// inheritComments is the comment switch a new version takes from prev. A slug
+// becoming an APP starts off, as a new APP does; the owner opts in again.
+func inheritComments(prev sqlc.Artifact, newType string) bool {
+	return prev.CommentsEnabled && (newType != TypeApp || prev.ArtifactType == TypeApp)
 }
 
 // SetCommentsEnabled flips the per-doc comment switch on ONE artifact row.
@@ -2231,6 +2249,58 @@ func (s *Store) Aggregates(ctx context.Context, in AggregatesInput) (AggregatesR
 	return out, nil
 }
 
+// CreatorLabels is the label histogram over the latest version of each
+// artifact `creator` made (case-insensitive), with blocked documents excluded.
+func (s *Store) CreatorLabels(ctx context.Context, creator string, limit int) ([]LabelCount, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	args := []any{limit, creator}
+	blockClause, blockPats, err := s.blockFilterSQL(ctx, len(args)+1)
+	if err != nil {
+		return nil, err
+	}
+	if blockClause != "" {
+		blockClause = " AND " + blockClause
+		args = append(args, blockPats)
+	}
+	q := `
+		SELECT label, COUNT(*) AS n
+		FROM (
+			SELECT unnest(labels) AS label
+			FROM artifacts
+			WHERE deleted_at IS NULL AND lower(creator) = lower($2)
+			AND (
+				named_slug IS NULL
+				OR version = (
+					SELECT MAX(b.version) FROM artifacts b
+					WHERE b.named_slug = artifacts.named_slug AND b.deleted_at IS NULL
+				)
+			)` + blockClause + `
+		) t
+		GROUP BY label
+		ORDER BY n DESC, label ASC
+		LIMIT $1
+	`
+	rs, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: aggregates my labels: %w", err)
+	}
+	defer rs.Close()
+	out := []LabelCount{}
+	for rs.Next() {
+		var r LabelCount
+		if err := rs.Scan(&r.Label, &r.Count); err != nil {
+			return nil, fmt.Errorf("pgstore: aggregates my labels scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rs.Err(); err != nil {
+		return nil, fmt.Errorf("pgstore: aggregates my labels iter: %w", err)
+	}
+	return out, nil
+}
+
 // browseFacetColumns maps a Browse-page facet key to the SQL producing its
 // distinct values: a bare column for scalar facets (type, content_type), or
 // an unnest(...) for array facets (label, scope). Only these four keys are
@@ -2421,7 +2491,7 @@ func (s *Store) BrowseAggregates(ctx context.Context, in BrowseAggregatesInput) 
 	return out, nil
 }
 
-// SkillLabels mark an artifact as a skill. couch labels its catalog `skill`;
+// SkillLabels mark an artifact as a skill. `skill` is the current label;
 // `kind:skill` is the older spelling.
 var SkillLabels = []string{"skill", "kind:skill"}
 

@@ -4,7 +4,7 @@ import "testing"
 
 func slugPtr(s string) *string { return &s }
 
-// The chat-upload case: couch posts a file with no slug and no ACL, and it
+// The chat-upload case: a client posts a file with no slug and no ACL, and it
 // comes out slugless and creator-only. A list inherited from a named slug is
 // clamped the same way; only a list the caller itself passed is kept.
 func TestAttachmentInvariants_ClampASluglessUpload(t *testing.T) {
@@ -15,7 +15,7 @@ func TestAttachmentInvariants_ClampASluglessUpload(t *testing.T) {
 	}{
 		{"omitted", PutInput{ArtifactType: TypeAttachment}, []string{}},
 		{"inherited", PutInput{ArtifactType: TypeAttachment, AllowedAccess: []string{"*"}, InheritAccess: true, InheritWrite: true}, []string{}},
-		{"explicit", PutInput{ArtifactType: TypeAttachment, AllowedAccess: []string{"alice@example.com", "couch@sa.arti.invalid"}}, []string{"alice@example.com", "couch@sa.arti.invalid"}},
+		{"explicit", PutInput{ArtifactType: TypeAttachment, AllowedAccess: []string{"alice@example.com", "svc@sa.arti.invalid"}}, []string{"alice@example.com", "svc@sa.arti.invalid"}},
 	} {
 		got := applyAttachmentInvariants(tc.in)
 		if got.NamedSlug != nil {
@@ -27,9 +27,8 @@ func TestAttachmentInvariants_ClampASluglessUpload(t *testing.T) {
 	}
 }
 
-// A slug alone is not enough: a service credential naming one still gets the
-// clamp (the service layer refuses that request before reaching here, and this
-// is the backstop if a new caller ever doesn't).
+// A slug alone is not enough: only a write the artifacts service marked
+// KeepAttachmentSlug keeps it. This is the backstop for any other caller of Put.
 func TestAttachmentInvariants_ClampASlugItWasNotToldToKeep(t *testing.T) {
 	got := applyAttachmentInvariants(PutInput{
 		ArtifactType:  TypeAttachment,
@@ -41,7 +40,7 @@ func TestAttachmentInvariants_ClampASlugItWasNotToldToKeep(t *testing.T) {
 	}
 }
 
-// A person publishing a binary under a slug they named is publishing a
+// A caller publishing a binary under a slug it named is publishing a
 // document: it keeps the slug (so it versions) and its access is whatever the
 // document's is, not creator-only.
 func TestAttachmentInvariants_KeepAnInteractiveSluggedUpload(t *testing.T) {

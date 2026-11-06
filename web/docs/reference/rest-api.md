@@ -90,6 +90,7 @@ Registered by `artifacts.Mount` (`internal/artifacts/server.go:1663`).
 | GET | `/api/artifacts/{id}/denial` · `/api/artifacts/by-slug/{slug}/denial` | Name the document and its owner to a signed-in person who cannot read it |
 | POST | `/api/artifacts/{id}/access/grant-read` | Add one address to the document's readers (owner or admin) |
 | POST | `/api/artifacts/{id}/views` | Record one human-facing view |
+| POST | `/api/artifacts/{id}/html-text-edits` | Return a TEXT `text/html` page with in-place text edits applied, for the caller to publish as a new version; writes nothing. Only when `ARTI_HTML_EDIT_ENABLED` is on |
 | GET | `/api/artifacts/{id}/views` | Aggregate view stats (viewer rows owner/admin-only) |
 | GET | `/api/artifacts/{id}/bookmark` | Slug-wide bookmark count, plus whether the caller bookmarked it |
 | PUT / DELETE | `/api/artifacts/{id}/bookmark` | Add / remove the caller's bookmark |
@@ -153,11 +154,11 @@ Both new checks run against a fresh read inside the write transaction, so a
 publish that races another one is refused rather than silently layered on top of
 a version the caller never saw.
 
-**ATTACHMENT and slugs.** An `ATTACHMENT` posted with a `named_slug` by a person
-(browser session, their own CLI or MCP client) is a versioned document like any
-other type. From a **service credential** (an `arti_` API key, or a device-flow
-upload token) the same request is a `400`: those uploads are another app's files,
-and they stay slugless and creator-only. Omit `named_slug` and they always have.
+**ATTACHMENT and slugs.** An `ATTACHMENT` posted with a `named_slug` is a versioned
+document like any other type, from a person or a service credential (an `arti_`
+API key, or a device-flow upload token). Writing onto an existing slug needs write
+access to it, and onto a slug of another type is a `409 type-change`. Omit
+`named_slug` and the upload is slugless and creator-only, as chat-client uploads are.
 
 **Compressed bodies (`Content-Encoding: gzip`).** This endpoint and `/append`
 accept a gzip-compressed request body — gzip the JSON (or multipart) payload and
@@ -354,7 +355,7 @@ owner or an admin (`403` otherwise). Patterns — `*`, globs, `group:` tokens �
 
 An APP runs as whoever opens it, so until the viewer approves a version the APP routes
 serve a consent page instead of the app. The page's form posts here; the approval is
-stored as a 30-day cookie for that version, or with `scope=slug` for every version of
+stored server-side for 30 days for that version, or with `scope=slug` for every version of
 the slug by the same publisher with the same declared tools. With `next` (a path under
 `/app/` or `/api/artifacts/`) the response is a `303` to it; without, `204`.
 

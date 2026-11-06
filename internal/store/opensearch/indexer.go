@@ -59,9 +59,9 @@ func (ix *Indexer) IndexVersion(ctx context.Context, row sqlc.Artifact, isLatest
 	// An artifact labelled index:skip-fulltext keeps every metadata field —
 	// title, description, labels, slug, creator — and only withholds its body
 	// from content_text, so it stays findable by name but its contents can't
-	// match a free-text query. This exists for machine-state artifacts: the
-	// publisher state doc `couch-skill-publish-state` is ~315 KB of sha256s and
-	// UUIDs, re-written daily, and every version was indexed in full — so a
+	// match a free-text query. This exists for machine-state artifacts: a
+	// publisher state doc full of sha256s and UUIDs is re-written daily, and
+	// every version was indexed in full — so a
 	// search for a bare hash returned it, and the index carried a 256 KiB copy
 	// per version of something no human ever full-text searches.
 	//

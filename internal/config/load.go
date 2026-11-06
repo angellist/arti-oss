@@ -58,6 +58,7 @@ func Defaults() *Config {
 				MintRPM: 10,
 			},
 		},
+		Audit: Audit{FlushInterval: Duration(time.Minute)},
 		Database: Database{
 			MaxConns: 20,
 		},
@@ -259,6 +260,7 @@ func bindings(c *Config) []binding {
 		str("AUTH_OIDC_GROUPS_CLAIM", &c.Auth.GroupsClaim),
 		csv("AUTH_REQUIRED_GROUPS", &c.Auth.RequiredGroups),
 		csv("AUTH_ALLOWED_EMAILS", &c.Auth.AllowedEmails),
+		csv("AUTH_ACCEPTED_DOMAINS", &c.Auth.AcceptedDomains),
 		str("ARTI_SERVICE_SECRET", &c.Auth.ServiceSecret),
 		str("ARTI_SERVICE_EMAIL", &c.Auth.ServiceEmail),
 		str("ARTI_LOGOUT_URL", &c.Auth.LogoutURL),
@@ -277,6 +279,7 @@ func bindings(c *Config) []binding {
 		// Share links
 		boolean("ARTI_SHARE_ENABLED", &c.Share.Enabled),
 		boolean("ARTI_MAP_ARTIFACTS", &c.Maps.Enabled),
+		boolean("ARTI_HTML_EDIT_ENABLED", &c.HTMLEdit.Enabled),
 		duration("ARTI_SHARE_MAX_TTL", &c.Share.MaxTTL),
 		integer("ARTI_SHARE_OPEN_RPM", &c.Share.OpenRPM),
 		integer("ARTI_SHARE_MINT_RPM", &c.Share.MintRPM),
@@ -284,6 +287,12 @@ func bindings(c *Config) []binding {
 		integer("ARTI_COMMENTS_ARTIFACT_RPM", &c.Comments.ArtifactRPM),
 		str("ARTI_OBO_CALLBACK_BASE", &c.Auth.OBO.CallbackBase),
 		str("ARTI_OBO_ENC_KEY", &c.Auth.OBO.EncKey),
+
+		// Audit archive
+		str("ARTI_AUDIT_BUCKET", &c.Audit.Bucket),
+		str("ARTI_AUDIT_REGION", &c.Audit.Region),
+		str("ARTI_AUDIT_ENDPOINT", &c.Audit.Endpoint),
+		duration("ARTI_AUDIT_FLUSH_INTERVAL", &c.Audit.FlushInterval),
 
 		// Admin
 		csv("ARTI_ADMIN_EMAILS", &c.Admin.Emails),
@@ -307,6 +316,8 @@ func bindings(c *Config) []binding {
 
 		// Notifications
 		str("ARTI_SLACK_BOT_TOKEN", &c.Notifications.SlackBotToken),
+		str("ACCESS_REQUEST_SLACK_CHANNEL", &c.Notifications.AccessRequestChannel),
+		str("ACCESS_REQUEST_SLACK_MENTION", &c.Notifications.AccessRequestMention),
 
 		// LLM
 		str("ANTHROPIC_API_KEY", &c.LLM.APIKey),

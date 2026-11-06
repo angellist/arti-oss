@@ -57,10 +57,10 @@ func TestIndexArtifact_SkipFullTextLabelDropsOnlyContent(t *testing.T) {
 	ix := NewIndexer(c, nil, nil)
 
 	desc := "Machine state for the archive->arti skill publisher."
-	slug := "couch-skill-publish-state"
+	slug := "agent-skill-publish-state"
 	row := sqlc.Artifact{
 		ArtifactType: pgstore.TypePackage, // PACKAGE path: extractPackageText, no store needed
-		Title:        "couch skill publish state",
+		Title:        "agent skill publish state",
 		Description:  &desc,
 		NamedSlug:    &slug,
 		ContentType:  "application/json",
@@ -75,7 +75,7 @@ func TestIndexArtifact_SkipFullTextLabelDropsOnlyContent(t *testing.T) {
 	// omitempty means "absent", not "empty string" — assert the metadata is
 	// still all there, so the doc stays findable by name.
 	for field, want := range map[string]any{
-		"title":        "couch skill publish state",
+		"title":        "agent skill publish state",
 		"description":  desc,
 		"named_slug":   slug,
 		"content_type": "application/json",

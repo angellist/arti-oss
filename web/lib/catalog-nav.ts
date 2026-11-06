@@ -2,24 +2,26 @@
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { SEARCH_OPEN_KEY } from "./catalog";
+import { ATTACHMENTS_KEY, SEARCH_OPEN_KEY } from "./catalog";
 import { useSetSearchBarOpen } from "./rail-context";
 
-// The last catalog filter (type + q), persisted so a doc view, whose URL carries
+// The last catalog filter (type + q + the attachments toggle), persisted so a doc view, whose URL carries
 // no filter, can still show and act on it.
 export const FILTER_TYPE_KEY = "arti.filter.type";
 export const FILTER_Q_KEY = "arti.filter.q";
+export const FILTER_ATT_KEY = "arti.filter.att";
 
-export type CatalogFilter = { type: string; q: string };
+export type CatalogFilter = { type: string; q: string; att?: string };
 
 export function readStickyFilter(): CatalogFilter {
   try {
     return {
       type: window.localStorage.getItem(FILTER_TYPE_KEY) ?? "",
       q: window.localStorage.getItem(FILTER_Q_KEY) ?? "",
+      att: window.localStorage.getItem(FILTER_ATT_KEY) ?? "",
     };
   } catch {
-    return { type: "", q: "" };
+    return { type: "", q: "", att: "" };
   }
 }
 
@@ -31,20 +33,22 @@ export function useStickyFilter(): CatalogFilter {
   const onCatalog = usePathname() === "/";
   const urlType = sp.get("type") ?? "";
   const urlQ = sp.get("q") ?? "";
+  const urlAtt = sp.get(ATTACHMENTS_KEY) ?? "";
   const [sticky, setSticky] = useState(readStickyFilter);
 
   useEffect(() => {
     if (!onCatalog) return;
-    setSticky({ type: urlType, q: urlQ });
+    setSticky({ type: urlType, q: urlQ, att: urlAtt });
     try {
       window.localStorage.setItem(FILTER_TYPE_KEY, urlType);
       window.localStorage.setItem(FILTER_Q_KEY, urlQ);
+      window.localStorage.setItem(FILTER_ATT_KEY, urlAtt);
     } catch {
       // localStorage may be unavailable; the in-memory value still works.
     }
-  }, [onCatalog, urlType, urlQ]);
+  }, [onCatalog, urlType, urlQ, urlAtt]);
 
-  return onCatalog ? { type: urlType, q: urlQ } : sticky;
+  return onCatalog ? { type: urlType, q: urlQ, att: urlAtt } : sticky;
 }
 
 // catalogURL builds the catalog URL for a filter change. On the catalog the
@@ -59,6 +63,7 @@ export function catalogURL(
   if (!catalogParams) {
     if (current.q) next.set("q", current.q);
     if (current.type) next.set("type", current.type);
+    if (current.att) next.set(ATTACHMENTS_KEY, current.att);
   }
   for (const [k, v] of Object.entries(params)) {
     if (v === null || v === "") next.delete(k);

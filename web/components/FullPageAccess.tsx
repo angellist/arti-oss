@@ -8,8 +8,8 @@ import { sameEmail } from "@/lib/arti";
 import { useTopLevelWindow } from "@/lib/useViewport";
 import type { ArtifactInfo, Me } from "@/lib/types";
 
-// The ?v=full view's access control: a square the size of the ✕, just left of
-// it, showing the read-access tier as a dot. Opens the same AccessModal as the
+// The ?v=full view's access control: a square the size of the ✕, just right
+// of it, showing the read-access tier as a dot. Opens the same AccessModal as the
 // normal viewer — editable for the owner, read-only for everyone else.
 export default function FullPageAccess({ info, me }: { info: ArtifactInfo; me?: Me | null }) {
   const router = useRouter();
@@ -37,7 +37,7 @@ export default function FullPageAccess({ info, me }: { info: ArtifactInfo; me?: 
           aria-label={`${isOwner ? "edit access" : "access"}: ${tooltip}`}
           style={{
             top: "var(--arti-top-strip, 0px)",
-            right: EXIT_SIZE,
+            left: EXIT_SIZE,
             width: EXIT_SIZE,
             height: EXIT_SIZE,
           }}

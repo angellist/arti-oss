@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/audit"
 	"github.com/angellist/arti-oss/internal/auth"
 	"github.com/angellist/arti-oss/internal/httperr"
 	"github.com/angellist/arti-oss/internal/pkgzip"
@@ -55,13 +56,12 @@ type Service struct {
 	// apps service; backs the public files-token route (MountFileToken). nil
 	// makes that route 404, and filesBaseFor falls back to the cookie path.
 	appTokenVerify func(tok string) (email, artifactID string, err error)
-	// appConsentSign / appConsentVerify back the per-viewer, per-version run
+	// appConsentHas / appConsentGrant back the per-viewer, per-version run
 	// consent an APP document load requires before the bridge is minted (see
 	// app_consent.go). Wired in cmd_serve next to appToken.
-	appConsentSign   func(email, artifactID string) (string, error)
-	appCallable      func(ctx context.Context, server, tool string) (bool, error)
-	appConsentVerify func(tok string) (email, artifactID string, err error)
-	appConsentSecure bool
+	appConsentHas   func(ctx context.Context, email string, subjects ...string) (bool, error)
+	appConsentGrant func(ctx context.Context, email, subject string, until time.Time) error
+	appCallable     func(ctx context.Context, server, tool string) (bool, error)
 	// embedFilesToken, when set, mints the email-less files token user-mode
 	// embed surfaces use for sibling assets (there is no serve-time caller to
 	// mint appToken for). Wired in cmd_serve to the apps service; nil makes
@@ -100,6 +100,9 @@ type Service struct {
 	// dictation mirrors whether POST /api/dictate has a provider key, so the
 	// comment box can leave its mic out when it would only 501.
 	dictation bool
+	// htmlEdit gates in-place text editing of HTML artifacts (?edit=1 and
+	// POST /api/artifacts/{id}/html-text-edits).
+	htmlEdit bool
 }
 
 // SetMapEnabled turns the MAP artifact type on. Off by default.
@@ -198,6 +201,12 @@ func parseLegacyScope(raw string) []string {
 // `creator` is taken from the auth context by the HTTP layer; the
 // service does not enforce identity.
 func (s *Service) Create(ctx context.Context, req CreateRequest, creator string) (ArtifactInfo, error) {
+	info, err := s.create(ctx, req, creator)
+	noteWrite(ctx, info, err, req.NamedSlug)
+	return info, err
+}
+
+func (s *Service) create(ctx context.Context, req CreateRequest, creator string) (ArtifactInfo, error) {
 	if creator == "" {
 		return ArtifactInfo{}, errBadRequest("missing creator (auth required)")
 	}
@@ -236,21 +245,15 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 	}
 
 	// ATTACHMENT is slugless by default (pgstore.applyAttachmentInvariants):
-	// couch posts chat files through this endpoint, and those must never pick
-	// up a document's ACL by landing on a slug. A person naming a slug means
-	// it — that is the viewer's drop-to-version path — so their upload keeps
-	// the slug and versions like any other document. Refuse rather than drop
-	// the slug silently, which is how a caller ends up with a mystery slugless
-	// artifact and no idea why.
-	keepAttachmentSlug := false
-	if at == pgstore.TypeAttachment && req.NamedSlug != nil && *req.NamedSlug != "" {
-		if !interactiveCaller(ctx) {
-			return ArtifactInfo{}, errBadRequest(
-				"ATTACHMENT uploads from a service credential are slugless and creator-only; drop named_slug, " +
-					"or upload the file from the web UI to publish it as a versioned document")
-		}
-		keepAttachmentSlug = true
-	}
+	// chat clients post files through this endpoint with no slug, and those must
+	// never pick up a document's ACL by landing on one. A caller that names a
+	// slug means it — a person dropping a new version in the viewer, or an
+	// agent publishing a screenshot under a stable name — so the upload keeps
+	// the slug and versions like any other document. That holds for service
+	// credentials and upload tokens too: landing on someone else's document
+	// still has to pass resolveWriteAuthority / CheckAccess, and landing on a
+	// TEXT/APP/PACKAGE slug is a type change (409) unless the caller opts in.
+	keepAttachmentSlug := at == pgstore.TypeAttachment && req.NamedSlug != nil && *req.NamedSlug != ""
 
 	var content []byte
 	switch {
@@ -402,8 +405,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 	row, err := s.store.Put(ctx, pgstore.PutInput{
 		ArtifactType: at,
 		NamedSlug:    req.NamedSlug,
-		// Set only for a person publishing an ATTACHMENT under a slug they
-		// named; every other attachment stays slugless and creator-only.
+		// Set whenever an ATTACHMENT request names a slug, from any caller;
+		// a slugless attachment stays slugless and creator-only.
 		KeepAttachmentSlug: keepAttachmentSlug,
 		Title:              req.Title,
 		Description:        req.Description,
@@ -493,6 +496,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, creator string)
 // (slug, version) unique constraint forces a retry loop; persistent
 // contention surfaces as ErrConflict (mapped to HTTP 409).
 func (s *Service) Append(ctx context.Context, slug string, req AppendRequest, creator string) (info ArtifactInfo, cached bool, err error) {
+	defer func() { noteWrite(ctx, info, err, &slug) }()
 	author, err := s.actingFor(ctx, creator, &slug)
 	if err != nil {
 		return ArtifactInfo{}, false, err
@@ -719,6 +723,17 @@ func errIdempotencyStale(key string, artifactID uuid.UUID, cause error) error {
 // can't version an archived slug either, since checkAccess denies them
 // the row entirely.
 func (s *Service) checkAccess(ctx context.Context, row sqlc.Artifact, caller string) error {
+	err := s.checkAccessDecision(ctx, row, caller)
+	switch {
+	case err == nil:
+		pgstore.NoteAccess(ctx, row, "allowed")
+	case errors.Is(err, pgstore.ErrNotFound):
+		pgstore.NoteAccess(ctx, row, "denied")
+	}
+	return err
+}
+
+func (s *Service) checkAccessDecision(ctx context.Context, row sqlc.Artifact, caller string) error {
 	if ok, err := s.canManageArtifacts(ctx, caller); err != nil {
 		return err
 	} else if ok {
@@ -1033,7 +1048,7 @@ func (s *Service) Versions(ctx context.Context, slug string, caller string) ([]A
 
 // List + Search return ListResponse-shaped data.
 //
-// `app:couch`-scoped artifacts (the couch app's private state) are hidden from
+// `app:couch`-scoped artifacts (an app's private state) are hidden from
 // the catalog for non-admins here, at the service layer, so every surface
 // (REST, MCP, future callers) is covered uniformly — CallerEmail is empty only
 // for admins (see each surface's callerForList), so a non-empty caller means
@@ -1519,7 +1534,7 @@ func (s *Service) callerForList(ctx context.Context) (string, error) {
 // appCouchHidden reports whether scope:app:couch artifacts should be hidden
 // from this list/search caller. Admins (MANAGE_ARTIFACTS → empty caller via
 // callerForList) already see everything. MANAGE_SKILLS holders are also exempt
-// so an app's service identity (e.g. couch's service@) can build its skill
+// so an app's service identity can build its skill
 // catalog from List(skill). Everyone else is hidden.
 func (s *Service) appCouchHidden(ctx context.Context, caller string) (bool, error) {
 	if caller == "" {
@@ -1708,6 +1723,7 @@ func Mount(r chi.Router, svc *Service) {
 	r.Get("/api/artifacts/{id}/files", svc.httpFilesByID)
 	r.Get("/api/artifacts/{id}/files/*", svc.httpFileByID)
 	r.Post("/api/artifacts/{id}/views", svc.httpRecordView)
+	r.Post("/api/artifacts/{id}/html-text-edits", svc.httpApplyHTMLTextEdits)
 	r.Get("/api/artifacts/{id}/views", svc.httpViewStats)
 	r.Get("/api/artifacts/{id}/bookmark", svc.httpBookmarks)
 	r.Put("/api/artifacts/{id}/bookmark", svc.httpSetBookmark)
@@ -2061,6 +2077,10 @@ func (s *Service) httpGetContent(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 	setContentDisposition(w, r, row.Title, ct, row.ArtifactType)
+	if s.htmlEditMode(r, htmlEditRow{artifactType: row.ArtifactType, contentType: ct}) {
+		s.writeHTMLEditPage(w, rc, ct, id.String())
+		return
+	}
 	s.writeServedContent(w, r, rc, ct, row, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()), fullPageContext(r))
 }
 
@@ -2241,6 +2261,7 @@ func (s *Service) httpMe(w http.ResponseWriter, r *http.Request) {
 		// whose endpoint 404s.
 		"share_links_enabled": s.share.Enabled,
 		"dictation_enabled":   s.dictation,
+		"html_edit_enabled":   s.htmlEdit,
 	})
 }
 
@@ -2751,9 +2772,8 @@ func (s *Service) httpFileByID(w http.ResponseWriter, r *http.Request) {
 	filesRoot := s.filesRootFor(caller, id.String())
 	body = s.injectFilesBaseToken(body, ct, filesRoot, caller, path)
 	if row.ArtifactType == pgstore.TypeApp {
-		// APP files get ONLY the app bridge, never the comments overlay — a
-		// sandboxed page should carry one scoped token, not two.
 		body = s.injectAppBridge(body, ct, id.String(), caller, nil)
+		body = s.injectComments(body, ct, id.String(), row.CommentsEnabled, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()))
 		s.setContentSecurityApp(w, ct)
 	} else {
 		body = s.injectComments(body, ct, id.String(), row.CommentsEnabled, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()))
@@ -2982,6 +3002,10 @@ func (s *Service) serveAppRow(w http.ResponseWriter, r *http.Request, row sqlc.A
 	} else {
 		body = s.injectAppBridge(body, ct, aid, caller, params)
 	}
+	if frameAncestors == "" {
+		// Only arti's own /app/ page: an embed surface's host owns its chrome.
+		body = s.injectComments(body, ct, aid, row.CommentsEnabled, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()))
+	}
 	body = injectStaleAppBanner(body, ct, stale)
 	s.setContentSecurityAppFA(w, ct, frameAncestors)
 	_, _ = w.Write(body)
@@ -3010,9 +3034,8 @@ func (s *Service) httpFileBySlug(w http.ResponseWriter, r *http.Request) {
 	filesRoot := s.filesRootFor(caller, aid)
 	body = s.injectFilesBaseToken(body, ct, filesRoot, caller, path)
 	if row.ArtifactType == pgstore.TypeApp {
-		// APP files get ONLY the app bridge, never the comments overlay — a
-		// sandboxed page should carry one scoped token, not two.
 		body = s.injectAppBridge(body, ct, aid, caller, nil)
+		body = s.injectComments(body, ct, aid, row.CommentsEnabled, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()))
 		s.setContentSecurityApp(w, ct)
 	} else {
 		body = s.injectComments(body, ct, aid, row.CommentsEnabled, caller, auth.NameFromContext(r.Context()), auth.PictureFromContext(r.Context()))
@@ -3110,7 +3133,7 @@ func (s *Service) injectFilesBaseToken(body []byte, ct, filesRoot, caller, path 
 }
 
 // injectComments inserts the comments overlay (a small config blob + the
-// arti-served bundle) into served text/html package files, so a reader can
+// arti-served bundle) into served text/html package and APP pages, so a reader can
 // comment on the prototype page itself. The overlay reaches the comments API
 // with a scoped bearer token (the sandboxed page can't send the cookie).
 // No-ops for non-HTML, unauthenticated requests, when injection is off, or
@@ -3831,8 +3854,8 @@ func fullPageContext(r *http.Request) bool {
 //
 // It also governs EMBEDDING, and must: FullPageView renders an HTML artifact as
 // a nested iframe whose `src` is this route, so when a trusted internal origin
-// frames the viewer (couch's artifact side panel embeds /s/<slug>?v=full) the
-// ancestor chain is couch → arti catalog page → this response. The global
+// frames the viewer (a host app's side panel embeds /s/<slug>?v=full) the
+// ancestor chain is host app → arti catalog page → this response. The global
 // `X-Frame-Options: SAMEORIGIN` is evaluated against EVERY ancestor, so it
 // blocks that inner frame even though the catalog page itself is allowed to be
 // framed (cmd_serve.go drops XFO on the Next.js-proxied catalog responses, but
@@ -4311,19 +4334,6 @@ func versionGuard(req CreateRequest, at string, prev sqlc.Artifact) error {
 	}
 }
 
-// interactiveCaller reports whether the request carries a person's own
-// credential (browser session, their CLI, their MCP client) rather than a
-// service one. API keys and device-flow upload tokens are how another app —
-// couch — posts files on a user's behalf, and those keep the stricter
-// ATTACHMENT invariants. Fails closed when no claims are present.
-func interactiveCaller(ctx context.Context) bool {
-	c, ok := auth.ClaimsFromContext(ctx)
-	if !ok {
-		return false
-	}
-	return c.Typ != auth.TokenTypeAPIKey && !c.IsUploadScoped()
-}
-
 // fieldSyntax recognizes search tokens like `slug:smoke-test` or
 // `scope:user:tian@al.com`. The first colon splits key from value; the
 // value is taken verbatim so it may itself contain colons.
@@ -4666,4 +4676,20 @@ func (s *Service) actingFor(ctx context.Context, principal string, slug *string)
 		}
 	}
 	return actingPerson(person), nil
+}
+
+// noteWrite records a create or append in the request's audit entry: the new
+// version on success, the addressed slug when the write was refused.
+func noteWrite(ctx context.Context, info ArtifactInfo, err error, slug *string) {
+	e := audit.From(ctx)
+	switch {
+	case err == nil:
+		t := audit.Target{ArtifactID: info.ArtifactID, Version: info.Version, Decision: "allowed"}
+		if info.NamedSlug != nil {
+			t.Slug = *info.NamedSlug
+		}
+		e.AddTarget(t)
+	case slug != nil && *slug != "" && (errors.Is(err, pgstore.ErrNotFound) || errors.As(err, new(forbidden))):
+		e.AddTarget(audit.Target{Slug: *slug, Decision: "denied"})
+	}
 }

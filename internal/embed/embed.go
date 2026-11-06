@@ -96,7 +96,7 @@ type Surface struct {
 	Secret string `json:"secret"`
 	// Origin lists the hosts allowed to frame this surface (frame-ancestors).
 	// Accepts a single string (the original config shape) or an array — a
-	// nested topology (e.g. Front ▸ couch ▸ arti) must enumerate EVERY
+	// nested topology (e.g. Front ▸ host app ▸ arti) must enumerate EVERY
 	// ancestor, since browsers check frame-ancestors against the full chain.
 	Origin OriginList `json:"origin"`
 	// Identity picks who artifacts are served as: "service" (default) resolves

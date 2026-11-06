@@ -34,21 +34,29 @@ examples.
 The rail itself holds the filter groups:
 
 - **Filters** — two families in one row. The uppercase chips (`TEXT`, `PACKAGE`,
-  `APP`, `ATTACHMENT`, `MAP`) are artifact types; the lowercase ones (`markdown`,
+  `APP`, `MAP`) are artifact types; the lowercase ones (`markdown`,
   `diagram`, `html`, `json`, `image`) filter by *body* type, and are
-  exactly the families the viewer renders differently. `all` clears it. When
+  exactly the families the viewer renders differently. `all` clears it.
+  `ATTACHMENT` is a show/hide toggle: the catalog hides attachments by default
+  and the chip is grayed; click it to include them, click again to hide them.
+  A type chip, a slug drill-in, or a `type:` / `content_type:` search token
+  overrides the default, so `type:ATTACHMENT` still lists only attachments. When
   you're logged in, a `👤 Owned by Me` chip filters to artifacts you created,
   and `🔖 Bookmarked` to the documents you bookmarked (the `bookmarked:me` token).
   These lowercase names also work as `type:` search tokens (`type:diagram`) and
   in the REST/MCP/CLI list filters.
-- **Popular labels** — the top labels by count. Each is a tri-state toggle:
-  click once to filter to it, again to *exclude* it, again to clear.
+- **My popular labels** — when you're logged in, the top 20 labels on artifacts
+  you created, ranked by how often you used them. Open by default. Each is a
+  tri-state toggle: click once to filter to it, again to *exclude* it, again to
+  clear. The rows show no count, since the filter spans everything you can read.
+- **Popular labels** — the top labels by count across everything you can read,
+  with the same toggle. Collapsed by default; click the heading to open it.
 - **Content types** — the exact content-type values that exist, with live counts,
   when you want a specific one rather than a family. Same tri-state toggle.
 - **Scopes** — the most common [scopes](../overview/concepts.md#scope) by count,
   with the same tri-state toggle.
 
-Each of the last three groups collapses from its heading.
+Each of the label, content-type and scope groups collapses from its heading.
 
 Filters and search compose, and the URL updates so a filtered view is shareable.
 A `× reset` link appears whenever any filter is on.
@@ -68,7 +76,8 @@ distinct **type**, **label**, **scope**, **content type**, **owner** and
 service owns; **creator** counts the ones they wrote. Pick a facet at the top,
 choose whether to count only the latest version of each document or every
 version, narrow the values with the search box, sort by count or name, and click
-any value to jump straight into the catalog filtered to it. It's the fastest way
+any value to jump straight into the catalog filtered to it, attachments included so
+the rows match the count. It's the fastest way
 to discover what labels and content types actually exist across all artifacts
 before you start filtering.
 
@@ -300,7 +309,7 @@ page, so on those the ⋯ menu item is the reliable way in.
 
 A binary can be a versioned document too: publish it under a slug and it gets
 the same version lineage as anything else. Files posted by another app without a
-slug (couch's chat attachments) stay slugless and creator-only. The slug chip (`s/<slug> · v<version>`) links to a catalog view
+slug (e.g. chat attachments) stay slugless and creator-only. The slug chip (`s/<slug> · v<version>`) links to a catalog view
 filtered to that slug, sorted newest-first, so you can open any prior version.
 The ⋯ menu's **Copy UUID** and **Get UUID link** (`/a/<uuid>`) instead point at one
 specific version forever.
@@ -349,8 +358,9 @@ specific file inside a PACKAGE). Omit the version to always open the latest.
   the in-viewer view.
 - **Images and PDFs** render inline (image / native PDF frame).
 
-A small **✕** in the top-right corner returns to the normal view. Beside it, a
-dot shows the access tier and opens the same access dialog as the viewer.
+A small **✕** in the top-left corner returns to the normal view. Beside it, a
+dot shows the access tier and opens the same access dialog as the viewer, and
+the version number (named documents only) opens the slug's version list.
 
 ## Comments
 

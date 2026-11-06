@@ -28,7 +28,7 @@ func newAppRouter(t *testing.T, email string) (*chi.Mux, *pgstore.Store, *apps.S
 	appsSvc := apps.New(st, signer, map[string]apps.ServerConfig{}, &recordingProvider{}, nil, nil)
 	svc.SetAppTokenFn(appsSvc.SignAppToken)
 	svc.SetAppTokenVerifyFn(appsSvc.VerifyEmbedToken)
-	svc.SetAppConsentFns(appsSvc.SignAppConsent, appsSvc.VerifyAppConsent, false)
+	svc.SetAppConsentFns(st.HasAppConsent, st.GrantAppConsent)
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Disabled(email))
@@ -50,10 +50,11 @@ func getWithCookies(h http.Handler, url string, cookies []*http.Cookie) *httptes
 }
 
 // Opening an APP for the first time yields the consent page and no bridge;
-// consenting sets one cookie; the same URL then serves the app with the
-// bridge; the record is per viewer and per artifact version.
+// consenting stores one record; the same URL then serves the app with the
+// bridge; the record is per viewer and per artifact version, and lives
+// server-side rather than in a cookie.
 func TestAppRunConsentFlow(t *testing.T) {
-	r, st, appsSvc := newAppRouter(t, "alice@example.com")
+	r, st, _ := newAppRouter(t, "alice@example.com")
 	appID := newAppArtifact(t, st, []map[string]string{{"server": "arti", "tool": "add_comment"}})
 
 	for _, url := range []string{"/app/" + appID, "/api/artifacts/" + appID + "/files/index.html"} {
@@ -72,16 +73,15 @@ func TestAppRunConsentFlow(t *testing.T) {
 		}
 	}
 
-	// A fetch (no `next`) gets 204 + the cookie.
+	// A fetch (no `next`) gets 204 and no cookie.
 	req := httptest.NewRequest(http.MethodPost, "/app/"+appID+"/consent", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("consent status %d body %s", rr.Code, rr.Body.String())
 	}
-	cookies := rr.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != "arti_app_ok_"+appID || !cookies[0].HttpOnly {
-		t.Fatalf("consent cookie: %+v", cookies)
+	if cs := rr.Result().Cookies(); len(cs) != 0 {
+		t.Fatalf("consent must not set a cookie: %+v", cs)
 	}
 
 	// A form post (with `next`) redirects back to the document.
@@ -94,7 +94,7 @@ func TestAppRunConsentFlow(t *testing.T) {
 	}
 
 	for _, url := range []string{"/app/" + appID, "/api/artifacts/" + appID + "/files/index.html"} {
-		rr := getWithCookies(r, url, cookies)
+		rr := getWithCookies(r, url, nil)
 		if b := rr.Body.String(); rr.Code != http.StatusOK || !strings.Contains(b, "__ARTI_APP__") {
 			t.Fatalf("%s after consent: %d\n%s", url, rr.Code, b)
 		}
@@ -103,27 +103,15 @@ func TestAppRunConsentFlow(t *testing.T) {
 		}
 	}
 
-	// Another viewer presenting alice's cookie is still asked.
+	// Another viewer is still asked.
 	r2, _, _ := newAppRouter(t, "bob@example.com")
-	if rr := getWithCookies(r2, "/app/"+appID, cookies); strings.Contains(rr.Body.String(), "__ARTI_APP__") {
+	if rr := getWithCookies(r2, "/app/"+appID, nil); strings.Contains(rr.Body.String(), "__ARTI_APP__") {
 		t.Fatal("bob must not run the app on alice's consent")
 	}
 	// A new version is a new artifact id, so it is asked again.
 	appID2 := newAppArtifact(t, st, nil)
-	if rr := getWithCookies(r, "/app/"+appID2, cookies); strings.Contains(rr.Body.String(), "__ARTI_APP__") {
+	if rr := getWithCookies(r, "/app/"+appID2, nil); strings.Contains(rr.Body.String(), "__ARTI_APP__") {
 		t.Fatal("a different version must not inherit consent")
-	}
-
-	// The consent record is not a bridge token, and a bridge token is not a
-	// consent record.
-	if rr := proxyPost(t, r, cookies[0].Value, appID, "arti", "add_comment", nil); rr.Code != http.StatusUnauthorized {
-		t.Fatalf("proxy accepted the consent cookie as a bearer: %d %s", rr.Code, rr.Body.String())
-	}
-	if _, _, err := appsSvc.VerifyAppConsent(mustToken(t, appsSvc, "alice@example.com", appID)); err == nil {
-		t.Fatal("a bridge token must not verify as consent")
-	}
-	if _, _, err := appsSvc.VerifyEmbedToken(cookies[0].Value); err == nil {
-		t.Fatal("a consent record must not verify as a files token")
 	}
 }
 
@@ -137,7 +125,7 @@ func TestAppConsentMarksUnavailableTools(t *testing.T) {
 	svc := artifacts.NewService(st, "http://localhost", nil, nil)
 	svc.SetAppTokenFn(appsSvc.SignAppToken)
 	svc.SetAppTokenVerifyFn(appsSvc.VerifyEmbedToken)
-	svc.SetAppConsentFns(appsSvc.SignAppConsent, appsSvc.VerifyAppConsent, false)
+	svc.SetAppConsentFns(st.HasAppConsent, st.GrantAppConsent)
 	svc.SetAppCallableFn(appsSvc.Callable)
 	r = chi.NewRouter()
 	r.Group(func(r chi.Router) {

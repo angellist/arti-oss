@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,12 +20,14 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/go-chi/chi/v5"
 	chimid "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/angellist/arti-oss/internal/admin"
 	"github.com/angellist/arti-oss/internal/apikeys"
 	"github.com/angellist/arti-oss/internal/apps"
 	"github.com/angellist/arti-oss/internal/artifacts"
+	"github.com/angellist/arti-oss/internal/audit"
 	"github.com/angellist/arti-oss/internal/auth"
 	"github.com/angellist/arti-oss/internal/comments"
 	"github.com/angellist/arti-oss/internal/config"
@@ -146,7 +149,9 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	auth.SetAllowedEmails(cfg.Auth.AllowedEmails)
 	logger.Info("email allowlist", "entries", auth.AllowedEmails())
 	auth.SetDeactivationCheck(pgstoreInst.IsDeactivated)
-	pgstoreInst.SetOrgDomains(auth.AllowedEmails)
+	auth.SetAccountCheck(pgstoreInst.Account)
+	auth.SetAcceptedDomains(cfg.Auth.AcceptedDomains)
+	pgstoreInst.SetOrgDomains(func() []string { return append(auth.AllowedEmails(), auth.AcceptedDomains()...) })
 
 	auth.SetAdminEmails(cfg.Admin.Emails)
 	logger.Info("admin allowlist", "emails", auth.AdminEmails())
@@ -163,6 +168,11 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	// WWW-Authenticate header (RFC 9728); MCP/OAuth clients (e.g. Runlayer)
 	// reject a relative path as an unsafe upstream URL.
 	auth.SetMetadataBaseURL(cfg.Server.BaseURL)
+
+	auditSink, runAudit, err := newAuditSinks(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("init audit archive: %w", err)
+	}
 
 	root := chi.NewRouter()
 	root.Use(chimid.RequestID)
@@ -182,10 +192,11 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	root.Use(auth.StripSpoofableIPHeaders)
 	root.Use(auth.CapturePeerAddr)
 	root.Use(chimid.RealIP)
-	root.Use(reqLogger(logger))
+	root.Use(reqLogger(logger, auditSink))
 	root.Use(chimid.Recoverer)
 	root.Use(timeoutExcept(60*time.Second, apps.ProxyPath))
 	root.Use(securityHeaders)
+	root.Use(artifacts.ExpireAppConsentCookies)
 
 	// Public routes ─────────────────────────────────────────────────
 	// HEAD too: the Docker image's healthcheck probes with `wget --spider`
@@ -307,6 +318,18 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	//
 	// Both paths finish identically (device approval / CLI pairing /
 	// arti_session cookie). /auth/google/login remains as a legacy alias.
+	// Slack DM notifications on comment events (nil when no bot token → off).
+	notifier := slacknotify.New(cfg.Notifications.SlackBotToken, logger)
+	accessRequests := roles.AccessRequests{
+		Store:     pgstoreInst,
+		Mention:   cfg.Notifications.AccessRequestMention,
+		ReviewURL: strings.TrimRight(cfg.Server.BaseURL, "/") + "/settings/users",
+	}
+	if ch := cfg.Notifications.AccessRequestChannel; ch != "" && notifier != nil {
+		accessRequests.Post = func(ctx context.Context, text string) error { return notifier.PostToChannel(ctx, ch, text) }
+	}
+	logger.Info("access requests", "domains", auth.AcceptedDomains(), "slack_announce", accessRequests.Post != nil)
+
 	switch cfg.Auth.Mode {
 	case "oidc":
 		login, lerr := auth.NewOIDCLogin(ctx, auth.OIDCLoginConfig{
@@ -339,9 +362,11 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		})
 		logger.Info("interactive login: built-in oidc", "issuer", cfg.Auth.IssuerURL, "client_id", cfg.Auth.ClientID)
 	default: // "" (legacy) or "proxy"
-		ingress := auth.IngressLoginHandler(cfg.Auth.RequiredGroups, signer, pairs, pgstoreInst, 7*24*time.Hour, cfg.Server.CookieSecure, pgstoreInst)
+		ingress := auth.IngressLoginHandler(cfg.Auth.RequiredGroups, signer, pairs, pgstoreInst, 7*24*time.Hour, cfg.Server.CookieSecure, pgstoreInst, accessRequests)
 		root.Get("/auth/login", ingress)
 		root.Get("/auth/google/login", ingress)
+		root.Post("/auth/login", ingress)
+		root.Post("/auth/google/login", ingress)
 		// /auth/callback exists only in oidc mode, but the public ingress
 		// routes it here in every mode. Answer 404 explicitly — like the
 		// /mcp/* guard — so the path can't fall through to the FE reverse
@@ -364,8 +389,6 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	}
 	commentsSvc := comments.NewService(pool, pgstoreInst, signer)
 	commentsSvc.SetRateLimit(cfg.Comments.GlobalRPM, cfg.Comments.ArtifactRPM)
-	// Slack DM notifications on comment events (nil when no bot token → off).
-	notifier := slacknotify.New(cfg.Notifications.SlackBotToken, logger)
 	// Every Slack DM is gated on its recipient's own setting, under one
 	// deployment switch an admin can use to stop everything. A bot token makes
 	// notifications possible; who receives what is decided per person. Before
@@ -544,7 +567,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	svc.SetAppCallableFn(appsSvc.Callable)
 	svc.SetAppTokenFn(appsSvc.SignAppToken)
 	svc.SetAppTokenVerifyFn(appsSvc.VerifyEmbedToken)
-	svc.SetAppConsentFns(appsSvc.SignAppConsent, appsSvc.VerifyAppConsent, cfg.Server.CookieSecure)
+	svc.SetAppConsentFns(pgstoreInst.HasAppConsent, pgstoreInst.GrantAppConsent)
 	svc.SetEmbedFilesTokenFn(appsSvc.SignEmbedFilesToken)
 	svc.SetAppFrameAncestors(cfg.Apps.FrameAncestors)
 	appsSvc.MountProxy(root)
@@ -604,6 +627,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	}
 
 	svc.SetDictationEnabled(cfg.Dictation.APIKey != "")
+	svc.SetHTMLEditEnabled(cfg.HTMLEdit.Enabled)
 	if cfg.Dictation.APIKey != "" {
 		logger.Info("comment dictation enabled", "language", cfg.Dictation.Language)
 	} else {
@@ -701,7 +725,7 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		proxy := newFEProxy(httputil.NewSingleHostReverseProxy(target))
 		// Catalog/viewer pages (served by the Next.js FE) carry their own
 		// `frame-ancestors` CSP (next.config.ts) that allows trusted internal
-		// origins to iframe the viewer — e.g. couch's artifact side panel
+		// origins to iframe the viewer — e.g. an internal tool's side panel
 		// embedding /s/<slug>?v=full. The global securityHeaders middleware set
 		// `X-Frame-Options: SAMEORIGIN`, which can't express an allowlist and
 		// would still block that cross-subdomain framing, so drop it here and
@@ -725,6 +749,20 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 	recorderCtx, stopRecorder := context.WithCancel(context.Background())
 	defer stopRecorder()
 	go credRecorder.Run(recorderCtx)
+	// The audit flush loop outlives the HTTP drain so requests finishing
+	// during shutdown still reach the archive.
+	auditCtx, stopAudit := context.WithCancel(context.Background())
+	auditDone := make(chan struct{})
+	go func() { runAudit(auditCtx); close(auditDone) }()
+	drained := make(chan struct{})
+	shuttingDown := false
+	defer func() {
+		if shuttingDown {
+			<-drained
+		}
+		stopAudit()
+		<-auditDone
+	}()
 
 	// Graceful shutdown on SIGTERM/SIGINT.
 	go func() {
@@ -736,17 +774,20 @@ func (*ServeCmd) Run(_ *kong.Context) error {
 		shutdownCtx, c2 := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c2()
 		_ = srv.Shutdown(shutdownCtx)
+		close(drained)
 	}()
 
 	logger.Info("arti-server listening",
 		"addr", cfg.Server.Addr, "base", cfg.Server.BaseURL, "bucket", cfg.Storage.Bucket, "web", cfg.Server.WebURL, "test_mode", cfg.Auth.TestMode)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err = srv.ListenAndServe()
+	if !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	shuttingDown = true
 	return nil
 }
 
-func reqLogger(l *slog.Logger) func(http.Handler) http.Handler {
+func reqLogger(l *slog.Logger, sink audit.Sink) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// kube-probe polls /healthz every few seconds per pod; logging each
@@ -762,7 +803,8 @@ func reqLogger(l *slog.Logger) func(http.Handler) http.Handler {
 			// holds predates the caller's identity. captureLogIdent, inside
 			// the authed group, fills this holder on the way past.
 			ident := &logIdent{}
-			r = r.WithContext(context.WithValue(r.Context(), logIdentKey{}, ident))
+			ctx, entry := audit.WithEntry(context.WithValue(r.Context(), logIdentKey{}, ident))
+			r = r.WithContext(ctx)
 			next.ServeHTTP(ww, r)
 
 			// A client that hangs up mid-request cancels the request context,
@@ -806,8 +848,68 @@ func reqLogger(l *slog.Logger) func(http.Handler) http.Handler {
 				attrs = append(attrs, "cred", ident.cred, "ip", ident.ip)
 			}
 			l.Info("http", attrs...)
+			if sink != nil {
+				sink.Write(auditEvent(r, entry, ident, status, start))
+			}
 		})
 	}
+}
+
+// auditEvent builds the access record for one finished request. The URL
+// parameters name the document the caller addressed even when no access check
+// ran, so a refused or failed request still records its target.
+func auditEvent(r *http.Request, entry *audit.Entry, ident *logIdent, status int, start time.Time) audit.Event {
+	path := redactLogPath(r.URL.Path)
+	ev := audit.Event{
+		Time:      start.UTC(),
+		RequestID: chimid.GetReqID(r.Context()),
+		Actor:     ident.email,
+		Cred:      ident.cred,
+		Surface:   audit.Surface(r.URL.Path, ident.cred),
+		IP:        r.RemoteAddr,
+		UserAgent: r.UserAgent(),
+		Method:    r.Method,
+		Path:      path,
+		Status:    status,
+		Outcome:   audit.Outcome(status),
+	}
+	if rc := chi.RouteContext(r.Context()); rc != nil {
+		ev.Route = rc.RoutePattern()
+	}
+	if rc := chi.RouteContext(r.Context()); rc != nil && documentRoute(ev.Route) {
+		var t audit.Target
+		for i, k := range rc.URLParams.Keys {
+			v := rc.URLParams.Values[i]
+			switch k {
+			case "id":
+				t.ArtifactID = v
+			case "slug", "ident":
+				t.Slug = v
+			case "version":
+				if n, err := strconv.ParseInt(v, 10, 32); err == nil {
+					n32 := int32(n)
+					t.Version = &n32
+				}
+			}
+		}
+		if _, err := uuid.Parse(t.Slug); err == nil && t.ArtifactID == "" {
+			t.ArtifactID, t.Slug = t.Slug, ""
+		}
+		entry.AddTarget(t)
+	}
+	entry.Fill(&ev)
+	return ev
+}
+
+// documentRoute reports whether a route's {id}/{slug}/{ident} parameters name
+// a document. Other namespaces reuse {id} for keys, groups and roles.
+func documentRoute(pattern string) bool {
+	for _, p := range []string{"/api/artifacts/", "/api/embed/artifacts/", "/app/", "/embed/"} {
+		if strings.HasPrefix(pattern, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // logIdent carries the caller's identity from inside the authed group back out

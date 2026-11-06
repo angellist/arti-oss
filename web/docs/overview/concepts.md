@@ -79,7 +79,7 @@ A few conventions are in use today:
 
 - `a:<…>` — produced by an **agent**
 - `u:<…>` — belongs to a **user** (there's no fixed format here yet; it may be formalized later)
-- `app:<…>` — owned by a specific **application**, for example `app:couch`
+- `app:<…>` — owned by a specific **application**, for example `app:my-agent`
 
 Those are conventions, not rules — beyond them, scope is whatever you decide. An artifact can carry more than one, and scope is a first-class filter when you list or search (`--scope` on the CLI, `scope:` in search).
 

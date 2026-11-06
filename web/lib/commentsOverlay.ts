@@ -34,6 +34,7 @@ import {
 import { createMentionMenu, mentionHTML, MENTION_CSS, type MentionResult } from "./mentionMenu";
 import { linkify } from "./linkify";
 import { formatElapsed, MAX_SECONDS, spliceAtCaret, WARN_SECONDS, type Dictation, type DictationState } from "./dictation";
+import { caretBox, caretToEnd, mirrorStyle } from "./caretPosition";
 
 // The overlay talks to the server through this small interface so it can be
 // driven by either the cookie-based client (in-app viewer) or a token-based
@@ -222,25 +223,38 @@ const CSS = `
 .ac-mic{margin-left:auto;width:28px;height:28px;padding:0;border-radius:50%;border:1px solid #e6e5e1;background:#fff;color:#6b6b66;display:grid;place-items:center;cursor:pointer;transition:color .12s,border-color .12s,background-color .12s}
 .ac-mic svg{width:15px;height:15px}
 .ac-mic:hover:not(:disabled){border-color:#2563eb;color:#1d4ed8}
-/* Recording, the mic widens into a bar up to the send button: clock, wave, stop.
-   Cancel steps aside for it; Esc still discards the clip. */
-.ac-mic[data-state="recording"]{flex:1 1 auto;min-width:0;width:auto;border-radius:999px;display:flex;align-items:center;gap:8px;padding:0 4px 0 10px;border-color:#2563eb;color:#1d4ed8;background:rgba(37,99,235,.10)}
-.ac-mic[data-state="recording"]:hover{background:rgba(37,99,235,.18)}
-.ac-mic[data-warn]{border-color:#dc2626;color:#dc2626;background:rgba(220,38,38,.10)}
-.ac-mic[data-warn]:hover:not(:disabled){border-color:#dc2626;color:#dc2626;background:rgba(220,38,38,.16)}
-.ac-acts:has(>.ac-mic[data-state="recording"])>.ac-mini:not(.ac-primary){display:none}
+/* The circle only starts a clip. From then until the text is in, a full-width
+   strip along the bottom of the box carries the clock, the wave and stop. */
+.ac-mic:not([data-state="idle"]){display:none}
+.ac-reply{position:relative}
+.ac-reply:has(>.ac-strip) textarea{padding-bottom:40px;border-color:#2563eb}
+.ac-strip{position:absolute;left:5px;right:5px;bottom:5px;height:26px;display:flex;align-items:center;gap:8px;padding:0 5px 0 10px;border:0;border-radius:13px;font:inherit;color:#1d4ed8;background:rgba(37,99,235,.10);cursor:pointer;overflow:hidden}
+.ac-strip:hover:not(:disabled){background:rgba(37,99,235,.18)}
+.ac-strip[data-warn]{color:#dc2626;background:rgba(220,38,38,.10)}
+.ac-strip:disabled{cursor:default}
+.ac-strip:not([data-state="recording"]) .ac-wave{opacity:.45}
+.ac-strip[data-state="working"]::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);transform:translateX(-100%);animation:ac-sweep 1.3s ease-in-out infinite;pointer-events:none}
+@keyframes ac-sweep{to{transform:translateX(100%)}}
 .ac-rectime{flex:0 0 auto;font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
 .ac-rectime small{font-size:10.5px;font-weight:500;opacity:.85}
-.ac-mic .ac-wave{flex:1 1 auto;min-width:0;justify-content:flex-end;overflow:hidden;gap:2px}
-.ac-mic .ac-wave i{flex:0 0 2.5px}
+.ac-strip .ac-wave{flex:1 1 auto;min-width:0;justify-content:flex-end;overflow:hidden;gap:2px}
+.ac-strip .ac-wave i{flex:0 0 2.5px}
 .ac-recstop{flex:0 0 18px;height:18px;border-radius:50%;background:currentColor;display:grid;place-items:center}
 .ac-recstop::after{content:"";width:6px;height:6px;border-radius:1.5px;background:#fff}
-.ac-mic[data-state="working"]{border-color:#2563eb;background:#2563eb;color:#fff;cursor:default}
-.ac-mic[data-state="working"] svg{animation:ac-spin 1s linear infinite}
+.ac-recspin{flex:0 0 14px;height:14px;margin-right:2px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;box-sizing:border-box;animation:ac-spin 1s linear infinite}
+/* Where the clip's text will land: a pulsing caret, then a shimmering pill. */
+.ac-mark{position:absolute;z-index:1;width:2px;margin-left:-1px;border-radius:1px;background:#2563eb;box-shadow:0 0 6px rgba(37,99,235,.6);pointer-events:none;animation:ac-pulse 1.1s ease-in-out infinite}
+.ac-mark[data-state="working"]{width:26px;margin-left:2px;border-radius:999px;box-shadow:none;background:linear-gradient(90deg,rgba(37,99,235,.14),rgba(37,99,235,.4),rgba(37,99,235,.14));background-size:200% 100%;animation:ac-shimmer 1.2s linear infinite}
+@keyframes ac-pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes ac-shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
+/* Newly dictated words: a tint over them that fades out. */
+.ac-landed{position:absolute;z-index:1;overflow:hidden;color:transparent;pointer-events:none}
+.ac-landed mark{color:transparent;border-radius:2px;background:rgba(37,99,235,.22);animation:ac-landed 1.4s ease-out forwards}
+@keyframes ac-landed{to{background:transparent}}
 @keyframes ac-spin{to{transform:rotate(360deg)}}
 .ac-wave{display:inline-flex;align-items:center;gap:2.5px;height:16px}
 .ac-wave i{width:2.5px;height:3px;border-radius:2px;background:currentColor;transform-origin:center;transition:transform .06s linear}
-@media (prefers-reduced-motion:reduce){.ac-mic[data-state="working"] svg{animation:none}.ac-wave i{transition:none}}
+@media (prefers-reduced-motion:reduce){.ac-recspin,.ac-strip::after,.ac-mark,.ac-landed mark{animation:none}.ac-wave i{transition:none}}
 /* The comment rail: one 26px-wide segmented capsule pinned to the right edge,
    vertically centered. It replaces the old stack of 46px circles — same
    controls at a third of the mass, and it never collides with the card column
@@ -389,10 +403,11 @@ html.ac-dark .ac-mini{color:#dcdbd6;background:rgba(255,255,255,.08);border-colo
 html.ac-dark .ac-mini.ac-primary{background:#2563eb;border-color:#2563eb;color:#fff}
 html.ac-dark .ac-mini.ac-primary:disabled{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.12);color:#75746f}
 html.ac-dark .ac-mic{color:#dcdbd6;background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.14)}
-html.ac-dark .ac-mic[data-state="recording"]{color:#93b4fb;border-color:#2563eb;background:rgba(37,99,235,.22)}
-html.ac-dark .ac-mic[data-warn]{color:#fca5a5;border-color:#dc2626;background:rgba(220,38,38,.22)}
+html.ac-dark .ac-strip{color:#93b4fb;background:rgba(37,99,235,.22)}
+html.ac-dark .ac-strip[data-warn]{color:#fca5a5;background:rgba(220,38,38,.22)}
+html.ac-dark .ac-strip[data-state="working"]::after{background:linear-gradient(90deg,transparent,rgba(255,255,255,.16),transparent)}
 html.ac-dark .ac-recstop::after{background:#1c1c1a}
-html.ac-dark .ac-mic[data-state="working"]{color:#fff;border-color:#2563eb;background:#2563eb}
+html.ac-dark .ac-mark{background:#3b82f6}
 html.ac-dark .ac-ico{color:#8b8a85}
 html.ac-dark .ac-ico:hover{color:#f2f1ee;background:rgba(255,255,255,.12)}
 html.ac-dark .ac-ico:focus-visible{outline-color:rgba(255,255,255,.3)}
@@ -615,6 +630,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     micFor(key)?.closest(".ac-card,.ac-lb-card")?.querySelector<HTMLTextAreaElement>(".ac-reply textarea") ?? null;
   // Looked up at send time: a render() mid-clip replaces the button the user pressed.
   const sendFor = (key: string) => micFor(key)?.closest(".ac-acts")?.querySelector<HTMLButtonElement>(".ac-primary") ?? null;
+  const STRIP_LABEL = { starting: "Cancel dictation", recording: "Stop and transcribe", working: "Transcribing" } as const;
   function paintMic(b: HTMLButtonElement) {
     const st = clip && clip.key === b.dataset.mic ? clip.state : "idle";
     if (b.dataset.state !== st || !b.firstElementChild) {
@@ -622,23 +638,117 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       b.disabled = st === "working";
       b.title = MIC_LABEL[st];
       b.setAttribute("aria-label", MIC_LABEL[st]);
-      b.innerHTML =
-        st === "recording"
-          ? `<span class="ac-rectime"></span><span class="ac-wave" aria-hidden="true">${"<i></i>".repeat(WAVE_BARS)}</span><span class="ac-recstop" aria-hidden="true"></span>`
-          : icon(st === "idle" ? "mic" : "spin");
+      b.innerHTML = icon("mic");
     }
-    if (st !== "recording") return b.removeAttribute("data-warn");
+    paintStrip(b.dataset.mic!, st);
+  }
+  // paintStrip — the strip lives in the composer's box, found again by key
+  // because render() rebuilds the cards mid-clip.
+  function paintStrip(key: string, st: DictationState | "starting") {
+    const box = composerFor(key)?.parentElement;
+    if (!box) return;
+    let s = box.querySelector<HTMLButtonElement>(":scope > .ac-strip");
+    if (st === "idle") {
+      if (s) {
+        s.remove();
+        refit(box);
+      }
+      return;
+    }
+    if (!s) {
+      s = document.createElement("button");
+      s.type = "button";
+      s.className = "ac-strip";
+      s.onmousedown = (e) => e.preventDefault(); // keep the caret in the box
+      s.onclick = (e) => { e.stopPropagation(); toggleDictation(key); };
+      box.append(s);
+      refit(box);
+    }
+    if (s.dataset.state !== st) {
+      s.dataset.state = st;
+      s.disabled = st === "working";
+      s.title = STRIP_LABEL[st];
+      s.setAttribute("aria-label", STRIP_LABEL[st]);
+      const end = st === "recording" ? `<span class="ac-recstop"></span>` : `<span class="ac-recspin"></span>`;
+      s.innerHTML = `<span class="ac-rectime"></span><span class="ac-wave" aria-hidden="true">${"<i></i>".repeat(WAVE_BARS)}</span>${end}`;
+    }
     const { levels, seconds } = clip!;
     const left = MAX_SECONDS - seconds;
-    const warn = left <= WARN_SECONDS;
-    b.toggleAttribute("data-warn", warn);
-    const time = b.querySelector<HTMLElement>(".ac-rectime")!;
-    const text = formatElapsed(seconds) + (warn ? ` <small>· ${left}s left</small>` : "");
+    const warn = st === "recording" && left <= WARN_SECONDS;
+    s.toggleAttribute("data-warn", warn);
+    const time = s.querySelector<HTMLElement>(".ac-rectime")!;
+    const text = st === "working" ? "Transcribing…" : st === "starting" ? "Starting…" : formatElapsed(seconds) + (warn ? ` <small>· ${left}s left</small>` : "");
     if (time.innerHTML !== text) time.innerHTML = text;
     const off = WAVE_BARS - levels.length;
-    b.querySelectorAll<HTMLElement>(".ac-wave i").forEach((i, n) => (i.style.transform = `scaleY(${1 + (levels[n - off] ?? 0) * 5})`));
+    s.querySelectorAll<HTMLElement>(".ac-wave i").forEach((i, n) => (i.style.transform = `scaleY(${1 + (levels[n - off] ?? 0) * 5})`));
   }
-  const paintMics = () => document.querySelectorAll<HTMLButtonElement>(".ac-mic").forEach(paintMic);
+  // refit — the strip changes the box's height; the composer's own input
+  // listener autosizes it and re-lays-out its card.
+  function refit(box: HTMLElement) {
+    box.querySelector("textarea")?.dispatchEvent(new Event("input"));
+  }
+  // paintMark — the caret or pill at the point the clip's text will land: the
+  // caret while the box has focus, else the end, as insertDictated does.
+  function paintMark() {
+    document.querySelectorAll(".ac-mark").forEach((m) => {
+      if (!clip || m.getAttribute("data-mark") !== clip.key) m.remove();
+    });
+    if (!clip) return;
+    const ta = composerFor(clip.key);
+    const box = ta?.parentElement;
+    if (!ta || !box) return;
+    const at = document.activeElement === ta ? ta.selectionStart : ta.value.length;
+    const pos = caretBox(ta, at);
+    let m = box.querySelector<HTMLElement>(":scope > .ac-mark");
+    if (!pos) return m?.remove();
+    if (!m) {
+      m = document.createElement("span");
+      m.className = "ac-mark";
+      m.setAttribute("aria-hidden", "true");
+      box.append(m);
+    }
+    m.dataset.mark = clip.key;
+    m.dataset.state = clip.state === "working" ? "working" : "recording";
+    m.style.left = `${ta.offsetLeft + pos.left}px`;
+    m.style.top = `${ta.offsetTop + pos.top}px`;
+    m.style.height = `${pos.height}px`;
+  }
+  // The caret moves without an event this overlay sees (a click, an arrow key),
+  // so the mark is re-read on a timer while a clip is live.
+  let markTimer: ReturnType<typeof setInterval> | undefined;
+  function syncMarkTimer() {
+    if (clip && !markTimer) markTimer = setInterval(paintMark, 120);
+    if (!clip && markTimer) {
+      clearInterval(markTimer);
+      markTimer = undefined;
+    }
+    paintMark();
+  }
+  // tintLanded — a transparent copy of the text over the box with only the new
+  // words' background showing, removed once the fade ends.
+  function tintLanded(ta: HTMLTextAreaElement, start: number, end: number) {
+    const box = ta.parentElement;
+    if (!box) return;
+    box.querySelector(":scope > .ac-landed")?.remove();
+    const div = document.createElement("div");
+    div.className = "ac-landed";
+    div.setAttribute("aria-hidden", "true");
+    mirrorStyle(ta, div);
+    const cs = getComputedStyle(ta);
+    div.style.left = `${ta.offsetLeft + ta.clientLeft}px`;
+    div.style.top = `${ta.offsetTop + ta.clientTop}px`;
+    div.style.height = `${Math.max(0, ta.clientHeight - parseFloat(cs.paddingTop || "0") - parseFloat(cs.paddingBottom || "0"))}px`;
+    const mark = document.createElement("mark");
+    mark.textContent = ta.value.slice(start, end);
+    div.append(ta.value.slice(0, start), mark, ta.value.slice(end));
+    box.append(div);
+    div.scrollTop = ta.scrollTop;
+    setTimeout(() => div.remove(), 1400);
+  }
+  const paintMics = () => {
+    document.querySelectorAll<HTMLButtonElement>(".ac-mic").forEach(paintMic);
+    syncMarkTimer();
+  };
   const resyncComposer = (key: string) => {
     const ta = composerFor(key);
     if (ta) composerSync.get(ta)?.();
@@ -667,6 +777,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     ta.focus();
     ta.setSelectionRange(caret, caret);
     ta.dispatchEvent(new Event("input")); // autosize, send-enabled, and the draft's saved text
+    tintLanded(ta, caret - text.length, caret);
   }
   // Reply or Enter while a clip is live: finish the clip, then send what the box holds.
   function stopAndSend(key: string, send: () => void) {
@@ -687,7 +798,15 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     }
     cancelDictation();
     clip = { key, state: "starting", levels: [], seconds: 0 };
+    const ta = composerFor(key);
+    // Before the strip, so its input event refreshes the @-menu at the end; again
+    // after, because the strip's padding changes the box's scroll range.
+    if (ta) caretToEnd(ta);
     paintMics();
+    if (ta) {
+      caretToEnd(ta);
+      paintMark();
+    }
     const mine = clip;
     const live = () => clip === mine;
     dictation.start({
@@ -877,6 +996,10 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
     r.setStart(a.node, a.offset);
     r.setEnd(b.node, b.offset);
     wrapRange(r, t.id);
+    // A highlight inside a collapsed <details> (a folded diff run) has no box to pin a card to.
+    for (const m of markFor(t.id)) {
+      for (let d = m.closest("details"); d; d = d.parentElement?.closest("details") ?? null) d.open = true;
+    }
     // Record the ACTUAL number of <mark> segments created (wrapRange returns
     // just [id], not one entry per segment), so maybeReseed can detect a
     // partially-stripped multi-segment highlight. seedText's callers clear the
@@ -1408,7 +1531,7 @@ export function mountCommentsOverlay(opts: OverlayOpts): () => void {
       };
       card.querySelector("[data-c]")!.addEventListener("click", commit);
       inp.onkeydown = (e) => { const k = e as KeyboardEvent; if (k.key === "Enter" && !k.shiftKey) { k.preventDefault(); commit(); } };
-      inp.addEventListener("input", () => autosize(inp));
+      inp.addEventListener("input", () => { if (autosize(inp)) repositionCard(); });
       card.querySelector("[data-x]")!.addEventListener("click", () => { dp.remove(); clearCard(); });
       // Card is null: this draft's buttons stay put (Cancel must remain
       // reachable) — only Comment's disabled state tracks the text.

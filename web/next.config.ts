@@ -27,8 +27,8 @@ import { DEFAULT_CATALOG_FRAME_ANCESTORS } from "./tenant-defaults";
 // catalog-app CSP doesn't have to constrain them further.
 //
 // frame-ancestors: who may iframe arti's catalog/viewer pages. Defaults to
-// arti itself plus any internal AngelList subdomain (prod + staging) so
-// first-party internal tools — couch's artifact side panel, Flowdash — can
+// arti itself plus any internal subdomain (prod + staging) so
+// first-party internal tools can
 // embed the focused viewer (e.g. /s/<slug>?v=full). The framed page is still
 // cookie-authed and renders as the logged-in user, so this only relaxes
 // clickjacking protection to trusted internal origins; it does NOT bypass

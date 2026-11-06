@@ -8,8 +8,9 @@ import type { ArtifactInfo, Me, PackageManifest } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
 import { relativeTime } from "@/lib/time";
 import { useRailMode } from "@/lib/rail-context";
-import { isTextualContentType, isJSONContentType, prettyPrintJSON } from "@/lib/viewer";
+import { isTextualContentType, isJSONContentType, prettyPrintJSON, slugVersionsHref } from "@/lib/viewer";
 import { isEditableArtifact } from "@/lib/edit";
+import { isHtmlTextEditable } from "@/lib/htmlEdit";
 import { isComparableArtifact } from "@/lib/diff";
 import MarkdownBody from "./MarkdownBody";
 import { LabelEditor, ScopeEditor } from "./ChipEditors";
@@ -23,6 +24,7 @@ import { ShareModal } from "./ShareModal";
 import CreatorName from "./CreatorName";
 import WrittenViaChip from "./WrittenViaChip";
 import ArtifactEditor from "./ArtifactEditor";
+import HtmlTextEditor from "./HtmlTextEditor";
 import ArtifactCompare from "./ArtifactCompare";
 import DiagramView from "./DiagramView";
 import DiagramArtifactEditor from "./DiagramArtifactEditor";
@@ -315,7 +317,7 @@ function SlugChip({ slug, version }: { slug: string; version: number | null }) {
   return (
     <span className="inline-flex items-center overflow-hidden rounded-md border border-neutral-200 bg-white font-mono text-[11px]">
       <a
-        href={`/?slug=${encodeURIComponent(slug)}&order_by=version&order_dir=desc`}
+        href={slugVersionsHref(slug)}
         className="px-2 py-0.5 text-neutral-700 no-underline transition hover:bg-neutral-100"
         title="show every version of this slug"
       >
@@ -834,6 +836,8 @@ export default function ArtifactViewer({
   const [comparing, setComparing] = useState(false);
   // Whether the open markdown editor is in Split. Per-view, like `editing`.
   const [editorSplit, setEditorSplit] = useState(false);
+  // HTML opens in the in-place text editor; this switches it to the raw source editor.
+  const [editSource, setEditSource] = useState(false);
   // Compare mode carries its own width, defaulting to Wide (reset on every
   // open, below) so a two-pane diff always opens roomy instead of inheriting a
   // narrow single-doc width. The width control drives THIS while comparing, so
@@ -879,6 +883,7 @@ export default function ArtifactViewer({
     setEditing(false);
     setComparing(false);
     setEditorSplit(false);
+    setEditSource(false);
     // Sharing too: a modal left open across an in-place document switch would
     // keep showing the previous document's minted URL and link list while
     // artifactID underneath it points at the new one.
@@ -920,11 +925,12 @@ export default function ArtifactViewer({
     info.can_archive ?? (!!me && (hasPerm(me, "MANAGE_ARTIFACTS") || sameEmail(me.email, info.creator)));
   const isArchived = !!info.deleted_at;
   // Comments only attach to documents you can annotate: TEXT with textual
-  // content, or a PACKAGE (its HTML files get the in-page overlay). Never for
+  // content, or a PACKAGE or APP (their HTML gets the in-page overlay). Never for
   // ATTACHMENT uploads or non-text content (pdf, image, binary) — there's no
   // prose to anchor to, so the controls are turned off entirely.
   const commentable =
     info.artifact_type === "PACKAGE" ||
+    info.artifact_type === "APP" ||
     (info.artifact_type === "TEXT" && isTextualContentType(info.content_type));
   // The owner's per-doc switch, layered on top of that. Absent (an older or
   // cached payload) reads as ON — the pre-existing behavior — so a missing
@@ -1063,7 +1069,8 @@ export default function ArtifactViewer({
   // panes, squeezed into a reading column are unreadable. Both are forced transiently, the way compare mode does it, so
   // neither writes to the persisted per-doc width — a reader who prefers Narrow
   // prose still gets Narrow prose on the next markdown doc.
-  const forcedWide = isDiagram || isMap || isHTMLView || (editing && editorSplit);
+  const htmlTextEditing = editing && !editSource && isHtmlTextEditable(info, me);
+  const forcedWide = isDiagram || isMap || isHTMLView || htmlTextEditing || (editing && editorSplit);
   const effectiveWidth: Width = forcedWide ? "wide" : comparing ? compareWidth : width;
 
   // Permalink: stable, version-pinned, slug-free URL anyone can quote.
@@ -1413,6 +1420,14 @@ export default function ArtifactViewer({
                 body={body ?? ""}
                 onClose={() => setEditing(false)}
               />
+            ) : htmlTextEditing ? (
+              <HtmlTextEditor
+                key={info.artifact_id}
+                info={info}
+                zoom={textScale}
+                onClose={() => setEditing(false)}
+                onEditSource={() => setEditSource(true)}
+              />
             ) : (
               <ArtifactEditor
                 key={info.artifact_id}
@@ -1420,6 +1435,7 @@ export default function ArtifactViewer({
                 body={body ?? ""}
                 onClose={() => {
                   setEditing(false);
+                  setEditSource(false);
                   // Don't leave a stale Split flag behind. `editing &&` already
                   // keeps it from affecting the width once the editor is closed,
                   // but clearing it means reopening can't briefly force wide on
@@ -1433,7 +1449,7 @@ export default function ArtifactViewer({
             // A MAP's body is the latest frozen NDJSON snapshot, which reads
             // as a wall of JSON. The table shows live head instead; "Raw
             // Source" still shows the snapshot, same as any other type.
-            <MapTable slug={info.named_slug} snapshotBytes={info.size_bytes} />
+            <MapTable slug={info.named_slug} snapshotBytes={info.size_bytes} canWrite={canWrite && !isArchived} />
           ) : isDiagram && !original ? (
             // A diagram's stored body is JSON, but its rendered form is the
             // picture. "Raw Source" still shows the JSON, same as any other

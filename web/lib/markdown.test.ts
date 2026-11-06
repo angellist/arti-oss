@@ -140,3 +140,55 @@ describe("renderMarkdown", () => {
     expect(doc.querySelector(".mermaid[data-mermaid-placeholder]")).not.toBeNull();
   });
 });
+
+describe("renderMarkdown diff blocks", () => {
+  const src = "```diff\n--- a/a.md\n+++ b/a.md\n@@ -1,2 +1,2 @@ intro\n keep <x>\n-old\n+new\n--- removed dashes\n```\n";
+
+  it("renders a header with file and counts, and one row per line", () => {
+    const { html } = renderMarkdown(src);
+    expect(html).toContain('<span class="arti-diff-file">a.md</span>');
+    expect(html).toContain(">+1</span>");
+    expect(html).toContain(">−2</span>");
+    expect(html).toContain('arti-diff-hunk"><span class="arti-diff-gutter" aria-hidden="true"></span><span class="arti-diff-text">intro</span>');
+    expect(html).toContain('arti-diff-ctx" data-t="keep <x>"><span class="arti-diff-gutter" aria-hidden="true"></span><span class="arti-diff-text">keep &lt;x&gt;</span>');
+    expect(html).toContain('arti-diff-del"><span class="arti-diff-gutter" aria-hidden="true"></span><span class="arti-diff-text">old</span>');
+    expect(html).toContain('arti-diff-add"><span class="arti-diff-gutter" aria-hidden="true"></span><span class="arti-diff-text">new</span>');
+  });
+
+  it("treats an unpaired --- line as a removed line", () => {
+    const { html } = renderMarkdown(src);
+    expect(html).toContain('<span class="arti-diff-text">-- removed dashes</span>');
+  });
+
+  it("folds long unchanged runs into a details element", () => {
+    const ctx = Array.from({ length: 50 }, (_, i) => ` line ${i}`).join("\n");
+    const { html } = renderMarkdown("```diff\n+top\n" + ctx + "\n-bottom\n```\n");
+    expect(html).toContain('<details class="arti-diff-fold"><summary>⋯ 44 unchanged lines</summary>');
+  });
+
+  it("labels a multi-file diff by count and marks each file's start", () => {
+    const two = "```diff\ndiff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-x\n+y\ndiff --git a/b.go b/b.go\n--- a/b.go\n+++ b/b.go\n@@ -1 +1 @@\n-p\n+q\n```\n";
+    const { html } = renderMarkdown(two);
+    expect(html).toContain('<span class="arti-diff-file">2 files</span>');
+    expect(html.indexOf('arti-diff-file-row"><span class="arti-diff-gutter" aria-hidden="true"></span><span class="arti-diff-text">a.go</span>')).toBeGreaterThan(-1);
+    const b = html.indexOf('<span class="arti-diff-text">b.go</span>');
+    expect(b).toBeGreaterThan(html.indexOf('<span class="arti-diff-text">y</span>'));
+  });
+
+  it("leaves blank lines empty so copied code has no zero-width space", () => {
+    const { html } = renderMarkdown("```diff\n def f():\n\n+    return 1\n```\n");
+    expect(html).not.toContain("\u200b");
+    expect(html).toContain('<span class="arti-diff-text"></span>');
+  });
+
+  it("groups each removed run with the added run after it, and adds the view toggle", () => {
+    const { html } = renderMarkdown(src);
+    expect(html).toMatch(/<div class="arti-diff-chg"><div class="arti-diff-row arti-diff-del">.*old.*<div class="arti-diff-row arti-diff-add">.*new.*<\/div><\/div><div class="arti-diff-chg"><div class="arti-diff-row arti-diff-del">/);
+    expect(html).toContain('<button type="button" class="arti-diff-toggle" data-arti-diff-toggle=""');
+  });
+
+  it("leaves other languages alone", () => {
+    const { html } = renderMarkdown("```go\n-x\n```\n");
+    expect(html).not.toContain("arti-diff");
+  });
+});

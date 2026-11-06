@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	sqlc "github.com/angellist/arti-oss/gen/sqlc"
+	"github.com/angellist/arti-oss/internal/audit"
 	"github.com/angellist/arti-oss/internal/auth"
 	"github.com/angellist/arti-oss/internal/store/pgstore"
 )
@@ -42,6 +43,7 @@ func viewKeyOf(row sqlc.Artifact) string {
 }
 
 func (s *Service) recordView(r *http.Request, row sqlc.Artifact, viewer, surface string) {
+	audit.From(r.Context()).SetViewer(viewer)
 	if err := s.store.RecordArtifactView(r.Context(),
 		pgstore.UUIDFromPG(row.ArtifactID), viewKeyOf(row), row.Version, viewer, surface); err != nil {
 		slog.Warn("artifact view not recorded", "err", err, "surface", surface)
