@@ -16,7 +16,7 @@ default in dev — every write is attributed to `ARTI_LOCAL_EMAIL`.
 | --- | --- | --- |
 | Go | 1.25+ | `go.mod` declares `go 1.25.7`. Builds both binaries. |
 | Docker | any recent | Runs the Postgres + RustFS compose stack. |
-| Node | 22.23.5 | The web sidecar. CI runs the web checks on `node:22.23.5-alpine` (`web/Dockerfile`); see [Build & test](build-test.md#node-version). |
+| Node | 22.23.5 | Matches the web sidecar image (`web/Dockerfile`). GitHub Actions runs host-based web checks on Node 22; see [Build & test](build-test.md#node-version). |
 | `goose` | latest | DB migrations (`db/Makefile`). |
 | `sqlc` | latest | Regenerates `gen/sqlc` from SQL. |
 | `oapi-codegen` | latest | Checked by `make setup`; see the [codegen](codegen.md) caveat — the OpenAPI spec is hand-maintained, not generated. |

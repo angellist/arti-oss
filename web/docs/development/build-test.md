@@ -118,9 +118,10 @@ inside it — so a broken `next build` fails the build step.
 
 ### Node version
 
-CI runs the web checks in the `node:22.23.5-alpine` image (`web/Dockerfile`). The repo
-declares no Node version anywhere else (no `engines`, no `.nvmrc`), so use Node
-22.23.5 locally to match CI.
+GitHub Actions runs the web checks on host Node 22 (`.github/workflows/ci.yml`).
+The production web image uses `node:22.23.5-alpine` (`web/Dockerfile`); use
+Node 22.23.5 locally to match that image. The host-based checks do not build or
+verify the Docker image.
 
 ## Help diagrams (`docs-diagrams` / `docs-check`)
 
