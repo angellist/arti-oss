@@ -118,9 +118,9 @@ inside it — so a broken `next build` fails the build step.
 
 ### Node version
 
-CI runs the web checks in the `node:20-alpine` image (`web/Dockerfile`). The repo
+CI runs the web checks in the `node:22.23.5-alpine` image (`web/Dockerfile`). The repo
 declares no Node version anywhere else (no `engines`, no `.nvmrc`), so use Node
-20 locally to match CI.
+22.23.5 locally to match CI.
 
 ## Help diagrams (`docs-diagrams` / `docs-check`)
 

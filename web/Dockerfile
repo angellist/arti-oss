@@ -1,12 +1,12 @@
 # ==============================================================================
 # arti-web — Next.js sidecar
 # ==============================================================================
-FROM node:20-alpine AS deps
+FROM node:22.23.5-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-FROM node:20-alpine AS build
+FROM node:22.23.5-alpine AS build
 WORKDIR /app
 # NEXT_PUBLIC_* values are inlined at build time. The auth-disabled flag lets
 # the local-evaluation compose profile build a UI that skips the login
@@ -26,7 +26,7 @@ FROM build AS web_test
 WORKDIR /app
 CMD ["npm", "test"]
 
-FROM node:20-alpine AS web
+FROM node:22.23.5-alpine AS web
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app/.next ./.next
